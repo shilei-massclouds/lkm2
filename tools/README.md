@@ -95,11 +95,7 @@ tools/bin/modelc -o model.json model/main.spec
   "modules": [
     {"name": ["systems"]},
     {"name": ["systems", "computer"]},
-    {"name": ["systems", "human"]},
-    {"name": ["systems", "kernel"]},
-    {"name": ["systems", "opensbi"]},
-    {"name": ["systems", "riscv64_platform"]},
-    {"name": ["systems", "soc"]}
+    {"name": ["systems", "human"]}
   ],
   "schema_version": 2
 }

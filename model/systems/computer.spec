@@ -1,12 +1,17 @@
 /* Computer is the unique top-level system. */
 
+type ComputerType;
+
+object Computer: ComputerType {
+}
+
+/*
 use super::riscv64_platform::Riscv64Platform;
 use super::opensbi::OpenSBI;
 use super::kernel::Kernel;
 
 predicate computer_assembled_from<P, F, K>(platform: P, firmware: F, kernel: K) -> bool;
 
-type ComputerType;
 
 object Computer: ComputerType {
     initial_state: State::Base;
@@ -82,3 +87,5 @@ object Computer: ComputerType {
         }
     }
 }
+
+*/

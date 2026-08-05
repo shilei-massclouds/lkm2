@@ -36,10 +36,6 @@ EXPECTED_MODEL = ModelIR(
             ("systems",),
             ("systems", "computer"),
             ("systems", "human"),
-            ("systems", "kernel"),
-            ("systems", "opensbi"),
-            ("systems", "riscv64_platform"),
-            ("systems", "soc"),
         )
     ),
 )
@@ -71,30 +67,6 @@ EXPECTED_JSON = """{
       "name": [
         "systems",
         "human"
-      ]
-    },
-    {
-      "name": [
-        "systems",
-        "kernel"
-      ]
-    },
-    {
-      "name": [
-        "systems",
-        "opensbi"
-      ]
-    },
-    {
-      "name": [
-        "systems",
-        "riscv64_platform"
-      ]
-    },
-    {
-      "name": [
-        "systems",
-        "soc"
       ]
     }
   ],
