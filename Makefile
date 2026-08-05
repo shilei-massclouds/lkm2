@@ -1,28 +1,22 @@
-# Top Makefile
-
 .DEFAULT_GOAL := all
 
-.PHONY: all build run test clean help
+TOOLS_MAKE := $(MAKE) --no-print-directory -C tools
+
+.PHONY: all setup build run test clean help
 
 all: build
 
-build:
-	@echo "TODO: add build commands"
-
-run: build
-	@echo "TODO: add run commands"
-
-test: build
-	@echo "TODO: add test commands"
-
-clean:
-	@echo "TODO: add clean commands"
+setup build run test clean:
+	$(TOOLS_MAKE) $@
 
 help:
-	@echo "Available targets:"
-	@echo "  all    Build the project (default)"
-	@echo "  build  Build the project"
-	@echo "  run    Build and run the project"
-	@echo "  test   Build and run tests"
-	@echo "  clean  Remove generated files"
+	@echo "Top-level coordination targets:"
+	@echo "  all    Build all components (default)"
+	@echo "  setup  Set up component development environments"
+	@echo "  build  Build all components"
+	@echo "  run    Run the current project entry"
+	@echo "  test   Test all components"
+	@echo "  clean  Remove component build output"
 	@echo "  help   Show this help"
+	@echo
+	@$(TOOLS_MAKE) help

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lkm-model-tools"
+version = "0.1.0"
+description = "Compiler tools for LKM model specifications"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "lark>=1.3,<2",
+]
+
+[project.scripts]
+modelc = "modelc.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+modelc = ["grammar.lark"]

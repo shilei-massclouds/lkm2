@@ -1,0 +1,15 @@
+# Vim swap files
+*.swp
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+*$py.class
+/tools/.venv/
+
+# Python packaging and test output
+/tools/build/
+/tools/dist/
+/tools/src/*.egg-info/
+.coverage
+.pytest_cache/

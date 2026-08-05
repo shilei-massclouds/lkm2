@@ -1,0 +1,15 @@
+start: spec_declaration origin_declaration
+
+spec_declaration: "spec" qualified_name ";"
+origin_declaration: "origin" qualified_name ";"
+
+qualified_name: IDENTIFIER ("." IDENTIFIER)*
+
+IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/
+LINE_COMMENT: /\/\/[^\r\n]*/
+BLOCK_COMMENT: /\/\*(?s:.*?)\*\//
+
+%import common.WS
+%ignore WS
+%ignore LINE_COMMENT
+%ignore BLOCK_COMMENT
