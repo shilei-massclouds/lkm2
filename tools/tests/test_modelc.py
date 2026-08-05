@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from io import StringIO
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -15,9 +16,14 @@ sys.path.insert(0, str(SOURCE_DIRECTORY))
 
 from model_ir import (
     ModelEntry,
+    ModelExternal,
     ModelIR,
     ModelIRValidationError,
     ModelModule,
+    ModelObject,
+    ModelSignal,
+    ModelType,
+    ModelTypeExpression,
     dump_model_ir,
     load_model_ir,
 )
@@ -26,59 +32,63 @@ from modelc.cli import main
 
 
 EXPECTED_MODEL = ModelIR(
-    schema_version=2,
+    schema_version=3,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
-    modules=tuple(
-        ModelModule(name=name)
-        for name in (
-            ("systems",),
-            ("systems", "computer"),
-            ("systems", "human"),
-        )
+    modules=(
+        ModelModule(name=("systems",)),
+        ModelModule(
+            name=("systems", "computer"),
+            types=(ModelType(("systems", "computer", "ComputerType"), None),),
+            objects=(
+                ModelObject(
+                    ("systems", "computer", "Computer"),
+                    ModelTypeExpression(("ComputerType",)),
+                    None,
+                    None,
+                    None,
+                    None,
+                    (),
+                    (),
+                ),
+            ),
+        ),
+        ModelModule(
+            name=("systems", "human"),
+            externals=(
+                ModelExternal(
+                    ("systems", "human", "Human"),
+                    tuple(
+                        ModelSignal(
+                            ("systems", "human", "Human"),
+                            ("systems", "computer", "Computer"),
+                            ("Transition", name),
+                            mode,
+                        )
+                        for name, mode in (
+                            ("Preset", "drive"),
+                            ("Setup", "drive"),
+                            ("Enable", "emit"),
+                        )
+                    ),
+                ),
+            ),
+        ),
     ),
 )
 
-EXPECTED_JSON = """{
-  "entry": {
-    "origin": [
-      "systems",
-      "human",
-      "Human"
-    ],
-    "spec": [
-      "systems"
-    ]
-  },
-  "modules": [
-    {
-      "name": [
-        "systems"
-      ]
-    },
-    {
-      "name": [
-        "systems",
-        "computer"
-      ]
-    },
-    {
-      "name": [
-        "systems",
-        "human"
-      ]
-    }
-  ],
-  "schema_version": 2
-}
-"""
+_EXPECTED_STREAM = StringIO()
+dump_model_ir(EXPECTED_MODEL, _EXPECTED_STREAM)
+EXPECTED_JSON = _EXPECTED_STREAM.getvalue()
+
+DEFAULT_ENTRY = "spec root;\norigin root.Root;\n"
 
 
 @contextmanager
 def model_tree(
     files: dict[str, str | bytes],
-    entry: str = "spec root;\norigin root.Root;\n",
+    entry: str = DEFAULT_ENTRY,
 ):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
@@ -90,6 +100,8 @@ def model_tree(
             if isinstance(contents, bytes):
                 path.write_bytes(contents)
             else:
+                if relative_path == "root.spec" and entry == DEFAULT_ENTRY:
+                    contents += "\nexternal Root {}\n"
                 path.write_text(contents, encoding="utf-8")
         yield root, entry_path
 
@@ -141,12 +153,14 @@ class ParserAndCompilerTests(unittest.TestCase):
     def test_recursive_explicit_modules_and_strict_bodies(self) -> None:
         files = {
             "root.spec": """
+                external Origin {}
                 predicate text() -> bool {
                     "spec fake; use missing::Fake; { }";
                 }
                 // spec commented;
                 /* use missing::Commented; */
                 object Body: BodyType {
+                    initial_state: State::Base;
                     state State::Base {
                         invariant { "use missing::Nested; }"; }
                     }
@@ -158,7 +172,7 @@ class ParserAndCompilerTests(unittest.TestCase):
             "root/alpha/deep.spec": "object UnknownMember: MemberType {}",
             "root/orphan.spec": "spec missing_file; use bad::path::Item;",
         }
-        entry = "spec root;\norigin root.alpha.deep.UnknownMember;\n"
+        entry = "spec root;\norigin root.Origin;\n"
         with model_tree(files, entry) as (_, entry_path):
             model = compile_spec(entry_path)
 
@@ -180,8 +194,7 @@ class ParserAndCompilerTests(unittest.TestCase):
             "root/a/child.spec": "use super::super::b::FromRepeatedSuper;",
             "root/b.spec": "use self::MemberThatIsNotValidated;",
         }
-        entry = "spec root;\norigin root.a.DoesNotNeedToExist;\n"
-        with model_tree(files, entry) as (_, entry_path):
+        with model_tree(files) as (_, entry_path):
             model = compile_spec(entry_path)
         self.assertEqual(len(model.modules), 4)
 
@@ -312,35 +325,37 @@ class ModelIRJSONTests(unittest.TestCase):
         self.assertEqual(load_model_ir(StringIO(first.getvalue())), EXPECTED_MODEL)
 
     def test_loader_normalizes_module_order(self) -> None:
-        document = """{
-          "schema_version": 2,
-          "entry": {"origin": ["root", "child", "Thing"], "spec": ["root"]},
-          "modules": [
-            {"name": ["root", "child"]},
-            {"name": ["root"]}
-          ]
-        }"""
-        model = load_model_ir(StringIO(document))
+        document = json.loads(EXPECTED_JSON)
+        document["modules"].reverse()
+        model = load_model_ir(StringIO(json.dumps(document)))
         self.assertEqual(
             tuple(module.name for module in model.modules),
-            (("root",), ("root", "child")),
+            (("systems",), ("systems", "computer"), ("systems", "human")),
         )
 
     def test_invalid_documents_are_rejected(self) -> None:
+        wrong_version = json.loads(EXPECTED_JSON)
+        wrong_version["schema_version"] = 2
+        unknown_field = json.loads(EXPECTED_JSON)
+        unknown_field["extra"] = 0
+        duplicate_module = json.loads(EXPECTED_JSON)
+        duplicate_module["modules"].append(duplicate_module["modules"][0])
+        duplicate_declaration = json.loads(EXPECTED_JSON)
+        duplicate_declaration["modules"][1]["types"].append(
+            duplicate_declaration["modules"][1]["types"][0]
+        )
+        unknown_signal_target = json.loads(EXPECTED_JSON)
+        unknown_signal_target["modules"][2]["externals"][0]["signals"][0]["target"] = ["missing", "Object"]
         invalid_documents = [
             "{",
-            '{"schema_version": 1, "entry": {"origin": ["a", "X"], "spec": ["a"]}, "modules": [{"name": ["a"]}]}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "X"], "spec": ["a"]}}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "X"], "spec": ["a"]}, "modules": [{"name": ["a"]}], "extra": 0}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "X"], "spec": ["a"], "extra": 0}, "modules": [{"name": ["a"]}]}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "X"], "spec": ["a"]}, "modules": [{"name": ["a"], "extra": 0}]}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "X"], "spec": ["a"]}, "modules": [{"name": ["a"]}, {"name": ["a"]}]}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "child", "X"], "spec": ["a"]}, "modules": [{"name": ["a", "child"]}]}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "X"], "spec": ["b"]}, "modules": [{"name": ["a"]}]}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "missing", "X"], "spec": ["a"]}, "modules": [{"name": ["a"]}]}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "X"], "spec": ["a"]}, "modules": [{"name": ["not-valid"]}]}',
-            '{"schema_version": true, "entry": {"origin": ["a", "X"], "spec": ["a"]}, "modules": [{"name": ["a"]}]}',
-            '{"schema_version": 2, "entry": {"origin": ["a", "X"], "spec": ["a"]}, "modules": "a"}',
+            json.dumps(wrong_version),
+            json.dumps(unknown_field),
+            json.dumps(duplicate_module),
+            json.dumps(duplicate_declaration),
+            json.dumps(unknown_signal_target),
+            EXPECTED_JSON.replace('"schema_version": 3', '"schema_version": true'),
+            EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
+            '{"schema_version":3,"schema_version":3}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -349,20 +364,17 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=2,
-            entry=ModelEntry(origin=("root", "child", "X"), spec=("root",)),
-            modules=(
-                ModelModule(name=("root", "child")),
-                ModelModule(name=("root",)),
-            ),
+            schema_version=3,
+            entry=EXPECTED_MODEL.entry,
+            modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
-        self.assertEqual(model.modules[0].name, ("root",))
+        self.assertEqual(model.modules[0].name, ("systems",))
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=2,
-                entry=ModelEntry(origin=("root", "X"), spec=("root",)),
-                modules=(ModelModule(name=("root",)), ModelModule(name=("root",))),
+                schema_version=3,
+                entry=EXPECTED_MODEL.entry,
+                modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
 
@@ -444,10 +456,24 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.stdout, EXPECTED_JSON)
         self.assertEqual(result.stderr, "")
 
-    def test_argument_errors_exit_two(self) -> None:
+    def test_wrapper_defaults_work_outside_repository(self) -> None:
         wrapper = REPOSITORY / "tools" / "bin" / "modelc"
         result = subprocess.run(
             [str(wrapper)],
+            cwd=tempfile.gettempdir(),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, EXPECTED_JSON)
+        self.assertEqual(result.stderr, "")
+
+    def test_argument_errors_exit_two(self) -> None:
+        wrapper = REPOSITORY / "tools" / "bin" / "modelc"
+        result = subprocess.run(
+            [str(wrapper), "first.spec", "second.spec"],
             text=True,
             encoding="utf-8",
             capture_output=True,

@@ -41,6 +41,7 @@ class UseDeclaration:
 class ParsedModule:
     declarations: tuple[ModuleDeclaration, ...]
     uses: tuple[UseDeclaration, ...]
+    tree: Tree
 
 
 def _load_parser() -> Lark:
@@ -254,4 +255,4 @@ def parse_module(source: str, path: str | Path) -> ParsedModule:
                 )
             )
 
-    return ParsedModule(tuple(declarations), tuple(uses))
+    return ParsedModule(tuple(declarations), tuple(uses), tree)

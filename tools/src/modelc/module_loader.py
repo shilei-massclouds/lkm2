@@ -5,26 +5,32 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from lark import Tree
+
 from .ast import ModelSpec
 from .diagnostics import error
 from .module_parser import Location, UseDeclaration, parse_module
 
 
 @dataclass(frozen=True, slots=True)
-class _LoadedModule:
+class LoadedModule:
     name: tuple[str, ...]
     path: Path
     uses: tuple[UseDeclaration, ...]
+    tree: Tree
 
 
 class _ModuleGraphLoader:
     def __init__(self, entry_path: Path) -> None:
         self.entry_path = entry_path
-        self.modules: dict[tuple[str, ...], _LoadedModule] = {}
-        self.load_order: list[_LoadedModule] = []
+        self.modules: dict[tuple[str, ...], LoadedModule] = {}
+        self.load_order: list[LoadedModule] = []
         self.physical_files: dict[tuple[int, int], tuple[str, ...]] = {}
 
     def load(self, document: ModelSpec) -> tuple[tuple[str, ...], ...]:
+        return tuple(module.name for module in self.load_sources(document))
+
+    def load_sources(self, document: ModelSpec) -> tuple[LoadedModule, ...]:
         root_name = document.spec.name.parts
         root_path = self.entry_path.parent / f"{root_name[0]}.spec"
         span = document.spec.span
@@ -35,7 +41,7 @@ class _ModuleGraphLoader:
             Location(span.start_line, span.start_column),
         )
         self._resolve_uses()
-        return tuple(sorted(self.modules))
+        return tuple(self.modules[name] for name in sorted(self.modules))
 
     def _load_module(
         self,
@@ -74,7 +80,7 @@ class _ModuleGraphLoader:
             raise error(path, 1, 1, exc.strerror or str(exc)) from exc
 
         parsed = parse_module(source, path)
-        loaded = _LoadedModule(name, path, parsed.uses)
+        loaded = LoadedModule(name, path, parsed.uses, parsed.tree)
         self.physical_files[identity] = name
         self.modules[name] = loaded
         self.load_order.append(loaded)
@@ -117,7 +123,7 @@ class _ModuleGraphLoader:
                 imported_names.add(local_name)
 
     def _resolve_use(
-        self, module: _LoadedModule, declaration: UseDeclaration
+        self, module: LoadedModule, declaration: UseDeclaration
     ) -> tuple[tuple[str, ...], str]:
         parts = declaration.parts
         first = parts[0]
@@ -173,3 +179,34 @@ def load_module_graph(
     """Load all explicitly declared modules and validate their simple imports."""
 
     return _ModuleGraphLoader(entry_path).load(document)
+
+
+def load_module_sources(
+    entry_path: Path, document: ModelSpec
+) -> tuple[LoadedModule, ...]:
+    """Load validated modules together with their syntax trees and source paths."""
+
+    return _ModuleGraphLoader(entry_path).load_sources(document)
+
+
+def resolve_use_name(
+    module_name: tuple[str, ...], declaration: UseDeclaration
+) -> tuple[str, tuple[str, ...]]:
+    """Resolve one already-validated use declaration to local and absolute names."""
+
+    parts = declaration.parts
+    cursor = 0
+    if parts[0] == "crate":
+        base: tuple[str, ...] = ()
+        cursor = 1
+    elif parts[0] == "self":
+        base = module_name
+        cursor = 1
+    elif parts[0] == "super":
+        while cursor < len(parts) and parts[cursor] == "super":
+            cursor += 1
+        base = module_name[: len(module_name) - cursor]
+    else:
+        base = ()
+    remainder = parts[cursor:]
+    return remainder[-1], base + remainder

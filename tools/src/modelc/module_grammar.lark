@@ -76,26 +76,30 @@ qualified_identifier: IDENTIFIER ("::" IDENTIFIER)*
 
 expression_statement: expression ";"
 ?expression: disjunction
-?disjunction: conjunction ("||" conjunction)*
-?conjunction: comparison ("&&" comparison)*
+?disjunction: conjunction (OR_OPERATOR conjunction)*
+?conjunction: comparison (AND_OPERATOR comparison)*
 ?comparison: sum (COMPARISON_OPERATOR sum)?
 ?sum: product (ADD_OPERATOR product)*
 ?product: unary (MULTIPLY_OPERATOR unary)*
 ?unary: UNARY_OPERATOR unary | postfix_expression
 ?postfix_expression: primary postfix_operation*
 ?primary: IDENTIFIER | DECIMAL_INTEGER | STRING | "(" expression ")"
-?postfix_operation: "." IDENTIFIER
-                  | "::" IDENTIFIER
-                  | "[" expression "]"
-                  | "(" arguments? ")"
+postfix_operation: "." IDENTIFIER       -> member_operation
+                 | "::" IDENTIFIER      -> path_operation
+                 | "[" expression "]"   -> index_operation
+                 | "(" arguments? ")"  -> call_operation
 arguments: expression ("," expression)* ","?
 assignable_expression: IDENTIFIER assignable_operation*
-?assignable_operation: "." IDENTIFIER | "::" IDENTIFIER | "[" expression "]"
+assignable_operation: "." IDENTIFIER       -> member_operation
+                    | "::" IDENTIFIER      -> path_operation
+                    | "[" expression "]"   -> index_operation
 
 COMPARISON_OPERATOR: "==" | "!=" | ">=" | "<=" | ">" | "<"
 ADD_OPERATOR: "+" | "-"
 MULTIPLY_OPERATOR: "*" | "/" | "%"
 UNARY_OPERATOR: "!" | "-"
+OR_OPERATOR: "||"
+AND_OPERATOR: "&&"
 IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/
 DECIMAL_INTEGER: /[0-9]+/
 STRING: /"([^"\\\r\n]|\\.)*"/

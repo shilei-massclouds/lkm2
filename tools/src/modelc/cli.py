@@ -13,11 +13,13 @@ from .compiler import compile_spec
 from .diagnostics import CompilationError, Diagnostic
 
 
-def _argument_parser() -> argparse.ArgumentParser:
+def _argument_parser(default_input: Path) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="modelc", description="Compile an LKM model entry specification"
     )
-    parser.add_argument("input", type=Path, metavar="INPUT")
+    parser.add_argument(
+        "input", type=Path, nargs="?", default=default_input, metavar="INPUT"
+    )
     parser.add_argument("-o", "--output", type=Path, metavar="OUTPUT")
     return parser
 
@@ -26,8 +28,12 @@ def _report(diagnostic: Diagnostic, stream: TextIO) -> None:
     print(diagnostic.format(), file=stream)
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = _argument_parser().parse_args(argv)
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    default_input: Path = Path("model/main.spec"),
+) -> int:
+    args = _argument_parser(default_input).parse_args(argv)
 
     try:
         model = compile_spec(args.input)
