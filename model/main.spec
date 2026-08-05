@@ -4,4 +4,4 @@
 
 spec systems;
 
-origin systems.Human;
+origin systems.human.Human;

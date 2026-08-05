@@ -1,8 +1,6 @@
 /* Human is an external source of signal. */
 
-spec computer;
-
-use computer.Computer;
+use super::computer::Computer;
 
 external Human {
     drives {

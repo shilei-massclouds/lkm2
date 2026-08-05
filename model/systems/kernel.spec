@@ -1,11 +1,5 @@
 /* Kernel specification, image construction, runtime handoff, and phase composition. */
 
-include "../phases/boot/main.spec";
-include "../phases/interrupt/main.spec";
-include "../flows/boot_init_flow/main.spec";
-include "../phases/smp-runtime/main.spec";
-include "../phases/payload/main.spec";
-
 predicate linux_riscv64_kernel_boot_spec_available() -> bool;
 predicate linux_riscv64_kernel_boot_spec_adopted() -> bool;
 predicate linux_riscv64_kernel_a0_hartid_required() -> bool;

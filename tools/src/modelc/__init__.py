@@ -7,7 +7,7 @@ from .ast import (
     SourceSpan,
     SpecDeclaration,
 )
-from .compiler import compile_ast, compile_spec
+from .compiler import compile_spec
 from .diagnostics import CompilationError, Diagnostic
 from .parser import parse_spec
 
@@ -19,7 +19,6 @@ __all__ = [
     "QualifiedName",
     "SourceSpan",
     "SpecDeclaration",
-    "compile_ast",
     "compile_spec",
     "parse_spec",
 ]

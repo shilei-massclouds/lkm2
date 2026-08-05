@@ -1,25 +1,29 @@
-"""Public compilation pipeline from source text to the minimal Model IR."""
+"""Compilation pipeline from a crate-root specification to Model IR."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from model_ir import ModelEntry, ModelIR
+from model_ir import SCHEMA_VERSION, ModelEntry, ModelIR, ModelModule
 
 from .ast import ModelSpec
 from .diagnostics import error
+from .module_loader import load_module_graph
 from .parser import parse_spec
 
 
-def compile_ast(document: ModelSpec) -> ModelIR:
-    """Lower an entry-file AST into the first-version Model IR."""
+def _lower_ast(
+    document: ModelSpec, module_names: tuple[tuple[str, ...], ...]
+) -> ModelIR:
+    """Lower a validated entry AST and module graph into Model IR."""
 
     return ModelIR(
-        schema_version=1,
+        schema_version=SCHEMA_VERSION,
         entry=ModelEntry(
             origin=document.origin.name.parts,
             spec=document.spec.name.parts,
         ),
+        modules=tuple(ModelModule(name=name) for name in module_names),
     )
 
 
@@ -34,4 +38,16 @@ def compile_spec(path: str | Path) -> ModelIR:
     except OSError as exc:
         message = exc.strerror or str(exc)
         raise error(source_path, 1, 1, message) from exc
-    return compile_ast(parse_spec(source, source_path))
+    document = parse_spec(source, source_path)
+    module_names = load_module_graph(source_path, document)
+    origin_module = document.origin.name.parts[:-1]
+    if origin_module not in set(module_names):
+        span = document.origin.name.span
+        rendered = ".".join(origin_module) or "<crate>"
+        raise error(
+            source_path,
+            span.start_line,
+            span.start_column,
+            f"origin module {rendered!r} is not declared",
+        )
+    return _lower_ast(document, module_names)

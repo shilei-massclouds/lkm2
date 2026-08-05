@@ -1,8 +1,8 @@
 /* Computer is the unique top-level system. */
 
-use riscv64_platform::Riscv64Platform;
-use opensbi::OpenSBI;
-use kernel::Kernel;
+use super::riscv64_platform::Riscv64Platform;
+use super::opensbi::OpenSBI;
+use super::kernel::Kernel;
 
 predicate computer_assembled_from<P, F, K>(platform: P, firmware: F, kernel: K) -> bool;
 

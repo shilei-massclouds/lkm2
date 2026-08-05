@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, TextIO
 
-from .model import ModelEntry, ModelIR, ModelIRValidationError
+from .model import ModelEntry, ModelIR, ModelIRValidationError, ModelModule
 
 
 def _require_object(
@@ -45,7 +45,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one version-one Model IR JSON document."""
+    """Load and strictly validate one version-two Model IR JSON document."""
 
     try:
         raw = json.load(stream, parse_constant=_reject_constant)
@@ -55,7 +55,7 @@ def load_model_ir(stream: TextIO) -> ModelIR:
         ) from exc
 
     document = _require_object(
-        raw, frozenset({"schema_version", "entry"}), "document"
+        raw, frozenset({"schema_version", "entry", "modules"}), "document"
     )
     schema_version = document["schema_version"]
     if type(schema_version) is not int:
@@ -64,12 +64,29 @@ def load_model_ir(stream: TextIO) -> ModelIR:
     entry_data = _require_object(
         document["entry"], frozenset({"origin", "spec"}), "entry"
     )
+    modules_data = document["modules"]
+    if type(modules_data) is not list:
+        raise ModelIRValidationError("modules must be an array")
+    modules: list[ModelModule] = []
+    for index, module_value in enumerate(modules_data):
+        module_data = _require_object(
+            module_value, frozenset({"name"}), f"modules[{index}]"
+        )
+        modules.append(
+            ModelModule(
+                name=_load_qualified_name(
+                    module_data["name"], f"modules[{index}].name"
+                )
+            )
+        )
+
     return ModelIR(
         schema_version=schema_version,
         entry=ModelEntry(
             origin=_load_qualified_name(entry_data["origin"], "entry.origin"),
             spec=_load_qualified_name(entry_data["spec"], "entry.spec"),
         ),
+        modules=tuple(modules),
     )
 
 
@@ -84,6 +101,7 @@ def dump_model_ir(model: ModelIR, stream: TextIO) -> None:
             "origin": list(model.entry.origin),
             "spec": list(model.entry.spec),
         },
+        "modules": [{"name": list(module.name)} for module in model.modules],
     }
     json.dump(data, stream, ensure_ascii=False, indent=2, sort_keys=True)
     stream.write("\n")

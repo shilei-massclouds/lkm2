@@ -22,4 +22,4 @@ package-dir = {"" = "src"}
 where = ["src"]
 
 [tool.setuptools.package-data]
-modelc = ["grammar.lark"]
+modelc = ["grammar.lark", "module_grammar.lark"]

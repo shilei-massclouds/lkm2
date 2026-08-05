@@ -1,8 +1,9 @@
 start: spec_declaration origin_declaration
 
-spec_declaration: "spec" qualified_name ";"
+spec_declaration: "spec" module_name ";"
 origin_declaration: "origin" qualified_name ";"
 
+module_name: IDENTIFIER
 qualified_name: IDENTIFIER ("." IDENTIFIER)*
 
 IDENTIFIER: /[A-Za-z_][A-Za-z0-9_]*/

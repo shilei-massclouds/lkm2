@@ -41,6 +41,9 @@ def _span(meta: Meta) -> SourceSpan:
 
 @v_args(meta=True)
 class _ASTBuilder(Transformer[Any, Any]):
+    def module_name(self, meta: Meta, children: list[Any]) -> QualifiedName:
+        return QualifiedName(tuple(str(child) for child in children), _span(meta))
+
     def qualified_name(self, meta: Meta, children: list[Any]) -> QualifiedName:
         return QualifiedName(tuple(str(child) for child in children), _span(meta))
 
