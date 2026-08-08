@@ -5,9 +5,9 @@
 当前工具链处理流程为：
 
 ```text
-model/main.spec → entry AST → recursive module graph → Model IR v3 → canonical JSON
+model/main.spec → entry AST → recursive module graph → Model IR v4 → canonical JSON
 entry external signals → tools/build/derive/main.sequence.json
-Model IR v3 + derivation sequence → derive → canonical result JSON
+Model IR v4 + external-root sequence v2 → derive → result JSON v2 / human stdout
 ```
 
 入口只接受一条简单的 `spec IDENT;` 后接一条点分
@@ -17,7 +17,7 @@ Model IR v3 + derivation sequence → derive → canonical result JSON
 也不使用 `<module>/main.spec`。
 
 模块文件必须完整符合 [`module_grammar.lark`](src/modelc/module_grammar.lark)
-定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v3 lowering
+定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v4 lowering
 保留 predicate、type、object、external、state、handler、deferred 和通用表达式树。
 `use` 支持 `crate`、`self`、连续
 `super` 和 crate-root 裸路径；它只导入名字，不触发文件装载。当前会验证
@@ -51,6 +51,8 @@ make -C tools setup
 ```sh
 make build  # Python 源码编译检查并更新持久化 Model IR 缓存
 make test   # 运行 unittest 测试
+make test-derive  # 运行 derive 单元测试和 golden 冒烟测试
+make test-smoke   # 只运行 derive golden 冒烟案例
 make run    # 以 model/main.spec 为默认模型执行 tools/bin/derive
 ```
 
@@ -87,8 +89,8 @@ make run SEQUENCE=tools/build/derive/main.sequence.json
 激活虚拟环境后，也可以直接使用安装生成的 `modelc` 和 `derive` 命令。
 `--model` 接受 `.spec` 或 Model IR JSON，并从 entry external 的信号生成默认序列；
 `--sequence` 使用默认的 `model/main.spec`。两者互斥。成功退出 0，路径推导失败或
-输入失败退出 1，参数错误退出 2。路径推导结果（包括失败结果）写 stdout，输入和
-编译诊断写 stderr。
+输入失败退出 1，参数错误退出 2。人类可读的推导过程（包括语义失败）写 stdout，
+输入和编译诊断写 stderr。
 
 ## Model IR、推导和缓存
 
@@ -100,11 +102,15 @@ manifest 记录入口和全部已声明源文件的 SHA-256、grammar/modelc/mod
 IR schema 版本；完全命中并能严格加载缓存 IR 时不会改写文件。`make clean` 删除
 该缓存。
 
-推导序列 schema v1 的每个事件显式指定 `source`、`target`、`signal` 和 `mode`。
-derive v1 只执行 transition 与 drives/emits；attrs、reference、invariant、action、
-depends_on、may_change、ensures 和 deferred 会得到 `unsupported_feature`，不会被
-静默忽略。当前 Computer 没有 handler，因此仓库序列在事件 0 稳定返回
-`unhandled_signal`，`make run` 的预期退出码为 1。
+推导序列 schema v2 的每个事件显式指定 `source`、`target`、`signal` 和 `mode`，
+但 sequence 只选择外部根信号；drives 与 emits 由引擎按因果关系自动调度。
+结果 JSON schema v2 记录嵌套推导单元、逐项条件、最终状态和 predicate facts；
+`dump_derivation_result()` 提供规范 JSON，CLI 默认使用人类 renderer。当前支持
+Transition 与 Action 信号、对象状态比较、布尔组合、depends_on、drives、ensures、
+establishes、状态 invariant 和深度优先 emits；Action 提交事实但不改变状态。
+attrs、reference、may_change、deferred 及其他表达式会明确返回
+`unsupported_feature`。当前 Computer 没有 handler，因此仓库序列在第一个根
+信号稳定返回 `unhandled_signal`，`make run` 的预期退出码为 1。
 
 公共库接口为：
 
@@ -114,7 +120,9 @@ depends_on、may_change、ensures 和 deferred 会得到 `unsupported_feature`�
 - `derive.derive()`
 - `derive.load_derivation_sequence()`
 - `derive.dump_derivation_result()`
+- `derive.load_derivation_result()`
+- `derive.render_derivation_result()`
 
-AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v3
+AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v4
 loader 严格拒绝旧版本、未知字段、重复声明、无效状态引用、重复 handler 和未知
 信号目标，并规范排序模块和声明。

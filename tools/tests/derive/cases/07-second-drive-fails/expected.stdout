@@ -1,0 +1,11 @@
+root Human -> Parent: Transition::Start
+  enter State::Idle
+  handler Transition::Start -> State::Done
+  drive Parent -> First: Transition::Work
+    enter State::Idle
+    handler Transition::Work -> State::Done
+  First: State::Idle → State::Done
+  drive Parent -> Second: Transition::Work
+    enter State::Idle
+    handler Transition::Work ✗
+stopped: unhandled_signal

@@ -1,0 +1,163 @@
+{
+  "facts": [],
+  "failure": {
+    "code": "unhandled_signal",
+    "features": [],
+    "message": "target object has no matching transition handler in its current state",
+    "path": "units[0].drives[1].handler"
+  },
+  "final_state": [
+    {
+      "object": [
+        "root",
+        "First"
+      ],
+      "state": [
+        "State",
+        "Done"
+      ]
+    },
+    {
+      "object": [
+        "root",
+        "Parent"
+      ],
+      "state": [
+        "State",
+        "Idle"
+      ]
+    },
+    {
+      "object": [
+        "root",
+        "Second"
+      ],
+      "state": [
+        "State",
+        "Idle"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "status": "unhandled_signal",
+  "units": [
+    {
+      "candidate_state": [
+        "State",
+        "Done"
+      ],
+      "depends_on": [],
+      "drives": [
+        {
+          "candidate_state": [
+            "State",
+            "Done"
+          ],
+          "depends_on": [],
+          "drives": [],
+          "emits": [],
+          "ensures": [],
+          "establishes": [],
+          "event": {
+            "mode": "drive",
+            "signal": [
+              "Transition",
+              "Work"
+            ],
+            "source": [
+              "root",
+              "Parent"
+            ],
+            "target": [
+              "root",
+              "First"
+            ]
+          },
+          "handler": [
+            "Transition",
+            "Work"
+          ],
+          "invariants": [],
+          "kind": "drive",
+          "state_after": [
+            "State",
+            "Done"
+          ],
+          "state_before": [
+            "State",
+            "Idle"
+          ],
+          "status": "passed"
+        },
+        {
+          "candidate_state": null,
+          "depends_on": [],
+          "drives": [],
+          "emits": [],
+          "ensures": [],
+          "establishes": [],
+          "event": {
+            "mode": "drive",
+            "signal": [
+              "Transition",
+              "Work"
+            ],
+            "source": [
+              "root",
+              "Parent"
+            ],
+            "target": [
+              "root",
+              "Second"
+            ]
+          },
+          "failure": {
+            "code": "unhandled_signal",
+            "features": [],
+            "message": "target object has no matching transition handler in its current state",
+            "path": "units[0].drives[1].handler"
+          },
+          "handler": null,
+          "invariants": [],
+          "kind": "drive",
+          "state_after": null,
+          "state_before": [
+            "State",
+            "Idle"
+          ],
+          "status": "unhandled_signal"
+        }
+      ],
+      "emits": [],
+      "ensures": [],
+      "establishes": [],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Transition",
+          "Start"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Parent"
+        ]
+      },
+      "handler": [
+        "Transition",
+        "Start"
+      ],
+      "invariants": [],
+      "kind": "root",
+      "state_after": null,
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "stopped"
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+object Child: T {
+    initial_state: State::Idle;
+    state State::Idle {
+        transitions { on Transition::Work -> State::Done {} }
+    }
+    state State::Done {}
+}
+object Parent: T {
+    initial_state: State::Idle;
+    state State::Idle {
+        transitions {
+            on Transition::Start -> State::Done {
+                drives { Child.Transition::Work; }
+            }
+        }
+    }
+    state State::Done {}
+}
+external Human { drives { Parent.Transition::Start; } }

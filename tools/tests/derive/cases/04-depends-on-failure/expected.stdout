@@ -1,0 +1,5 @@
+root Human -> Computer: Transition::Go
+  enter State::Idle
+  handler Transition::Go -> State::Ready
+  depends_on Gate == State::Ready ✗
+stopped: depends_on_failed

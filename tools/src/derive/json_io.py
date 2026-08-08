@@ -1,19 +1,24 @@
-"""Strict JSON boundaries for derivation sequence schema v1 and result schema v1."""
+"""Strict JSON boundaries for sequence schema v2 and result schema v2."""
 
 from __future__ import annotations
 
 import json
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO, TypeVar
 
 from .model import (
+    DerivationCheck,
     DerivationEvent,
+    DerivationFact,
     DerivationFailure,
     DerivationResult,
     DerivationSequence,
     DerivationState,
-    DerivationTraceStep,
+    DerivationUnit,
     DerivationValidationError,
 )
+
+
+T = TypeVar("T")
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -25,15 +30,22 @@ def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _object(value: object, fields: frozenset[str], path: str) -> dict[str, Any]:
+def _object(
+    value: object,
+    required: frozenset[str],
+    path: str,
+    optional: frozenset[str] = frozenset(),
+) -> dict[str, Any]:
     if type(value) is not dict:
         raise DerivationValidationError(f"{path} must be an object")
-    missing = sorted(fields - set(value))
+    missing = sorted(required - set(value))
     if missing:
         raise DerivationValidationError(f"{path} is missing field {missing[0]!r}")
-    unknown = sorted(set(value) - fields)
+    unknown = sorted(set(value) - required - optional)
     if unknown:
-        raise DerivationValidationError(f"{path} contains unknown field {unknown[0]!r}")
+        raise DerivationValidationError(
+            f"{path} contains unknown field {unknown[0]!r}"
+        )
     return value
 
 
@@ -43,14 +55,32 @@ def _string(value: object, path: str) -> str:
     return value
 
 
-def _name(value: object, path: str) -> tuple[str, ...]:
+def _integer(value: object, path: str) -> int:
+    if type(value) is not int:
+        raise DerivationValidationError(f"{path} must be an integer")
+    return value
+
+
+def _array(
+    value: object, path: str, loader: Callable[[object, str], T]
+) -> tuple[T, ...]:
     if type(value) is not list:
-        raise DerivationValidationError(f"{path} must be an array of identifiers")
-    return tuple(_string(item, f"{path}[{index}]") for index, item in enumerate(value))
+        raise DerivationValidationError(f"{path} must be an array")
+    return tuple(loader(item, f"{path}[{index}]") for index, item in enumerate(value))
+
+
+def _name(value: object, path: str) -> tuple[str, ...]:
+    return _array(value, path, _string)
+
+
+def _optional_name(value: object, path: str) -> tuple[str, ...] | None:
+    return None if value is None else _name(value, path)
 
 
 def _event(value: object, path: str) -> DerivationEvent:
-    data = _object(value, frozenset({"source", "target", "signal", "mode"}), path)
+    data = _object(
+        value, frozenset({"source", "target", "signal", "mode"}), path
+    )
     return DerivationEvent(
         source=_name(data["source"], f"{path}.source"),
         target=_name(data["target"], f"{path}.target"),
@@ -61,7 +91,13 @@ def _event(value: object, path: str) -> DerivationEvent:
 
 def _load_json(stream: TextIO) -> object:
     try:
-        return json.load(stream, parse_constant=lambda value: (_ for _ in ()).throw(DerivationValidationError(f"invalid JSON constant {value!r}")), object_pairs_hook=_pairs)
+        return json.load(
+            stream,
+            parse_constant=lambda value: (_ for _ in ()).throw(
+                DerivationValidationError(f"invalid JSON constant {value!r}")
+            ),
+            object_pairs_hook=_pairs,
+        )
     except json.JSONDecodeError as exc:
         raise DerivationValidationError(
             f"invalid JSON at line {exc.lineno}, column {exc.colno}: {exc.msg}"
@@ -73,131 +109,198 @@ def load_derivation_sequence(stream: TextIO) -> DerivationSequence:
 
     raw = _load_json(stream)
     document = _object(raw, frozenset({"schema_version", "events"}), "document")
-    version = document["schema_version"]
-    if type(version) is not int:
-        raise DerivationValidationError("schema_version must be an integer")
-    events = document["events"]
-    if type(events) is not list:
-        raise DerivationValidationError("events must be an array")
-    return DerivationSequence(version, tuple(_event(item, f"events[{index}]") for index, item in enumerate(events)))
+    return DerivationSequence(
+        _integer(document["schema_version"], "schema_version"),
+        _array(document["events"], "events", _event),
+    )
 
 
 def _failure(value: object, path: str) -> DerivationFailure:
-    data = _object(value, frozenset({"code", "event_index", "message", "features"}), path)
-    index = data["event_index"]
-    if index is not None and type(index) is not int:
-        raise DerivationValidationError(f"{path}.event_index must be an integer or null")
-    features = data["features"]
-    if type(features) is not list:
-        raise DerivationValidationError(f"{path}.features must be an array")
+    data = _object(
+        value, frozenset({"code", "path", "message", "features"}), path
+    )
     return DerivationFailure(
         _string(data["code"], f"{path}.code"),
-        index,
+        _string(data["path"], f"{path}.path"),
         _string(data["message"], f"{path}.message"),
-        tuple(_string(item, f"{path}.features[{i}]") for i, item in enumerate(features)),
+        _array(data["features"], f"{path}.features", _string),
+    )
+
+
+def _check(value: object, path: str) -> DerivationCheck:
+    data = _object(value, frozenset({"expression", "status"}), path)
+    return DerivationCheck(
+        _string(data["expression"], f"{path}.expression"),
+        _string(data["status"], f"{path}.status"),
+    )
+
+
+def _fact(value: object, path: str) -> DerivationFact:
+    data = _object(value, frozenset({"predicate", "arguments"}), path)
+    return DerivationFact(
+        _name(data["predicate"], f"{path}.predicate"),
+        _array(data["arguments"], f"{path}.arguments", _string),
+    )
+
+
+def _state(value: object, path: str) -> DerivationState:
+    data = _object(value, frozenset({"object", "state"}), path)
+    return DerivationState(
+        _name(data["object"], f"{path}.object"),
+        _optional_name(data["state"], f"{path}.state"),
+    )
+
+
+def _unit(value: object, path: str) -> DerivationUnit:
+    data = _object(
+        value,
+        frozenset(
+            {
+                "kind",
+                "event",
+                "state_before",
+                "handler",
+                "candidate_state",
+                "depends_on",
+                "drives",
+                "ensures",
+                "establishes",
+                "invariants",
+                "state_after",
+                "emits",
+                "status",
+            }
+        ),
+        path,
+        frozenset({"failure"}),
+    )
+    return DerivationUnit(
+        kind=_string(data["kind"], f"{path}.kind"),
+        event=_event(data["event"], f"{path}.event"),
+        state_before=_optional_name(data["state_before"], f"{path}.state_before"),
+        handler=_optional_name(data["handler"], f"{path}.handler"),
+        candidate_state=_optional_name(
+            data["candidate_state"], f"{path}.candidate_state"
+        ),
+        depends_on=_array(data["depends_on"], f"{path}.depends_on", _check),
+        drives=_array(data["drives"], f"{path}.drives", _unit),
+        ensures=_array(data["ensures"], f"{path}.ensures", _check),
+        establishes=_array(data["establishes"], f"{path}.establishes", _check),
+        invariants=_array(data["invariants"], f"{path}.invariants", _check),
+        state_after=_optional_name(data["state_after"], f"{path}.state_after"),
+        emits=_array(data["emits"], f"{path}.emits", _unit),
+        status=_string(data["status"], f"{path}.status"),
+        failure=None
+        if "failure" not in data
+        else _failure(data["failure"], f"{path}.failure"),
     )
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and validate one result document (primarily for round-trip tests)."""
+    """Load and strictly validate one schema-v2 result document."""
 
     raw = _load_json(stream)
     document = _object(
         raw,
-        frozenset({"schema_version", "status", "trace", "final_state", "pending_signals", "failure"}),
+        frozenset({"schema_version", "status", "units", "final_state", "facts"}),
         "document",
+        frozenset({"failure"}),
     )
-    version = document["schema_version"]
-    if type(version) is not int:
-        raise DerivationValidationError("schema_version must be an integer")
-    trace_data = document["trace"]
-    if type(trace_data) is not list:
-        raise DerivationValidationError("trace must be an array")
-    trace = []
-    for i, item in enumerate(trace_data):
-        path = f"trace[{i}]"
-        data = _object(item, frozenset({"index", "event", "state_before", "state_after", "status", "generated"}), path)
-        generated = data["generated"]
-        if type(generated) is not list:
-            raise DerivationValidationError(f"{path}.generated must be an array")
-        index = data["index"]
-        if type(index) is not int:
-            raise DerivationValidationError(f"{path}.index must be an integer")
-        trace.append(
-            DerivationTraceStep(
-                index,
-                _event(data["event"], f"{path}.event"),
-                None if data["state_before"] is None else _name(data["state_before"], f"{path}.state_before"),
-                None if data["state_after"] is None else _name(data["state_after"], f"{path}.state_after"),
-                _string(data["status"], f"{path}.status"),
-                tuple(_event(event, f"{path}.generated[{j}]") for j, event in enumerate(generated)),
-            )
-        )
-    state_data = document["final_state"]
-    if type(state_data) is not list:
-        raise DerivationValidationError("final_state must be an array")
-    states = []
-    for i, item in enumerate(state_data):
-        path = f"final_state[{i}]"
-        data = _object(item, frozenset({"object", "state"}), path)
-        states.append(DerivationState(_name(data["object"], f"{path}.object"), None if data["state"] is None else _name(data["state"], f"{path}.state")))
-    pending = document["pending_signals"]
-    if type(pending) is not list:
-        raise DerivationValidationError("pending_signals must be an array")
-    failure_data = document["failure"]
     return DerivationResult(
-        version,
-        _string(document["status"], "status"),
-        tuple(trace),
-        tuple(states),
-        tuple(_event(item, f"pending_signals[{i}]") for i, item in enumerate(pending)),
-        None if failure_data is None else _failure(failure_data, "failure"),
+        schema_version=_integer(document["schema_version"], "schema_version"),
+        status=_string(document["status"], "status"),
+        units=_array(document["units"], "units", _unit),
+        final_state=_array(document["final_state"], "final_state", _state),
+        facts=_array(document["facts"], "facts", _fact),
+        failure=None
+        if "failure" not in document
+        else _failure(document["failure"], "failure"),
     )
 
 
 def _event_data(event: DerivationEvent) -> dict[str, Any]:
-    return {"source": list(event.source), "target": list(event.target), "signal": list(event.signal), "mode": event.mode}
+    return {
+        "source": list(event.source),
+        "target": list(event.target),
+        "signal": list(event.signal),
+        "mode": event.mode,
+    }
+
+
+def _failure_data(failure: DerivationFailure) -> dict[str, Any]:
+    return {
+        "code": failure.code,
+        "path": failure.path,
+        "message": failure.message,
+        "features": list(failure.features),
+    }
+
+
+def _check_data(check: DerivationCheck) -> dict[str, Any]:
+    return {"expression": check.expression, "status": check.status}
+
+
+def _unit_data(unit: DerivationUnit) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "kind": unit.kind,
+        "event": _event_data(unit.event),
+        "state_before": None if unit.state_before is None else list(unit.state_before),
+        "handler": None if unit.handler is None else list(unit.handler),
+        "candidate_state": (
+            None if unit.candidate_state is None else list(unit.candidate_state)
+        ),
+        "depends_on": [_check_data(item) for item in unit.depends_on],
+        "drives": [_unit_data(item) for item in unit.drives],
+        "ensures": [_check_data(item) for item in unit.ensures],
+        "establishes": [_check_data(item) for item in unit.establishes],
+        "invariants": [_check_data(item) for item in unit.invariants],
+        "state_after": None if unit.state_after is None else list(unit.state_after),
+        "emits": [_unit_data(item) for item in unit.emits],
+        "status": unit.status,
+    }
+    if unit.failure is not None:
+        data["failure"] = _failure_data(unit.failure)
+    return data
 
 
 def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> None:
     if not isinstance(sequence, DerivationSequence):
         raise TypeError("sequence must be a DerivationSequence")
-    json.dump({"schema_version": sequence.schema_version, "events": [_event_data(event) for event in sequence.events]}, stream, ensure_ascii=False, indent=2, sort_keys=True)
+    json.dump(
+        {
+            "schema_version": sequence.schema_version,
+            "events": [_event_data(event) for event in sequence.events],
+        },
+        stream,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
     stream.write("\n")
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical derivation result followed by a newline."""
+    """Write one canonical schema-v2 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")
-    data = {
+    data: dict[str, Any] = {
         "schema_version": result.schema_version,
         "status": result.status,
-        "trace": [
-            {
-                "index": step.index,
-                "event": _event_data(step.event),
-                "state_before": None if step.state_before is None else list(step.state_before),
-                "state_after": None if step.state_after is None else list(step.state_after),
-                "status": step.status,
-                "generated": [_event_data(event) for event in step.generated],
-            }
-            for step in result.trace
-        ],
+        "units": [_unit_data(unit) for unit in result.units],
         "final_state": [
-            {"object": list(item.object), "state": None if item.state is None else list(item.state)}
+            {
+                "object": list(item.object),
+                "state": None if item.state is None else list(item.state),
+            }
             for item in result.final_state
         ],
-        "pending_signals": [_event_data(event) for event in result.pending_signals],
-        "failure": None
-        if result.failure is None
-        else {
-            "code": result.failure.code,
-            "event_index": result.failure.event_index,
-            "message": result.failure.message,
-            "features": list(result.failure.features),
-        },
+        "facts": [
+            {"predicate": list(item.predicate), "arguments": list(item.arguments)}
+            for item in result.facts
+        ],
     }
+    if result.failure is not None:
+        data["failure"] = _failure_data(result.failure)
     json.dump(data, stream, ensure_ascii=False, indent=2, sort_keys=True)
     stream.write("\n")

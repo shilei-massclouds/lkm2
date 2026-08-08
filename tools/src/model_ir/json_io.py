@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v3."""
+"""Strict JSON loading and canonical JSON output for Model IR v4."""
 
 from __future__ import annotations
 
@@ -190,7 +190,7 @@ def _transition(value: object, path: str) -> ModelTransition:
 def _action(value: object, path: str) -> ModelAction:
     data = _require_object(value, frozenset({"signal", "blocks"}), path)
     return ModelAction(
-        signal=_expression(data["signal"], f"{path}.signal"),
+        signal=_qualified_name(data["signal"], f"{path}.signal"),
         blocks=_array(data["blocks"], f"{path}.blocks", _handler_block),
     )
 
@@ -278,7 +278,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v3 JSON document."""
+    """Load and strictly validate one Model IR schema-v4 JSON document."""
 
     try:
         raw = json.load(
@@ -369,7 +369,7 @@ def _state_data(state: ModelState) -> dict[str, Any]:
         ],
         "actions": [
             {
-                "signal": _expr_data(handler.signal),
+                "signal": list(handler.signal),
                 "blocks": [_block_data(block) for block in handler.blocks],
             }
             for handler in state.actions

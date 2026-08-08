@@ -1,0 +1,63 @@
+{
+  "facts": [],
+  "failure": {
+    "code": "unhandled_signal",
+    "features": [],
+    "message": "target object has no matching transition handler in its current state",
+    "path": "units[0].handler"
+  },
+  "final_state": [
+    {
+      "object": [
+        "root",
+        "Computer"
+      ],
+      "state": [
+        "State",
+        "Idle"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "status": "unhandled_signal",
+  "units": [
+    {
+      "candidate_state": null,
+      "depends_on": [],
+      "drives": [],
+      "emits": [],
+      "ensures": [],
+      "establishes": [],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Transition",
+          "Go"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Computer"
+        ]
+      },
+      "failure": {
+        "code": "unhandled_signal",
+        "features": [],
+        "message": "target object has no matching transition handler in its current state",
+        "path": "units[0].handler"
+      },
+      "handler": null,
+      "invariants": [],
+      "kind": "root",
+      "state_after": null,
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "unhandled_signal"
+    }
+  ]
+}

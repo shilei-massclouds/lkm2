@@ -1,0 +1,219 @@
+{
+  "facts": [],
+  "final_state": [
+    {
+      "object": [
+        "root",
+        "First"
+      ],
+      "state": [
+        "State",
+        "Done"
+      ]
+    },
+    {
+      "object": [
+        "root",
+        "Observer"
+      ],
+      "state": [
+        "State",
+        "Done"
+      ]
+    },
+    {
+      "object": [
+        "root",
+        "Producer"
+      ],
+      "state": [
+        "State",
+        "Done"
+      ]
+    },
+    {
+      "object": [
+        "root",
+        "Second"
+      ],
+      "state": [
+        "State",
+        "Done"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "status": "passed",
+  "units": [
+    {
+      "candidate_state": [
+        "State",
+        "Done"
+      ],
+      "depends_on": [],
+      "drives": [],
+      "emits": [
+        {
+          "candidate_state": [
+            "State",
+            "Done"
+          ],
+          "depends_on": [],
+          "drives": [],
+          "emits": [],
+          "ensures": [],
+          "establishes": [],
+          "event": {
+            "mode": "emit",
+            "signal": [
+              "Transition",
+              "Mark"
+            ],
+            "source": [
+              "root",
+              "Producer"
+            ],
+            "target": [
+              "root",
+              "First"
+            ]
+          },
+          "handler": [
+            "Transition",
+            "Mark"
+          ],
+          "invariants": [],
+          "kind": "emit",
+          "state_after": [
+            "State",
+            "Done"
+          ],
+          "state_before": [
+            "State",
+            "Idle"
+          ],
+          "status": "passed"
+        },
+        {
+          "candidate_state": [
+            "State",
+            "Done"
+          ],
+          "depends_on": [],
+          "drives": [],
+          "emits": [],
+          "ensures": [],
+          "establishes": [],
+          "event": {
+            "mode": "emit",
+            "signal": [
+              "Transition",
+              "Mark"
+            ],
+            "source": [
+              "root",
+              "Producer"
+            ],
+            "target": [
+              "root",
+              "Second"
+            ]
+          },
+          "handler": [
+            "Transition",
+            "Mark"
+          ],
+          "invariants": [],
+          "kind": "emit",
+          "state_after": [
+            "State",
+            "Done"
+          ],
+          "state_before": [
+            "State",
+            "Idle"
+          ],
+          "status": "passed"
+        }
+      ],
+      "ensures": [],
+      "establishes": [],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Transition",
+          "Start"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Producer"
+        ]
+      },
+      "handler": [
+        "Transition",
+        "Start"
+      ],
+      "invariants": [],
+      "kind": "root",
+      "state_after": [
+        "State",
+        "Done"
+      ],
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "passed"
+    },
+    {
+      "candidate_state": [
+        "State",
+        "Done"
+      ],
+      "depends_on": [
+        {
+          "expression": "(First == State::Done && Second == State::Done)",
+          "status": "passed"
+        }
+      ],
+      "drives": [],
+      "emits": [],
+      "ensures": [],
+      "establishes": [],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Transition",
+          "Check"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Observer"
+        ]
+      },
+      "handler": [
+        "Transition",
+        "Check"
+      ],
+      "invariants": [],
+      "kind": "root",
+      "state_after": [
+        "State",
+        "Done"
+      ],
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "passed"
+    }
+  ]
+}

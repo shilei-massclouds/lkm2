@@ -1,0 +1,852 @@
+from __future__ import annotations
+
+import argparse
+from contextlib import redirect_stderr, redirect_stdout
+import difflib
+from io import StringIO
+import json
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+
+REPOSITORY = Path(__file__).resolve().parents[3]
+SOURCE_DIRECTORY = REPOSITORY / "tools" / "src"
+CASES_DIRECTORY = Path(__file__).resolve().parent / "cases"
+sys.path.insert(0, str(SOURCE_DIRECTORY))
+
+from derive import (  # noqa: E402
+    DerivationEvent,
+    DerivationSequence,
+    DerivationValidationError,
+    default_derivation_sequence,
+    derive,
+    dump_derivation_result,
+    dump_derivation_sequence,
+    load_derivation_result,
+    load_derivation_sequence,
+    render_derivation_result,
+)
+from derive.cli import main as derive_main  # noqa: E402
+from modelc import CompilationError, compile_spec  # noqa: E402
+
+
+def _compile_text(body: str):
+    directory = tempfile.TemporaryDirectory()
+    root = Path(directory.name)
+    (root / "main.spec").write_text(
+        "spec root;\norigin root.Human;\n", encoding="utf-8"
+    )
+    (root / "root.spec").write_text(body, encoding="utf-8")
+    return directory, compile_spec(root / "main.spec")
+
+
+def _sequence(*events: tuple[str, str, str, str]) -> DerivationSequence:
+    return DerivationSequence(
+        2,
+        tuple(
+            DerivationEvent(
+                tuple(source.split(".")),
+                tuple(target.split(".")),
+                ("Transition", signal),
+                mode,
+            )
+            for source, target, signal, mode in events
+        ),
+    )
+
+
+class _DiffingTestCase(unittest.TestCase):
+    def assert_bytes_equal(
+        self, actual: bytes, expected: bytes, actual_name: str, expected_name: str
+    ) -> None:
+        if actual == expected:
+            return
+        actual_text = actual.decode("utf-8", errors="replace").splitlines(keepends=True)
+        expected_text = expected.decode("utf-8", errors="replace").splitlines(
+            keepends=True
+        )
+        diff = "".join(
+            difflib.unified_diff(
+                expected_text,
+                actual_text,
+                fromfile=expected_name,
+                tofile=actual_name,
+            )
+        )
+        self.fail(f"byte mismatch:\n{diff}")
+
+
+class SmokeGoldenTests(_DiffingTestCase):
+    def test_cases(self) -> None:
+        cases = tuple(
+            path
+            for path in sorted(CASES_DIRECTORY.iterdir(), key=lambda item: item.name)
+            if path.is_dir()
+        )
+        self.assertEqual(len(cases), 14)
+        for case in cases:
+            with self.subTest(case=case.name):
+                expected_json_path = case / "expected.result.json"
+                expected_stdout_path = case / "expected.stdout"
+                expected_json = expected_json_path.read_bytes()
+                expected_stdout = expected_stdout_path.read_bytes()
+
+                model = compile_spec(case / "main.spec")
+                selected = default_derivation_sequence(model)
+                first = derive(model, selected)
+                second = derive(model, selected)
+                first_json = StringIO()
+                second_json = StringIO()
+                dump_derivation_result(first, first_json)
+                dump_derivation_result(second, second_json)
+                self.assert_bytes_equal(
+                    first_json.getvalue().encode(),
+                    expected_json,
+                    f"{case.name}/actual.result.json",
+                    str(expected_json_path.relative_to(REPOSITORY)),
+                )
+                self.assertEqual(first, second)
+                self.assertEqual(first_json.getvalue(), second_json.getvalue())
+
+                loaded = load_derivation_result(
+                    StringIO(expected_json.decode("utf-8"))
+                )
+                rendered = StringIO()
+                render_derivation_result(loaded, rendered)
+                self.assert_bytes_equal(
+                    rendered.getvalue().encode(),
+                    expected_stdout,
+                    f"{case.name}/actual.stdout",
+                    str(expected_stdout_path.relative_to(REPOSITORY)),
+                )
+                rerendered = StringIO()
+                render_derivation_result(second, rerendered)
+                self.assertEqual(rendered.getvalue(), rerendered.getvalue())
+
+                completed = subprocess.run(
+                    [
+                        str(REPOSITORY / "tools" / "bin" / "derive"),
+                        "--model",
+                        str(case / "main.spec"),
+                    ],
+                    cwd=case,
+                    text=False,
+                    capture_output=True,
+                    check=False,
+                )
+                self.assertEqual(
+                    completed.returncode,
+                    0 if loaded.status == "passed" else 1,
+                    completed.stderr.decode("utf-8", errors="replace"),
+                )
+                self.assert_bytes_equal(
+                    completed.stdout,
+                    expected_stdout,
+                    f"{case.name}/cli.stdout",
+                    str(expected_stdout_path.relative_to(REPOSITORY)),
+                )
+                self.assertEqual(completed.stderr, b"")
+
+
+class EngineTests(unittest.TestCase):
+    def test_sequence_selects_roots_and_engine_schedules_nested_units(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Child: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    transitions { on Transition::Work -> State::Done {} }
+                }
+                state State::Done {}
+            }
+            object Parent: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    transitions { on Transition::Start -> State::Done {
+                        drives { Child.Transition::Work; }
+                    } }
+                }
+                state State::Done {}
+            }
+            external Human { drives { Parent.Transition::Start; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        selected = default_derivation_sequence(model)
+        self.assertEqual(len(selected.events), 1)
+        result = derive(model, selected)
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(len(result.units), 1)
+        self.assertEqual(result.units[0].kind, "root")
+        self.assertEqual(result.units[0].drives[0].kind, "drive")
+
+    def test_completed_child_is_kept_when_later_drive_fails(self) -> None:
+        case = CASES_DIRECTORY / "07-second-drive-fails"
+        model = compile_spec(case / "main.spec")
+        result = derive(model, default_derivation_sequence(model))
+        states = {item.object[-1]: item.state for item in result.final_state}
+        self.assertEqual(result.status, "unhandled_signal")
+        self.assertEqual(states["First"], ("State", "Done"))
+        self.assertEqual(states["Second"], ("State", "Idle"))
+        self.assertEqual(states["Parent"], ("State", "Idle"))
+        self.assertEqual(result.units[0].status, "stopped")
+
+    def test_external_action_succeeds_without_changing_state(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    actions { on Action::Refresh {} }
+                }
+            }
+            external Human { drives { Computer.Action::Refresh; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        unit = result.units[0]
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(unit.handler, ("Action", "Refresh"))
+        self.assertIsNone(unit.candidate_state)
+        self.assertEqual(unit.state_before, ("State", "Idle"))
+        self.assertEqual(unit.state_after, ("State", "Idle"))
+        self.assertEqual(result.final_state[0].state, ("State", "Idle"))
+        output = StringIO()
+        dump_derivation_result(result, output)
+        self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
+
+    def test_drives_and_emits_can_both_carry_actions(self) -> None:
+        directory, model = _compile_text(
+            """
+            predicate prepared() -> bool;
+            object Worker: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    actions {
+                        on Action::Prepare { establishes { prepared(); } }
+                        on Action::Finish { depends_on { prepared(); } }
+                    }
+                }
+            }
+            object Parent: T {
+                initial_state: State::Idle;
+                state State::Idle { transitions {
+                    on Transition::Run -> State::Done {
+                        drives { Worker.Action::Prepare; }
+                        emits { Worker.Action::Finish; }
+                    }
+                } }
+                state State::Done {}
+            }
+            external Human { drives { Parent.Transition::Run; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        unit = result.units[0]
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(unit.drives[0].event.signal, ("Action", "Prepare"))
+        self.assertEqual(unit.emits[0].event.signal, ("Action", "Finish"))
+        self.assertEqual(unit.drives[0].state_after, ("State", "Idle"))
+        self.assertEqual(unit.emits[0].state_after, ("State", "Idle"))
+
+    def test_action_stages_facts_for_its_current_state_invariant(self) -> None:
+        directory, model = _compile_text(
+            """
+            predicate refreshed() -> bool;
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    invariant { refreshed(); }
+                    actions {
+                        on Action::Refresh { establishes { refreshed(); refreshed(); } }
+                    }
+                }
+            }
+            external Human { drives { Computer.Action::Refresh; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        unit = result.units[0]
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(len(unit.establishes), 2)
+        self.assertEqual(unit.invariants[0].status, "passed")
+        self.assertEqual(len(result.facts), 1)
+
+    def test_action_checks_post_drive_current_state_without_rolling_back_drive(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    invariant { false; }
+                    transitions { on Transition::Advance -> State::Ready {} }
+                    actions { on Action::Start {
+                        drives { Computer.Transition::Advance; }
+                    } }
+                }
+                state State::Ready { invariant { true; } }
+            }
+            external Human { drives { Computer.Action::Start; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        unit = result.units[0]
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(unit.state_before, ("State", "Idle"))
+        self.assertEqual(unit.state_after, ("State", "Idle"))
+        self.assertEqual(unit.drives[0].state_after, ("State", "Ready"))
+        self.assertEqual(unit.invariants[0].status, "passed")
+        self.assertEqual(result.final_state[0].state, ("State", "Ready"))
+
+    def test_failed_action_invariant_discards_facts_and_does_not_emit(self) -> None:
+        directory, model = _compile_text(
+            """
+            predicate attempted() -> bool;
+            object Child: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    transitions { on Transition::Run -> State::Done {} }
+                }
+                state State::Done {}
+            }
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    invariant { false; }
+                    actions { on Action::Refresh {
+                        establishes { attempted(); }
+                        emits { Child.Transition::Run; }
+                    } }
+                }
+            }
+            external Human { drives { Computer.Action::Refresh; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        states = {item.object[-1]: item.state for item in result.final_state}
+        unit = result.units[0]
+        self.assertEqual(result.status, "invariant_failed")
+        self.assertEqual(result.failure.path, "units[0].invariants[0]")
+        self.assertEqual(result.facts, ())
+        self.assertEqual(unit.emits, ())
+        self.assertIsNone(unit.state_after)
+        self.assertEqual(states["Computer"], ("State", "Idle"))
+        self.assertEqual(states["Child"], ("State", "Idle"))
+
+    def test_action_requires_a_handler_in_the_current_state(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle {}
+                state State::Ready {
+                    actions { on Action::Refresh {} }
+                }
+            }
+            external Human { drives { Computer.Action::Refresh; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "unhandled_signal")
+        self.assertEqual(result.failure.path, "units[0].handler")
+        self.assertIsNone(result.units[0].handler)
+        self.assertIsNone(result.units[0].candidate_state)
+
+    def test_mixed_transition_action_chain_is_recursive(self) -> None:
+        directory, model = _compile_text(
+            """
+            predicate complete() -> bool;
+            object Third: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    actions { on Action::Finish { establishes { complete(); } } }
+                }
+            }
+            object Second: T {
+                initial_state: State::Idle;
+                state State::Idle { transitions {
+                    on Transition::Go -> State::Done {
+                        emits { Third.Action::Finish; }
+                    }
+                } }
+                state State::Done {}
+            }
+            object First: T {
+                initial_state: State::Idle;
+                state State::Idle { actions {
+                    on Action::Start {
+                        drives { Second.Transition::Go; }
+                        ensures { complete(); }
+                    }
+                } }
+            }
+            external Human { drives { First.Action::Start; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        root = result.units[0]
+        transition = root.drives[0]
+        action = transition.emits[0]
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(root.event.signal, ("Action", "Start"))
+        self.assertEqual(transition.event.signal, ("Transition", "Go"))
+        self.assertEqual(action.event.signal, ("Action", "Finish"))
+        self.assertEqual(root.ensures[0].status, "passed")
+
+    def test_emits_execute_depth_first_before_the_next_sibling(self) -> None:
+        directory, model = _compile_text(
+            """
+            predicate c_done() -> bool;
+            object Worker: T {
+                initial_state: State::Idle;
+                state State::Idle { actions {
+                    on Action::A { emits { Worker.Action::C; } }
+                    on Action::B { depends_on { c_done(); } }
+                    on Action::C { establishes { c_done(); } }
+                } }
+            }
+            object Parent: T {
+                initial_state: State::Idle;
+                state State::Idle { actions {
+                    on Action::Start {
+                        emits { Worker.Action::A; Worker.Action::B; }
+                    }
+                } }
+            }
+            external Human { drives { Parent.Action::Start; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        root = result.units[0]
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(
+            (
+                root.emits[0].event.signal,
+                root.emits[0].emits[0].event.signal,
+                root.emits[1].event.signal,
+            ),
+            (("Action", "A"), ("Action", "C"), ("Action", "B")),
+        )
+        self.assertEqual(root.emits[1].depends_on[0].status, "passed")
+
+    def test_emit_failure_keeps_commits_and_stops_later_siblings(self) -> None:
+        directory, model = _compile_text(
+            """
+            predicate produced() -> bool;
+            predicate first_done() -> bool;
+            predicate rejected() -> bool;
+            object First: T {
+                initial_state: State::Idle;
+                state State::Idle { actions {
+                    on Action::Run { establishes { first_done(); } }
+                } }
+            }
+            object Broken: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    invariant { false; }
+                    actions { on Action::Run { establishes { rejected(); } } }
+                }
+            }
+            object Later: T {
+                initial_state: State::Idle;
+                state State::Idle { transitions {
+                    on Transition::Run -> State::Done {}
+                } }
+                state State::Done {}
+            }
+            object Producer: T {
+                initial_state: State::Idle;
+                state State::Idle { actions {
+                    on Action::Start {
+                        establishes { produced(); }
+                        emits {
+                            First.Action::Run;
+                            Broken.Action::Run;
+                            Later.Transition::Run;
+                        }
+                    }
+                } }
+            }
+            external Human { drives { Producer.Action::Start; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        root = result.units[0]
+        facts = {item.predicate[-1] for item in result.facts}
+        states = {item.object[-1]: item.state for item in result.final_state}
+        self.assertEqual(result.status, "invariant_failed")
+        self.assertEqual(root.status, "passed")
+        self.assertEqual(len(root.emits), 2)
+        self.assertEqual(root.emits[0].status, "passed")
+        self.assertEqual(root.emits[1].status, "invariant_failed")
+        self.assertEqual(facts, {"produced", "first_done"})
+        self.assertEqual(states["Later"], ("State", "Idle"))
+        output = StringIO()
+        dump_derivation_result(result, output)
+        self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
+
+    def test_failed_invariant_rolls_back_state_and_staged_facts(self) -> None:
+        case = CASES_DIRECTORY / "13-invariant-rollback"
+        model = compile_spec(case / "main.spec")
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "invariant_failed")
+        self.assertEqual(result.final_state[0].state, ("State", "Idle"))
+        self.assertEqual(result.facts, ())
+        self.assertEqual(result.failure.path, "units[0].invariants[0]")
+
+    def test_unsupported_expression_fails_at_its_clause(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle { transitions {
+                    on Transition::Go -> State::Ready {
+                        depends_on { 1 + 2 == 3; }
+                    }
+                } }
+                state State::Ready {}
+            }
+            external Human { drives { Computer.Transition::Go; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "unsupported_feature")
+        self.assertEqual(result.failure.path, "units[0].depends_on[0]")
+        self.assertEqual(result.units[0].depends_on[0].status, "unsupported")
+
+    def test_unimplemented_model_features_fail_before_execution(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Computer: T {
+                initial_state: State::Idle;
+                attrs { value: Size; }
+                state State::Idle {
+                    transitions {
+                        on Transition::Go -> State::Ready {
+                            may_change { value; }
+                            deferred x.001 {
+                                category: Category::Detail;
+                                summary: "later";
+                                evidence { true; }
+                                close_when: "implemented";
+                            }
+                        }
+                    }
+                    actions { on Action::Refresh {} }
+                }
+                state State::Ready {}
+                reference implementation { value = symbol("value"); }
+            }
+            external Human { drives { Computer.Transition::Go; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "unsupported_feature")
+        self.assertEqual(result.units, ())
+        self.assertEqual(
+            result.failure.features,
+            ("attrs", "deferred", "may_change", "reference"),
+        )
+
+    def test_ensures_cannot_read_facts_staged_by_the_same_unit(self) -> None:
+        directory, model = _compile_text(
+            """
+            predicate ready() -> bool;
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle { transitions {
+                    on Transition::Go -> State::Ready {
+                        establishes { ready(); }
+                        ensures { ready(); }
+                    }
+                } }
+                state State::Ready {}
+            }
+            external Human { drives { Computer.Transition::Go; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "ensures_failed")
+        self.assertEqual(result.units[0].establishes, ())
+        self.assertEqual(result.facts, ())
+
+    def test_depends_on_runs_before_drives_regardless_of_block_order(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Child: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    transitions { on Transition::Work -> State::Done {} }
+                }
+                state State::Done {}
+            }
+            object Parent: T {
+                initial_state: State::Idle;
+                state State::Idle { transitions {
+                    on Transition::Start -> State::Done {
+                        drives { Child.Transition::Work; }
+                        depends_on { false; }
+                    }
+                } }
+                state State::Done {}
+            }
+            external Human { drives { Parent.Transition::Start; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        states = {item.object[-1]: item.state for item in result.final_state}
+        self.assertEqual(result.status, "depends_on_failed")
+        self.assertEqual(result.units[0].drives, ())
+        self.assertEqual(states["Child"], ("State", "Idle"))
+
+    def test_target_invariants_see_the_candidate_state(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    transitions { on Transition::Go -> State::Ready {} }
+                }
+                state State::Ready {
+                    invariant { Computer == State::Ready; }
+                }
+            }
+            external Human { drives { Computer.Transition::Go; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.units[0].invariants[0].status, "passed")
+
+    def test_external_emit_is_still_a_selected_root_unit(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    transitions { on Transition::Go -> State::Ready {} }
+                }
+                state State::Ready {}
+            }
+            external Human { emits { Computer.Transition::Go; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.units[0].kind, "root")
+        self.assertEqual(result.units[0].event.mode, "emit")
+
+    def test_undeclared_sequence_event_is_rejected_as_a_root(self) -> None:
+        model = compile_spec(CASES_DIRECTORY / "02-simple-transition" / "main.spec")
+        selected = _sequence(("root.Computer", "root.Computer", "Go", "drive"))
+        result = derive(model, selected)
+        self.assertEqual(result.status, "undeclared_external_signal")
+        self.assertEqual(result.failure.path, "units[0]")
+
+    def test_invalid_transition_models_are_compile_errors(self) -> None:
+        bodies = (
+            """
+            object Computer: T { initial_state: State::A; state State::A {
+              transitions { on Transition::Go -> State::Missing {} }
+            } }
+            external Human { drives { Computer.Transition::Go; } }
+            """,
+            """
+            object Computer: T { initial_state: State::A; state State::A {
+              transitions {
+                on Transition::Go -> State::A {}
+                on Transition::Go -> State::A {}
+              }
+            } }
+            external Human { drives { Computer.Transition::Go; } }
+            """,
+        )
+        for body in bodies:
+            with self.subTest(body=body):
+                with self.assertRaises(CompilationError):
+                    directory, _ = _compile_text(body)
+                    directory.cleanup()
+
+
+class DerivationJSONTests(unittest.TestCase):
+    def test_sequence_is_strict(self) -> None:
+        valid = json.dumps(
+            {
+                "schema_version": 2,
+                "events": [
+                    {
+                        "source": ["root", "Human"],
+                        "target": ["root", "Computer"],
+                        "signal": ["Transition", "Go"],
+                        "mode": "drive",
+                    }
+                ],
+            }
+        )
+        parsed = load_derivation_sequence(StringIO(valid))
+        output = StringIO()
+        dump_derivation_sequence(parsed, output)
+        self.assertEqual(load_derivation_sequence(StringIO(output.getvalue())), parsed)
+        action_document = json.loads(valid)
+        action_document["events"][0]["signal"] = ["Action", "Refresh"]
+        action = load_derivation_sequence(StringIO(json.dumps(action_document)))
+        self.assertEqual(action.events[0].signal, ("Action", "Refresh"))
+        action_output = StringIO()
+        dump_derivation_sequence(action, action_output)
+        self.assertEqual(
+            load_derivation_sequence(StringIO(action_output.getvalue())), action
+        )
+        invalid = (
+            valid.replace('"schema_version": 2', '"schema_version": 1'),
+            valid.replace('"events":', '"extra": 0, "events":'),
+            valid.replace('["Transition", "Go"]', '["Effect", "Go"]'),
+            valid.replace('"drive"', '"unknown"'),
+            '{"schema_version":2,"events":[],"events":[]}',
+        )
+        for document in invalid:
+            with self.subTest(document=document):
+                with self.assertRaises(DerivationValidationError):
+                    load_derivation_sequence(StringIO(document))
+
+    def test_result_is_strict_canonical_and_round_trips(self) -> None:
+        case = CASES_DIRECTORY / "11-establishes-invariant"
+        model = compile_spec(case / "main.spec")
+        result = derive(model, default_derivation_sequence(model))
+        output = StringIO()
+        dump_derivation_result(result, output)
+        self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
+        document = json.loads(output.getvalue())
+        self.assertEqual(document["schema_version"], 2)
+        self.assertNotIn("failure", document)
+
+        invalid_documents = []
+        wrong_version = dict(document)
+        wrong_version["schema_version"] = 1
+        invalid_documents.append(json.dumps(wrong_version))
+        unknown = dict(document)
+        unknown["trace"] = []
+        invalid_documents.append(json.dumps(unknown))
+        missing = dict(document)
+        del missing["facts"]
+        invalid_documents.append(json.dumps(missing))
+        invalid_documents.append('{"schema_version":2,"status":"passed","status":"passed"}')
+        for invalid in invalid_documents:
+            with self.subTest(document=invalid):
+                with self.assertRaises(DerivationValidationError):
+                    load_derivation_result(StringIO(invalid))
+
+
+class CLITests(unittest.TestCase):
+    def test_cli_renders_human_success_and_semantic_failure_to_stdout(self) -> None:
+        for case_name, expected_status in (
+            ("02-simple-transition", 0),
+            ("01-no-handler", 1),
+        ):
+            with self.subTest(case=case_name):
+                case = CASES_DIRECTORY / case_name
+                stdout, stderr = StringIO(), StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = derive_main(["--model", str(case / "main.spec")])
+                self.assertEqual(status, expected_status)
+                self.assertEqual(
+                    stdout.getvalue(),
+                    (case / "expected.stdout").read_text(encoding="utf-8"),
+                )
+                self.assertEqual(stderr.getvalue(), "")
+
+    def test_input_errors_use_stderr(self) -> None:
+        stdout, stderr = StringIO(), StringIO()
+        with redirect_stdout(stdout), redirect_stderr(stderr):
+            status = derive_main(["--model", "/definitely/missing/model.spec"])
+        self.assertEqual(status, 1)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertIn("error:", stderr.getvalue())
+
+    def test_explicit_sequence_uses_the_supplied_default_model(self) -> None:
+        case = CASES_DIRECTORY / "02-simple-transition"
+        model = compile_spec(case / "main.spec")
+        with tempfile.TemporaryDirectory() as directory:
+            sequence_path = Path(directory) / "selected.sequence.json"
+            with sequence_path.open("w", encoding="utf-8") as stream:
+                dump_derivation_sequence(default_derivation_sequence(model), stream)
+            stdout, stderr = StringIO(), StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                status = derive_main(
+                    ["--sequence", str(sequence_path)],
+                    default_model=case / "main.spec",
+                )
+        self.assertEqual(status, 0)
+        self.assertTrue(stdout.getvalue().endswith("passed\n"))
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_wrapper_default_works_outside_the_repository(self) -> None:
+        completed = subprocess.run(
+            [str(REPOSITORY / "tools" / "bin" / "derive")],
+            cwd=tempfile.gettempdir(),
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("Transition::Preset", completed.stdout)
+        self.assertTrue(completed.stdout.endswith("stopped: unhandled_signal\n"))
+        self.assertEqual(completed.stderr, "")
+
+    def test_model_and_sequence_options_are_mutually_exclusive(self) -> None:
+        completed = subprocess.run(
+            [
+                str(REPOSITORY / "tools" / "bin" / "derive"),
+                "--model",
+                str(CASES_DIRECTORY / "01-no-handler" / "main.spec"),
+                "--sequence",
+                "sequence.json",
+            ],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        self.assertIn("not allowed with argument", completed.stderr)
+
+
+def _suite(smoke_only: bool) -> unittest.TestSuite:
+    loader = unittest.TestLoader()
+    suite = unittest.TestSuite()
+    suite.addTests(loader.loadTestsFromTestCase(SmokeGoldenTests))
+    if not smoke_only:
+        for test_case in (EngineTests, DerivationJSONTests, CLITests):
+            suite.addTests(loader.loadTestsFromTestCase(test_case))
+    return suite
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Run derive unit and golden tests")
+    parser.add_argument("--smoke-only", action="store_true")
+    parser.add_argument("--quiet", action="store_true")
+    arguments = parser.parse_args()
+    result = unittest.TextTestRunner(verbosity=1 if arguments.quiet else 2).run(
+        _suite(arguments.smoke_only)
+    )
+    raise SystemExit(0 if result.wasSuccessful() else 1)

@@ -32,7 +32,7 @@ from modelc.cli import main
 
 
 EXPECTED_MODEL = ModelIR(
-    schema_version=3,
+    schema_version=4,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -295,6 +295,92 @@ class ParserAndCompilerTests(unittest.TestCase):
                     with self.assertRaises(CompilationError):
                         compile_spec(entry_path)
 
+    def test_establishes_blocks_lower_to_model_ir_in_source_order(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    predicate first() -> bool;
+                    predicate second() -> bool;
+                    object Computer: T {
+                        initial_state: State::Idle;
+                        state State::Idle {
+                            transitions {
+                                on Transition::Go -> State::Ready {
+                                    establishes { first(); second(); }
+                                }
+                            }
+                        }
+                        state State::Ready {}
+                    }
+                """
+            }
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+        block = model.objects[0].states[0].transitions[0].blocks[0]
+        self.assertEqual(block.kind, "establishes")
+        self.assertEqual(
+            tuple(expression.children[0].value for expression in block.expressions),
+            ("first", "second"),
+        )
+        output = StringIO()
+        dump_model_ir(model, output)
+        self.assertEqual(load_model_ir(StringIO(output.getvalue())), model)
+
+    def test_action_handlers_and_signals_lower_to_strict_names(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    object Computer: T {
+                        initial_state: State::Idle;
+                        state State::Idle {
+                            actions { on Action::Refresh {} }
+                        }
+                    }
+                    external Human { emits { Computer.Action::Refresh; } }
+                """
+            },
+            entry="spec root;\norigin root.Human;\n",
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        action = model.objects[0].states[0].actions[0]
+        signal = model.externals[0].signals[0]
+        self.assertEqual(action.signal, ("Action", "Refresh"))
+        self.assertEqual(signal.signal, ("Action", "Refresh"))
+
+        output = StringIO()
+        dump_model_ir(model, output)
+        self.assertEqual(load_model_ir(StringIO(output.getvalue())), model)
+        document = json.loads(output.getvalue())
+        state = document["modules"][0]["objects"][0]["states"][0]
+        self.assertEqual(state["actions"][0]["signal"], ["Action", "Refresh"])
+
+        state["actions"][0]["signal"] = ["Transition", "Refresh"]
+        with self.assertRaises(ModelIRValidationError):
+            load_model_ir(StringIO(json.dumps(document)))
+
+    def test_action_handler_rejects_non_action_expressions(self) -> None:
+        for accepted_signal in ("Transition::Refresh", "refresh()"):
+            with self.subTest(accepted_signal=accepted_signal):
+                with model_tree(
+                    {
+                        "root.spec": f"""
+                            object Computer: T {{
+                                initial_state: State::Idle;
+                                state State::Idle {{
+                                    actions {{ on {accepted_signal} {{}} }}
+                                }}
+                            }}
+                        """
+                    }
+                ) as (_, entry_path):
+                    with self.assertRaises(CompilationError) as caught:
+                        compile_spec(entry_path)
+                self.assertIn(
+                    "accepted signal must have the form Action::<Name>",
+                    caught.exception.diagnostic.message,
+                )
+
     def test_invalid_entry_root_and_origin_are_rejected(self) -> None:
         with model_tree(
             {"root.spec": ""},
@@ -335,7 +421,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_invalid_documents_are_rejected(self) -> None:
         wrong_version = json.loads(EXPECTED_JSON)
-        wrong_version["schema_version"] = 2
+        wrong_version["schema_version"] = 3
         unknown_field = json.loads(EXPECTED_JSON)
         unknown_field["extra"] = 0
         duplicate_module = json.loads(EXPECTED_JSON)
@@ -346,6 +432,8 @@ class ModelIRJSONTests(unittest.TestCase):
         )
         unknown_signal_target = json.loads(EXPECTED_JSON)
         unknown_signal_target["modules"][2]["externals"][0]["signals"][0]["target"] = ["missing", "Object"]
+        invalid_signal_prefix = json.loads(EXPECTED_JSON)
+        invalid_signal_prefix["modules"][2]["externals"][0]["signals"][0]["signal"] = ["Effect", "Preset"]
         invalid_documents = [
             "{",
             json.dumps(wrong_version),
@@ -353,9 +441,10 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(duplicate_module),
             json.dumps(duplicate_declaration),
             json.dumps(unknown_signal_target),
-            EXPECTED_JSON.replace('"schema_version": 3', '"schema_version": true'),
+            json.dumps(invalid_signal_prefix),
+            EXPECTED_JSON.replace('"schema_version": 4', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":3,"schema_version":3}',
+            '{"schema_version":4,"schema_version":4}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -364,7 +453,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=3,
+            schema_version=4,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -372,7 +461,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=3,
+                schema_version=4,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )

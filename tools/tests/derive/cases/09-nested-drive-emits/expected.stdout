@@ -1,0 +1,14 @@
+root Human -> Parent: Transition::Start
+  enter State::Idle
+  handler Transition::Start -> State::Done
+  drive Parent -> Child: Transition::Work
+    enter State::Idle
+    handler Transition::Work -> State::Done
+  Child: State::Idle → State::Done
+  emit Child -> Logger: Transition::Log
+    enter State::Idle
+    handler Transition::Log -> State::Done
+  Logger: State::Idle → State::Done
+  ensures Logger == State::Done ✓
+Parent: State::Idle → State::Done
+passed

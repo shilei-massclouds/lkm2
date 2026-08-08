@@ -13,7 +13,7 @@ DERIVE_ARGS = $(if $(strip $(MODEL)),--model "$(call repo_path,$(MODEL))",$(if $
 PATH := $(PYTHON_BIN_DIR):$(PATH)
 export PATH
 
-.PHONY: all setup check-environment build run test clean help
+.PHONY: all setup check-environment build run test test-derive test-smoke clean help
 
 all: build
 
@@ -43,6 +43,13 @@ run: build
 
 test: build
 	$(PYTHON) -m unittest discover -s tests -v
+	$(PYTHON) tests/derive/runner.py
+
+test-derive: check-environment
+	$(PYTHON) tests/derive/runner.py
+
+test-smoke: check-environment
+	$(PYTHON) tests/derive/runner.py --smoke-only
 
 clean:
 	find src tests -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
@@ -56,4 +63,6 @@ help:
 	@echo "  build  Compile-check tools and cache Model IR"
 	@echo "  run    Run tools/bin/derive (MODEL=... or SEQUENCE=..., not both)"
 	@echo "  test   Run the unittest suite"
+	@echo "  test-derive  Run derive unit and golden smoke tests"
+	@echo "  test-smoke   Run only derive golden smoke cases"
 	@echo "  clean  Remove generated Python build output"

@@ -12,8 +12,9 @@ from modelc import CompilationError, compile_spec
 
 from .engine import derive
 from .defaults import default_derivation_sequence
-from .json_io import dump_derivation_result, load_derivation_sequence
+from .json_io import load_derivation_sequence
 from .model import DerivationValidationError
+from .renderer import render_derivation_result
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -55,7 +56,7 @@ def main(
 
     result = derive(model, sequence)
     try:
-        dump_derivation_result(result, sys.stdout)
+        render_derivation_result(result, sys.stdout)
     except (OSError, UnicodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

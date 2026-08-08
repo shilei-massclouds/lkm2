@@ -1,0 +1,112 @@
+{
+  "facts": [],
+  "final_state": [
+    {
+      "object": [
+        "root",
+        "Child"
+      ],
+      "state": [
+        "State",
+        "Done"
+      ]
+    },
+    {
+      "object": [
+        "root",
+        "Parent"
+      ],
+      "state": [
+        "State",
+        "Done"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "status": "passed",
+  "units": [
+    {
+      "candidate_state": [
+        "State",
+        "Done"
+      ],
+      "depends_on": [],
+      "drives": [
+        {
+          "candidate_state": [
+            "State",
+            "Done"
+          ],
+          "depends_on": [],
+          "drives": [],
+          "emits": [],
+          "ensures": [],
+          "establishes": [],
+          "event": {
+            "mode": "drive",
+            "signal": [
+              "Transition",
+              "Work"
+            ],
+            "source": [
+              "root",
+              "Parent"
+            ],
+            "target": [
+              "root",
+              "Child"
+            ]
+          },
+          "handler": [
+            "Transition",
+            "Work"
+          ],
+          "invariants": [],
+          "kind": "drive",
+          "state_after": [
+            "State",
+            "Done"
+          ],
+          "state_before": [
+            "State",
+            "Idle"
+          ],
+          "status": "passed"
+        }
+      ],
+      "emits": [],
+      "ensures": [],
+      "establishes": [],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Transition",
+          "Start"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Parent"
+        ]
+      },
+      "handler": [
+        "Transition",
+        "Start"
+      ],
+      "invariants": [],
+      "kind": "root",
+      "state_after": [
+        "State",
+        "Done"
+      ],
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "passed"
+    }
+  ]
+}

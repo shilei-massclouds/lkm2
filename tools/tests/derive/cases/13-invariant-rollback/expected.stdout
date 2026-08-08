@@ -1,0 +1,6 @@
+root Human -> Computer: Transition::Go
+  enter State::Idle
+  handler Transition::Go -> State::Ready
+  establishes ready() +
+  invariant accepted() ✗
+stopped: invariant_failed

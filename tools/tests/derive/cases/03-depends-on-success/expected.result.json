@@ -1,0 +1,75 @@
+{
+  "facts": [],
+  "final_state": [
+    {
+      "object": [
+        "root",
+        "Computer"
+      ],
+      "state": [
+        "State",
+        "Ready"
+      ]
+    },
+    {
+      "object": [
+        "root",
+        "Gate"
+      ],
+      "state": [
+        "State",
+        "Ready"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "status": "passed",
+  "units": [
+    {
+      "candidate_state": [
+        "State",
+        "Ready"
+      ],
+      "depends_on": [
+        {
+          "expression": "Gate == State::Ready",
+          "status": "passed"
+        }
+      ],
+      "drives": [],
+      "emits": [],
+      "ensures": [],
+      "establishes": [],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Transition",
+          "Go"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Computer"
+        ]
+      },
+      "handler": [
+        "Transition",
+        "Go"
+      ],
+      "invariants": [],
+      "kind": "root",
+      "state_after": [
+        "State",
+        "Ready"
+      ],
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "passed"
+    }
+  ]
+}

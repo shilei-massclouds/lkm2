@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v3."""
+"""Frozen data model and semantic validation for Model IR schema v4."""
 
 from __future__ import annotations
 
@@ -7,13 +7,21 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
 )
 _BLOCK_KINDS = frozenset(
-    {"depends_on", "may_change", "drives", "ensures", "emits", "deferred"}
+    {
+        "depends_on",
+        "may_change",
+        "drives",
+        "ensures",
+        "establishes",
+        "emits",
+        "deferred",
+    }
 )
 _SIGNAL_MODES = frozenset({"drive", "emit"})
 _UNARY_OPERATORS = frozenset({"!", "-"})
@@ -55,6 +63,14 @@ def _validate_special_name(value: tuple[str, ...], prefix: str, path: str) -> No
     if len(value) != 2 or value[0] != prefix:
         raise ModelIRValidationError(
             f"{path} must have the form {prefix}::<Name>"
+        )
+
+
+def _validate_signal_name(value: tuple[str, ...], path: str) -> None:
+    _validate_qualified_name(value, path)
+    if len(value) != 2 or value[0] not in {"Transition", "Action"}:
+        raise ModelIRValidationError(
+            f"{path} must have the form Transition::<Name> or Action::<Name>"
         )
 
 
@@ -217,7 +233,7 @@ class ModelSignal:
     def __post_init__(self) -> None:
         _validate_qualified_name(self.source, "signal.source")
         _validate_qualified_name(self.target, "signal.target")
-        _validate_special_name(self.signal, "Transition", "signal.signal")
+        _validate_signal_name(self.signal, "signal.signal")
         if len(self.source) < 2 or len(self.target) < 2:
             raise ModelIRValidationError(
                 "signal source and target must be absolute declaration names"
@@ -289,12 +305,11 @@ class ModelTransition:
 
 @dataclass(frozen=True, slots=True)
 class ModelAction:
-    signal: ModelExpression
+    signal: tuple[str, ...]
     blocks: tuple[ModelHandlerBlock, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.signal, ModelExpression):
-            raise ModelIRValidationError("action.signal must be a ModelExpression")
+        _validate_special_name(self.signal, "Action", "action.signal")
         _validate_tuple(self.blocks, ModelHandlerBlock, "action.blocks")
 
 
@@ -326,9 +341,7 @@ class ModelState:
             raise ModelIRValidationError(
                 f"duplicate action handler in state {self.name[-1]!r}"
             )
-        object.__setattr__(
-            self, "actions", tuple(sorted(self.actions, key=lambda item: repr(item.signal)))
-        )
+        object.__setattr__(self, "actions", tuple(sorted(self.actions, key=lambda item: item.signal)))
 
 
 @dataclass(frozen=True, slots=True)

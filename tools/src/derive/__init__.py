@@ -11,24 +11,29 @@ from .json_io import (
 from .model import (
     RESULT_SCHEMA_VERSION,
     SEQUENCE_SCHEMA_VERSION,
+    DerivationCheck,
     DerivationEvent,
+    DerivationFact,
     DerivationFailure,
     DerivationResult,
     DerivationSequence,
     DerivationState,
-    DerivationTraceStep,
+    DerivationUnit,
     DerivationValidationError,
 )
+from .renderer import render_derivation_result
 
 __all__ = [
     "RESULT_SCHEMA_VERSION",
     "SEQUENCE_SCHEMA_VERSION",
+    "DerivationCheck",
     "DerivationEvent",
+    "DerivationFact",
     "DerivationFailure",
     "DerivationResult",
     "DerivationSequence",
     "DerivationState",
-    "DerivationTraceStep",
+    "DerivationUnit",
     "DerivationValidationError",
     "derive",
     "default_derivation_sequence",
@@ -36,4 +41,5 @@ __all__ = [
     "dump_derivation_sequence",
     "load_derivation_result",
     "load_derivation_sequence",
+    "render_derivation_result",
 ]

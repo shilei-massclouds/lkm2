@@ -1,0 +1,5 @@
+root Human -> Computer: Transition::Go
+  enter State::Idle
+  handler Transition::Go -> State::Ready
+  ensures ready() ✗
+stopped: ensures_failed

@@ -1,0 +1,82 @@
+{
+  "facts": [
+    {
+      "arguments": [],
+      "predicate": [
+        "root",
+        "ready"
+      ]
+    }
+  ],
+  "final_state": [
+    {
+      "object": [
+        "root",
+        "Computer"
+      ],
+      "state": [
+        "State",
+        "Ready"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "status": "passed",
+  "units": [
+    {
+      "candidate_state": [
+        "State",
+        "Ready"
+      ],
+      "depends_on": [],
+      "drives": [],
+      "emits": [],
+      "ensures": [],
+      "establishes": [
+        {
+          "expression": "ready()",
+          "status": "established"
+        },
+        {
+          "expression": "ready()",
+          "status": "established"
+        }
+      ],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Transition",
+          "Go"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Computer"
+        ]
+      },
+      "handler": [
+        "Transition",
+        "Go"
+      ],
+      "invariants": [
+        {
+          "expression": "ready()",
+          "status": "passed"
+        }
+      ],
+      "kind": "root",
+      "state_after": [
+        "State",
+        "Ready"
+      ],
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "passed"
+    }
+  ]
+}

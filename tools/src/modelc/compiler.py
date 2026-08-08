@@ -1,4 +1,4 @@
-"""Compilation pipeline from a crate-root specification to Model IR v3."""
+"""Compilation pipeline from a crate-root specification to Model IR v4."""
 
 from __future__ import annotations
 
@@ -60,7 +60,13 @@ def _read_entry(path: Path) -> tuple[ModelSpec, tuple[LoadedModule, ...]]:
 
 
 def _semantic_error(module: LoadedModule, node: Tree | Token, message: str) -> Exception:
-    return error(module.path, node.line, node.column, message)
+    if isinstance(node, Tree):
+        line = node.meta.line
+        column = node.meta.column
+    else:
+        line = node.line
+        column = node.column
+    return error(module.path, line, column, message)
 
 
 def _tree_children(node: Tree, rule: str) -> list[Tree]:
@@ -206,13 +212,18 @@ def _signal(
     imports: dict[str, tuple[str, ...]],
 ) -> ModelSignal:
     access = _flatten_access(_lower_expression(node))
+    expected = "signal must have the form Object.Transition::<Name> or Object.Action::<Name>"
     if access is None:
-        raise _semantic_error(module, node, "signal must have the form Object.Transition::<Name>")
+        raise _semantic_error(module, node, expected)
     segments, operations = access
-    if len(segments) < 3 or segments[-2] != "Transition" or operations[-2:] != ["member", "path"]:
-        raise _semantic_error(module, node, "signal must have the form Object.Transition::<Name>")
+    if (
+        len(segments) < 3
+        or segments[-2] not in {"Transition", "Action"}
+        or operations[-2:] != ["member", "path"]
+    ):
+        raise _semantic_error(module, node, expected)
     target = _resolve_target(tuple(segments[:-2]), module.name, imports)
-    return ModelSignal(source, target, ("Transition", segments[-1]), mode)
+    return ModelSignal(source, target, (segments[-2], segments[-1]), mode)
 
 
 def _fields(node: Tree) -> tuple[ModelField, ...]:
@@ -256,6 +267,7 @@ def _handler_blocks(
         "depends_on_block": "depends_on",
         "may_change_block": "may_change",
         "ensures_block": "ensures",
+        "establishes_block": "establishes",
     }
     for child in owner.children:
         if not isinstance(child, Tree):
@@ -305,7 +317,9 @@ def _state(
                 assert isinstance(handler, Tree)
                 actions.append(
                     ModelAction(
-                        signal=_lower_expression(handler.children[0]),
+                        signal=_special_name(
+                            module, handler.children[0], "Action", "accepted signal"
+                        ),
                         blocks=_handler_blocks(module, handler, object_name, imports),
                     )
                 )

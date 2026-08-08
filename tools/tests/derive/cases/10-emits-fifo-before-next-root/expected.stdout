@@ -1,0 +1,19 @@
+root Human -> Producer: Transition::Start
+  enter State::Idle
+  handler Transition::Start -> State::Done
+Producer: State::Idle → State::Done
+emit Producer -> First: Transition::Mark
+  enter State::Idle
+  handler Transition::Mark -> State::Done
+First: State::Idle → State::Done
+emit Producer -> Second: Transition::Mark
+  enter State::Idle
+  handler Transition::Mark -> State::Done
+Second: State::Idle → State::Done
+
+root Human -> Observer: Transition::Check
+  enter State::Idle
+  handler Transition::Check -> State::Done
+  depends_on (First == State::Done && Second == State::Done) ✓
+Observer: State::Idle → State::Done
+passed
