@@ -6,6 +6,12 @@ BOOTSTRAP_PYTHON ?= python3
 PYTHON ?= $(VENV_DIR)/bin/python
 PYTHON_BIN_DIR := $(dir $(abspath $(PYTHON)))
 DEFAULT_SEQUENCE := $(CURDIR)/build/derive/main.sequence.json
+RUN_QUIET :=
+RUN_TARGET_QUIET := @
+
+ifeq ($(VERBOSE),1)
+RUN_TARGET_QUIET :=
+endif
 
 repo_path = $(if $(filter /%,$(strip $(1))),$(strip $(1)),$(REPOSITORY)/$(strip $(1)))
 DERIVE_ARGS = $(if $(strip $(MODEL)),--model "$(call repo_path,$(MODEL))",$(if $(strip $(SEQUENCE)),--sequence "$(call repo_path,$(SEQUENCE))",))
@@ -28,18 +34,19 @@ check-environment:
 	}
 
 build: check-environment
-	$(PYTHON) -m compileall -q src tests
-	$(PYTHON) -m modelc.build_cache --repository $(REPOSITORY) \
+	$(RUN_QUIET)$(PYTHON) -m compileall -q src tests
+	$(RUN_QUIET)$(PYTHON) -m modelc.build_cache --repository $(REPOSITORY) \
 		$(REPOSITORY)/model/main.spec $(CURDIR)/build/modelc
-	$(PYTHON) -m derive.sequence_builder \
+	$(RUN_QUIET)$(PYTHON) -m derive.sequence_builder \
 		$(CURDIR)/build/modelc/model.ir.json $(DEFAULT_SEQUENCE)
 
+run: RUN_QUIET := $(RUN_TARGET_QUIET)
 run: build
 	@test -z "$(strip $(MODEL))" -o -z "$(strip $(SEQUENCE))" || { \
 		echo "error: MODEL and SEQUENCE are mutually exclusive" >&2; \
 		exit 2; \
 	}
-	$(CURDIR)/bin/derive $(DERIVE_ARGS)
+	$(RUN_QUIET)$(CURDIR)/bin/derive $(DERIVE_ARGS)
 
 test: build
 	$(PYTHON) tests/runner.py

@@ -1,4 +1,41 @@
-/* OpenSBI specification, firmware construction, and kernel handoff. */
+/* OpenSBI - firmware for Riscv Platform to start kernel. */
+
+use super::kernel::Kernel;
+
+type OpenSBIType;
+
+object OpenSBI: OpenSBIType {
+    parent: Computer;
+
+    state State::Base {
+        transitions {
+            on Transition::Preset -> State::Prepared {
+            }
+        }
+    }
+
+    state State::Prepared {
+        transitions {
+            on Transition::Setup -> State::Ready {
+            }
+        }
+    }
+
+    state State::Ready {
+        transitions {
+            on Transition::Enable -> State::Online {
+                emits {
+                    Kernel.Transition::Enable;
+                }
+            }
+        }
+    }
+
+    state State::Online {
+    }
+}
+
+/*
 
 predicate opensbi_system_spec_established() -> bool;
 predicate opensbi_firmware_constructed() -> bool;
@@ -201,3 +238,4 @@ object OpenSBI: FirmwareObject {
         }
     }
 }
+*/

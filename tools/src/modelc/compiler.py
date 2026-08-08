@@ -341,6 +341,16 @@ def _object(
         for child in node.children
         if isinstance(child, Tree) and child.data == "state_declaration"
     )
+    initial_state = (
+        _special_name(
+            module,
+            initial_node.children[0],
+            "State",
+            "initial_state",
+        )
+        if initial_node is not None
+        else ("State", "Base") if states else None
+    )
     references = []
     for reference in _tree_children(node, "reference_declaration"):
         assignments = tuple(
@@ -354,7 +364,7 @@ def _object(
     return ModelObject(
         name=name,
         base_type=_type_expression(node.children[1]),
-        initial_state=None if initial_node is None else _special_name(module, initial_node.children[0], "State", "initial_state"),
+        initial_state=initial_state,
         parent=None if parent_node is None else _lower_expression(parent_node.children[0]),
         source=None if source_node is None else _lower_expression(source_node.children[0]),
         attrs=None if not attrs_nodes else _fields(attrs_nodes[0]),

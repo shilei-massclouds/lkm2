@@ -1,5 +1,41 @@
-/* RISC-V platform specification, construction, and runtime handoff. */
+/* Qemu Virt Platform - default platform for lkm2 */
 
+use super::opensbi::OpenSBI;
+
+type QemuVirtPlatformType;
+
+object QemuVirtPlatform: QemuVirtPlatformType {
+    parent: Computer;
+
+    state State::Base {
+        transitions {
+            on Transition::Preset -> State::Prepared {
+            }
+        }
+    }
+
+    state State::Prepared {
+        transitions {
+            on Transition::Setup -> State::Ready {
+            }
+        }
+    }
+
+    state State::Ready {
+        transitions {
+            on Transition::Enable -> State::Online {
+                emits {
+                    OpenSBI.Transition::Enable;
+                }
+            }
+        }
+    }
+
+    state State::Online {
+    }
+}
+
+/*
 predicate riscv64_isa_capabilities_available() -> bool;
 predicate riscv64_platform_system_spec_established() -> bool;
 predicate riscv64_platform_constructed() -> bool;
@@ -80,4 +116,4 @@ object Riscv64Platform: PlatformObject {
             riscv64_platform_constructed();
         }
     }
-}
+*/

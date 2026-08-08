@@ -1,12 +1,54 @@
 /* Computer is the unique top-level system. */
 
+use super::qemu_virt_platform::QemuVirtPlatform;
+use super::opensbi::OpenSBI;
+use super::kernel::Kernel;
+use super::rootfs::RootFs;
+
 type ComputerType;
 
 object Computer: ComputerType {
+    state State::Base {
+        transitions {
+            on Transition::Preset -> State::Prepared {
+                drives {
+                    QemuVirtPlatform.Transition::Preset;
+                    OpenSBI.Transition::Preset;
+                    Kernel.Transition::Preset;
+                    RootFs.Transition::Preset;
+                }
+            }
+        }
+    }
+
+    state State::Prepared {
+        transitions {
+            on Transition::Setup -> State::Ready {
+                drives {
+                    QemuVirtPlatform.Transition::Setup;
+                    OpenSBI.Transition::Setup;
+                    Kernel.Transition::Setup;
+                    RootFs.Transition::Setup;
+                }
+            }
+        }
+    }
+
+    state State::Ready {
+        transitions {
+            on Transition::Enable -> State::Online {
+                emits {
+                    QemuVirtPlatform.Transition::Enable;
+                }
+            }
+        }
+    }
+
+    state State::Online {
+    }
 }
 
 /*
-use super::riscv64_platform::Riscv64Platform;
 use super::opensbi::OpenSBI;
 use super::kernel::Kernel;
 
@@ -14,8 +56,6 @@ predicate computer_assembled_from<P, F, K>(platform: P, firmware: F, kernel: K) 
 
 
 object Computer: ComputerType {
-    initial_state: State::Base;
-
     state State::Base {
         transitions {
             on Transition::Preset -> State::Prepared {

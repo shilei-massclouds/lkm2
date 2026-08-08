@@ -10,6 +10,12 @@ entry external signals → tools/build/derive/main.sequence.json
 Model IR v4 + external-root sequence v2 → derive → result JSON v2 / human stdout
 ```
 
+有状态对象可以省略 `initial_state`；modelc 会将其规范化为
+`State::Base`。因此这类对象必须声明 `state State::Base`。显式指定的初始状态保持
+不变，无状态对象仍没有初始状态。Model IR v4 的严格 JSON schema 没有变化：
+`initial_state` 字段始终必需，有状态对象的默认值会明确写成
+`["State", "Base"]`，无状态对象写成 `null`。
+
 入口只接受一条简单的 `spec IDENT;` 后接一条点分
 `origin <qualified-name>;`。`spec` 与 Rust 的 `mod` 类似：根声明
 `spec systems;` 装载同目录的 `systems.spec`，其中的 `spec human;`
@@ -54,6 +60,7 @@ make test   # 运行 unittest 测试
 make test-derive  # 运行 derive 单元测试和 golden 冒烟测试
 make test-smoke   # 只运行 derive golden 冒烟案例
 make run    # 以 model/main.spec 为默认模型执行 tools/bin/derive
+make run VERBOSE=1  # 同上，并显示 Make 委托、构建步骤和 derive 命令
 ```
 
 直接使用组件 Makefile 的等价命令为：
@@ -92,7 +99,10 @@ make run SEQUENCE=tools/build/derive/main.sequence.json
 输入失败退出 1，参数错误退出 2。人类可读的推导过程（包括语义失败）写 stdout；
 该输出是精简因果视图，只展示信号的 drives/emits 关系、单元进入状态和提交结果。
 depends_on、ensures、establishes、invariant、handler 匹配及其逐项结果保留在结果
-JSON 中。输入和编译诊断写 stderr。
+JSON 中。输入和编译诊断写 stderr。默认 `make run` 隐藏 Make 委托、构建步骤和
+derive 命令行，只保留推导输出或错误诊断；只有 `VERBOSE` 严格等于 `1` 时恢复
+全部命令回显。这个静默行为只作用于 `run` 的构建前置步骤，独立的 `make build`
+和 `make test` 保持原有输出。
 
 ## Model IR、推导和缓存
 
@@ -112,8 +122,9 @@ IR schema 版本；完全命中并能严格加载缓存 IR 时不会改写文件
 Transition 与 Action 信号、对象状态比较、布尔组合、depends_on、drives、ensures、
 establishes、状态 invariant 和深度优先 emits；Action 提交事实但不改变状态。
 attrs、reference、may_change、deferred 及其他表达式会明确返回
-`unsupported_feature`。当前 Computer 没有 handler，因此仓库序列在第一个根
-信号稳定返回 `unhandled_signal`，`make run` 的预期退出码为 1。
+`unsupported_feature`。当前 Computer 按顺序处理 `Preset`、`Setup` 和 `Enable`，
+依次提交到 `State::Prepared`、`State::Ready` 和 `State::Online`；默认
+`make run` 输出这三步推导并以 `passed` 和退出码 0 结束。
 
 公共库接口为：
 

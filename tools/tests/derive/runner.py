@@ -868,9 +868,15 @@ class CLITests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertEqual(completed.returncode, 1)
-        self.assertIn("Transition::Preset", completed.stdout)
-        self.assertTrue(completed.stdout.endswith("stopped: unhandled_signal\n"))
+        self.assertEqual(completed.returncode, 0)
+        for signal in (
+            "Transition::Preset",
+            "Transition::Setup",
+            "Transition::Enable",
+        ):
+            with self.subTest(signal=signal):
+                self.assertIn(signal, completed.stdout)
+        self.assertTrue(completed.stdout.endswith("passed\n"))
         self.assertEqual(completed.stderr, "")
 
     def test_model_and_sequence_options_are_mutually_exclusive(self) -> None:

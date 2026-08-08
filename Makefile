@@ -1,13 +1,21 @@
 .DEFAULT_GOAL := all
 
 TOOLS_MAKE := $(MAKE) --no-print-directory -C tools
+RUN_QUIET := @
+
+ifeq ($(VERBOSE),1)
+RUN_QUIET :=
+endif
 
 .PHONY: all setup build run test test-derive test-smoke clean help
 
 all: build
 
-setup build run test test-derive test-smoke clean:
+setup build test test-derive test-smoke clean:
 	$(TOOLS_MAKE) $@
+
+run:
+	$(RUN_QUIET)$(TOOLS_MAKE) $@
 
 help:
 	@echo "Top-level coordination targets:"

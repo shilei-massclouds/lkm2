@@ -22,6 +22,8 @@ from model_ir import (
     ModelModule,
     ModelObject,
     ModelSignal,
+    ModelState,
+    ModelTransition,
     ModelType,
     ModelTypeExpression,
     dump_model_ir,
@@ -45,11 +47,49 @@ EXPECTED_MODEL = ModelIR(
                 ModelObject(
                     ("systems", "computer", "Computer"),
                     ModelTypeExpression(("ComputerType",)),
+                    ("State", "Base"),
                     None,
                     None,
                     None,
-                    None,
-                    (),
+                    (
+                        ModelState(
+                            ("State", "Base"),
+                            (),
+                            (
+                                ModelTransition(
+                                    ("Transition", "Preset"),
+                                    ("State", "Prepared"),
+                                    (),
+                                ),
+                            ),
+                            (),
+                        ),
+                        ModelState(("State", "Online"), (), (), ()),
+                        ModelState(
+                            ("State", "Prepared"),
+                            (),
+                            (
+                                ModelTransition(
+                                    ("Transition", "Setup"),
+                                    ("State", "Ready"),
+                                    (),
+                                ),
+                            ),
+                            (),
+                        ),
+                        ModelState(
+                            ("State", "Ready"),
+                            (),
+                            (
+                                ModelTransition(
+                                    ("Transition", "Enable"),
+                                    ("State", "Online"),
+                                    (),
+                                ),
+                            ),
+                            (),
+                        ),
+                    ),
                     (),
                 ),
             ),
@@ -326,6 +366,51 @@ class ParserAndCompilerTests(unittest.TestCase):
         dump_model_ir(model, output)
         self.assertEqual(load_model_ir(StringIO(output.getvalue())), model)
 
+    def test_stateful_object_defaults_initial_state_to_base(self) -> None:
+        with model_tree(
+            {"root.spec": "object Computer: T { state State::Base {} }"}
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        self.assertEqual(model.objects[0].initial_state, ("State", "Base"))
+
+    def test_explicit_initial_state_is_not_overridden(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    object Computer: T {
+                        initial_state: State::Idle;
+                        state State::Base {}
+                        state State::Idle {}
+                    }
+                """
+            }
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        self.assertEqual(model.objects[0].initial_state, ("State", "Idle"))
+
+    def test_stateless_object_keeps_null_initial_state(self) -> None:
+        with model_tree({"root.spec": "object Computer: T {}"}) as (
+            _,
+            entry_path,
+        ):
+            model = compile_spec(entry_path)
+
+        self.assertIsNone(model.objects[0].initial_state)
+
+    def test_default_initial_state_requires_a_base_state(self) -> None:
+        with model_tree(
+            {"root.spec": "object Computer: T { state State::Idle {} }"}
+        ) as (_, entry_path):
+            with self.assertRaises(CompilationError) as caught:
+                compile_spec(entry_path)
+
+        self.assertIn(
+            "invalid initial_state 'State::Base'",
+            caught.exception.diagnostic.message,
+        )
+
     def test_action_handlers_and_signals_lower_to_strict_names(self) -> None:
         with model_tree(
             {
@@ -409,6 +494,22 @@ class ModelIRJSONTests(unittest.TestCase):
         self.assertEqual(first.getvalue(), EXPECTED_JSON)
         self.assertEqual(first.getvalue().encode(), second.getvalue().encode())
         self.assertEqual(load_model_ir(StringIO(first.getvalue())), EXPECTED_MODEL)
+        document = json.loads(first.getvalue())
+        self.assertEqual(
+            document["modules"][1]["objects"][0]["initial_state"],
+            ["State", "Base"],
+        )
+
+    def test_initial_state_json_field_remains_strict(self) -> None:
+        missing = json.loads(EXPECTED_JSON)
+        del missing["modules"][1]["objects"][0]["initial_state"]
+        null_for_stateful = json.loads(EXPECTED_JSON)
+        null_for_stateful["modules"][1]["objects"][0]["initial_state"] = None
+
+        for document in (missing, null_for_stateful):
+            with self.subTest(document=document):
+                with self.assertRaises(ModelIRValidationError):
+                    load_model_ir(StringIO(json.dumps(document)))
 
     def test_loader_normalizes_module_order(self) -> None:
         document = json.loads(EXPECTED_JSON)
