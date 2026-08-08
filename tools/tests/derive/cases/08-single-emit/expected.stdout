@@ -1,9 +1,7 @@
-root Human -> Producer: Transition::Start
-  enter State::Idle
-  handler Transition::Start -> State::Done
-Producer: State::Idle → State::Done
-emit Producer -> Logger: Transition::Log
-  enter State::Idle
-  handler Transition::Log -> State::Done
-Logger: State::Idle → State::Done
+Human -> Producer: drives Transition::Start
+  current state: State::Idle
+  commit state: State::Done
+Producer -> Logger: emits Transition::Log
+  current state: State::Idle
+  commit state: State::Done
 passed

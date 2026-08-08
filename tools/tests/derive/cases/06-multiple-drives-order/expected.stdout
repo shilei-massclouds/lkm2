@@ -1,13 +1,10 @@
-root Human -> Parent: Transition::Start
-  enter State::Idle
-  handler Transition::Start -> State::Done
-  drive Parent -> First: Transition::Work
-    enter State::Idle
-    handler Transition::Work -> State::Done
-  First: State::Idle → State::Done
-  drive Parent -> Second: Transition::Work
-    enter State::Idle
-    handler Transition::Work -> State::Done
-  Second: State::Idle → State::Done
-Parent: State::Idle → State::Done
+Human -> Parent: drives Transition::Start
+  current state: State::Idle
+  Parent -> First: drives Transition::Work
+    current state: State::Idle
+    commit state: State::Done
+  Parent -> Second: drives Transition::Work
+    current state: State::Idle
+    commit state: State::Done
+  commit state: State::Done
 passed

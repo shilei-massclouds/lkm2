@@ -1,0 +1,57 @@
+{
+  "facts": [],
+  "final_state": [
+    {
+      "object": [
+        "root",
+        "Computer"
+      ],
+      "state": [
+        "State",
+        "Idle"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "status": "passed",
+  "units": [
+    {
+      "candidate_state": null,
+      "depends_on": [],
+      "drives": [],
+      "emits": [],
+      "ensures": [],
+      "establishes": [],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Action",
+          "Refresh"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Computer"
+        ]
+      },
+      "handler": [
+        "Action",
+        "Refresh"
+      ],
+      "invariants": [],
+      "kind": "root",
+      "state_after": [
+        "State",
+        "Idle"
+      ],
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "passed"
+    }
+  ]
+}

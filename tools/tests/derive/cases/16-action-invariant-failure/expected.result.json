@@ -1,0 +1,71 @@
+{
+  "facts": [],
+  "failure": {
+    "code": "invariant_failed",
+    "features": [],
+    "message": "current-state invariant is false",
+    "path": "units[0].invariants[0]"
+  },
+  "final_state": [
+    {
+      "object": [
+        "root",
+        "Computer"
+      ],
+      "state": [
+        "State",
+        "Idle"
+      ]
+    }
+  ],
+  "schema_version": 2,
+  "status": "invariant_failed",
+  "units": [
+    {
+      "candidate_state": null,
+      "depends_on": [],
+      "drives": [],
+      "emits": [],
+      "ensures": [],
+      "establishes": [],
+      "event": {
+        "mode": "drive",
+        "signal": [
+          "Action",
+          "Refresh"
+        ],
+        "source": [
+          "root",
+          "Human"
+        ],
+        "target": [
+          "root",
+          "Computer"
+        ]
+      },
+      "failure": {
+        "code": "invariant_failed",
+        "features": [],
+        "message": "current-state invariant is false",
+        "path": "units[0].invariants[0]"
+      },
+      "handler": [
+        "Action",
+        "Refresh"
+      ],
+      "invariants": [
+        {
+          "expression": "false",
+          "status": "failed"
+        }
+      ],
+      "kind": "root",
+      "state_after": null,
+      "state_before": [
+        "State",
+        "Idle"
+      ],
+      "status": "invariant_failed"
+    }
+  ]
+}

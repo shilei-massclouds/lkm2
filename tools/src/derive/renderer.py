@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TextIO
 
-from .model import DerivationCheck, DerivationResult, DerivationUnit
+from .model import DerivationResult, DerivationUnit
 
 
 def _all_units(units: tuple[DerivationUnit, ...]):
@@ -34,16 +34,6 @@ def _special(name: tuple[str, ...] | None) -> str:
     return "<none>" if name is None else "::".join(name)
 
 
-def _check_line(kind: str, check: DerivationCheck, indent: str) -> str:
-    if check.status == "passed":
-        marker = "✓"
-    elif check.status == "established":
-        marker = "+"
-    else:
-        marker = "✗"
-    return f"{indent}{kind} {check.expression} {marker}"
-
-
 def _render_unit(
     unit: DerivationUnit,
     depth: int,
@@ -53,44 +43,23 @@ def _render_unit(
     detail_indent = "  " * (depth + 1)
     event = unit.event
     lines = [
-        f"{indent}{unit.kind} {names[event.source]} -> {names[event.target]}: "
-        f"{'::'.join(event.signal)}"
+        f"{indent}{names[event.source]} -> {names[event.target]}: "
+        f"{event.mode}s {'::'.join(event.signal)}"
     ]
-    lines.append(f"{detail_indent}enter {_special(unit.state_before)}")
-    if unit.failure is not None and unit.failure.code == "undeclared_external_signal":
-        lines.append(f"{detail_indent}external declaration ✗")
-        return lines
-    if unit.handler is None:
-        lines.append(f"{detail_indent}handler {'::'.join(event.signal)} ✗")
-        return lines
-    lines.append(
-        f"{detail_indent}handler {'::'.join(unit.handler)} -> "
-        f"{_special(unit.candidate_state)}"
-    )
-    lines.extend(
-        _check_line("depends_on", check, detail_indent)
-        for check in unit.depends_on
-    )
+    lines.append(f"{detail_indent}current state: {_special(unit.state_before)}")
     for child in unit.drives:
         lines.extend(_render_unit(child, depth + 1, names))
-    lines.extend(
-        _check_line("ensures", check, detail_indent) for check in unit.ensures
-    )
-    lines.extend(
-        _check_line("establishes", check, detail_indent)
-        for check in unit.establishes
-    )
-    lines.extend(
-        _check_line("invariant", check, detail_indent)
-        for check in unit.invariants
-    )
-    if unit.state_after is not None:
-        lines.append(
-            f"{indent}{names[event.target]}: {_special(unit.state_before)} "
-            f"→ {_special(unit.state_after)}"
+    if unit.status == "passed":
+        committed = (
+            "unchanged"
+            if event.signal[0] == "Action"
+            else _special(unit.state_after)
         )
+        lines.append(f"{detail_indent}commit state: {committed}")
         for child in unit.emits:
             lines.extend(_render_unit(child, depth, names))
+    else:
+        lines.append(f"{detail_indent}commit state: not committed ✗")
     return lines
 
 

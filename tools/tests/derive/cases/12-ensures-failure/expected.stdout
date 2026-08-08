@@ -1,5 +1,4 @@
-root Human -> Computer: Transition::Go
-  enter State::Idle
-  handler Transition::Go -> State::Ready
-  ensures ready() ✗
+Human -> Computer: drives Transition::Go
+  current state: State::Idle
+  commit state: not committed ✗
 stopped: ensures_failed

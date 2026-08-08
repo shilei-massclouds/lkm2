@@ -89,8 +89,10 @@ make run SEQUENCE=tools/build/derive/main.sequence.json
 激活虚拟环境后，也可以直接使用安装生成的 `modelc` 和 `derive` 命令。
 `--model` 接受 `.spec` 或 Model IR JSON，并从 entry external 的信号生成默认序列；
 `--sequence` 使用默认的 `model/main.spec`。两者互斥。成功退出 0，路径推导失败或
-输入失败退出 1，参数错误退出 2。人类可读的推导过程（包括语义失败）写 stdout，
-输入和编译诊断写 stderr。
+输入失败退出 1，参数错误退出 2。人类可读的推导过程（包括语义失败）写 stdout；
+该输出是精简因果视图，只展示信号的 drives/emits 关系、单元进入状态和提交结果。
+depends_on、ensures、establishes、invariant、handler 匹配及其逐项结果保留在结果
+JSON 中。输入和编译诊断写 stderr。
 
 ## Model IR、推导和缓存
 
@@ -105,7 +107,8 @@ IR schema 版本；完全命中并能严格加载缓存 IR 时不会改写文件
 推导序列 schema v2 的每个事件显式指定 `source`、`target`、`signal` 和 `mode`，
 但 sequence 只选择外部根信号；drives 与 emits 由引擎按因果关系自动调度。
 结果 JSON schema v2 记录嵌套推导单元、逐项条件、最终状态和 predicate facts；
-`dump_derivation_result()` 提供规范 JSON，CLI 默认使用人类 renderer。当前支持
+`dump_derivation_result()` 提供包含完整检查细节的规范 JSON，CLI 默认使用精简的
+人类因果 renderer。当前支持
 Transition 与 Action 信号、对象状态比较、布尔组合、depends_on、drives、ensures、
 establishes、状态 invariant 和深度优先 emits；Action 提交事实但不改变状态。
 attrs、reference、may_change、deferred 及其他表达式会明确返回

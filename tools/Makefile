@@ -42,7 +42,7 @@ run: build
 	$(CURDIR)/bin/derive $(DERIVE_ARGS)
 
 test: build
-	$(PYTHON) -m unittest discover -s tests -v
+	$(PYTHON) tests/runner.py
 	$(PYTHON) tests/derive/runner.py
 
 test-derive: check-environment

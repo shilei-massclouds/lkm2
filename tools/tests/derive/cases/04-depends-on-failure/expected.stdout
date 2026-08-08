@@ -1,5 +1,4 @@
-root Human -> Computer: Transition::Go
-  enter State::Idle
-  handler Transition::Go -> State::Ready
-  depends_on Gate == State::Ready ✗
+Human -> Computer: drives Transition::Go
+  current state: State::Idle
+  commit state: not committed ✗
 stopped: depends_on_failed

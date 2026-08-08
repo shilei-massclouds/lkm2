@@ -1,4 +1,4 @@
-root Human -> Computer: Transition::Go
-  enter State::Idle
-  handler Transition::Go ✗
+Human -> Computer: drives Transition::Go
+  current state: State::Idle
+  commit state: not committed ✗
 stopped: unhandled_signal

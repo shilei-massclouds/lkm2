@@ -1,5 +1,4 @@
-root Human -> Computer: Transition::Go
-  enter State::Idle
-  handler Transition::Go -> State::Ready
-Computer: State::Idle → State::Ready
+Human -> Computer: drives Transition::Go
+  current state: State::Idle
+  commit state: State::Ready
 passed

@@ -14,9 +14,12 @@ import unittest
 
 REPOSITORY = Path(__file__).resolve().parents[3]
 SOURCE_DIRECTORY = REPOSITORY / "tools" / "src"
+TESTS_DIRECTORY = REPOSITORY / "tools" / "tests"
 CASES_DIRECTORY = Path(__file__).resolve().parent / "cases"
+sys.path.insert(0, str(TESTS_DIRECTORY))
 sys.path.insert(0, str(SOURCE_DIRECTORY))
 
+from _compact_result import CompactTextTestResult  # noqa: E402
 from derive import (  # noqa: E402
     DerivationEvent,
     DerivationSequence,
@@ -31,6 +34,22 @@ from derive import (  # noqa: E402
 )
 from derive.cli import main as derive_main  # noqa: E402
 from modelc import CompilationError, compile_spec  # noqa: E402
+
+
+class _SyntheticSuccess(unittest.TestCase):
+    def test_success(self) -> None:
+        pass
+
+
+class _SyntheticFailure(unittest.TestCase):
+    def test_failure(self) -> None:
+        self.fail("synthetic ordinary failure")
+
+
+class _SyntheticSubtestFailure(unittest.TestCase):
+    def test_subtests(self) -> None:
+        with self.subTest(value="bad"):
+            self.fail("synthetic subtest failure")
 
 
 def _compile_text(body: str):
@@ -86,7 +105,7 @@ class SmokeGoldenTests(_DiffingTestCase):
             for path in sorted(CASES_DIRECTORY.iterdir(), key=lambda item: item.name)
             if path.is_dir()
         )
-        self.assertEqual(len(cases), 14)
+        self.assertEqual(len(cases), 16)
         for case in cases:
             with self.subTest(case=case.name):
                 expected_json_path = case / "expected.result.json"
@@ -218,6 +237,15 @@ class EngineTests(unittest.TestCase):
         output = StringIO()
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
+        rendered = StringIO()
+        render_derivation_result(result, rendered)
+        self.assertEqual(
+            rendered.getvalue(),
+            "Human -> Computer: drives Action::Refresh\n"
+            "  current state: State::Idle\n"
+            "  commit state: unchanged\n"
+            "passed\n",
+        )
 
     def test_drives_and_emits_can_both_carry_actions(self) -> None:
         directory, model = _compile_text(
@@ -340,6 +368,15 @@ class EngineTests(unittest.TestCase):
         self.assertIsNone(unit.state_after)
         self.assertEqual(states["Computer"], ("State", "Idle"))
         self.assertEqual(states["Child"], ("State", "Idle"))
+        rendered = StringIO()
+        render_derivation_result(result, rendered)
+        self.assertEqual(
+            rendered.getvalue(),
+            "Human -> Computer: drives Action::Refresh\n"
+            "  current state: State::Idle\n"
+            "  commit state: not committed ✗\n"
+            "stopped: invariant_failed\n",
+        )
 
     def test_action_requires_a_handler_in_the_current_state(self) -> None:
         directory, model = _compile_text(
@@ -497,6 +534,21 @@ class EngineTests(unittest.TestCase):
         output = StringIO()
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
+        rendered = StringIO()
+        render_derivation_result(result, rendered)
+        self.assertEqual(
+            rendered.getvalue(),
+            "Human -> Producer: drives Action::Start\n"
+            "  current state: State::Idle\n"
+            "  commit state: unchanged\n"
+            "Producer -> First: emits Action::Run\n"
+            "  current state: State::Idle\n"
+            "  commit state: unchanged\n"
+            "Producer -> Broken: emits Action::Run\n"
+            "  current state: State::Idle\n"
+            "  commit state: not committed ✗\n"
+            "stopped: invariant_failed\n",
+        )
 
     def test_failed_invariant_rolls_back_state_and_staged_facts(self) -> None:
         case = CASES_DIRECTORY / "13-invariant-rollback"
@@ -661,6 +713,15 @@ class EngineTests(unittest.TestCase):
         result = derive(model, selected)
         self.assertEqual(result.status, "undeclared_external_signal")
         self.assertEqual(result.failure.path, "units[0]")
+        rendered = StringIO()
+        render_derivation_result(result, rendered)
+        self.assertEqual(
+            rendered.getvalue(),
+            "Computer -> Computer: drives Transition::Go\n"
+            "  current state: State::Idle\n"
+            "  commit state: not committed ✗\n"
+            "stopped: undeclared_external_signal\n",
+        )
 
     def test_invalid_transition_models_are_compile_errors(self) -> None:
         bodies = (
@@ -831,12 +892,65 @@ class CLITests(unittest.TestCase):
         self.assertIn("not allowed with argument", completed.stderr)
 
 
+class TestRunnerOutputTests(unittest.TestCase):
+    def _run_synthetic(
+        self, test_case: type[unittest.TestCase], verbosity: int = 2
+    ) -> tuple[unittest.TestResult, str]:
+        stream = StringIO()
+        result = unittest.TextTestRunner(
+            stream=stream,
+            verbosity=verbosity,
+            resultclass=CompactTextTestResult,
+        ).run(unittest.TestLoader().loadTestsFromTestCase(test_case))
+        return result, stream.getvalue()
+
+    def test_verbose_success_uses_only_the_method_name(self) -> None:
+        result, output = self._run_synthetic(_SyntheticSuccess)
+        self.assertTrue(result.wasSuccessful())
+        self.assertTrue(output.startswith("test_success ... ok\n"), output)
+        self.assertNotIn("_SyntheticSuccess", output.splitlines()[0])
+
+        quiet_result, quiet_output = self._run_synthetic(
+            _SyntheticSuccess, verbosity=1
+        )
+        self.assertTrue(quiet_result.wasSuccessful())
+        self.assertTrue(quiet_output.startswith("."), quiet_output)
+
+    def test_failure_summary_keeps_the_complete_test_identity(self) -> None:
+        result, output = self._run_synthetic(_SyntheticFailure)
+        self.assertFalse(result.wasSuccessful())
+        self.assertTrue(output.startswith("test_failure ... FAIL\n"), output)
+        self.assertIn(
+            "FAIL: test_failure (" + __name__ + "._SyntheticFailure.test_failure)",
+            output,
+        )
+        self.assertIn("Traceback (most recent call last):", output)
+        self.assertIn("synthetic ordinary failure", output)
+
+    def test_subtest_failure_keeps_identity_and_parameters(self) -> None:
+        result, output = self._run_synthetic(_SyntheticSubtestFailure)
+        self.assertFalse(result.wasSuccessful())
+        self.assertTrue(output.startswith("test_subtests ... \n"), output)
+        description = (
+            "test_subtests ("
+            + __name__
+            + "._SyntheticSubtestFailure.test_subtests) (value='bad')"
+        )
+        self.assertIn("FAIL: " + description, output)
+        self.assertIn("synthetic subtest failure", output)
+
+
 def _suite(smoke_only: bool) -> unittest.TestSuite:
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
     suite.addTests(loader.loadTestsFromTestCase(SmokeGoldenTests))
     if not smoke_only:
-        for test_case in (EngineTests, DerivationJSONTests, CLITests):
+        for test_case in (
+            EngineTests,
+            DerivationJSONTests,
+            CLITests,
+            TestRunnerOutputTests,
+        ):
             suite.addTests(loader.loadTestsFromTestCase(test_case))
     return suite
 
@@ -846,7 +960,8 @@ if __name__ == "__main__":
     parser.add_argument("--smoke-only", action="store_true")
     parser.add_argument("--quiet", action="store_true")
     arguments = parser.parse_args()
-    result = unittest.TextTestRunner(verbosity=1 if arguments.quiet else 2).run(
-        _suite(arguments.smoke_only)
-    )
+    result = unittest.TextTestRunner(
+        verbosity=1 if arguments.quiet else 2,
+        resultclass=CompactTextTestResult,
+    ).run(_suite(arguments.smoke_only))
     raise SystemExit(0 if result.wasSuccessful() else 1)
