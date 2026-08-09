@@ -1,4 +1,5 @@
 {
+  "continuations": [],
   "facts": [],
   "final_state": [
     {
@@ -42,7 +43,7 @@
       ]
     }
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "status": "passed",
   "units": [
     {
@@ -92,7 +93,10 @@
             "State",
             "Idle"
           ],
-          "status": "passed"
+          "status": "passed",
+          "yield_token_consumed": null,
+          "yield_token_created": null,
+          "yields": []
         },
         {
           "candidate_state": [
@@ -133,7 +137,10 @@
             "State",
             "Idle"
           ],
-          "status": "passed"
+          "status": "passed",
+          "yield_token_consumed": null,
+          "yield_token_created": null,
+          "yields": []
         }
       ],
       "ensures": [],
@@ -167,7 +174,10 @@
         "State",
         "Idle"
       ],
-      "status": "passed"
+      "status": "passed",
+      "yield_token_consumed": null,
+      "yield_token_created": null,
+      "yields": []
     },
     {
       "candidate_state": [
@@ -213,7 +223,10 @@
         "State",
         "Idle"
       ],
-      "status": "passed"
+      "status": "passed",
+      "yield_token_consumed": null,
+      "yield_token_created": null,
+      "yields": []
     }
   ]
 }

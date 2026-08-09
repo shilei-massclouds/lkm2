@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v4."""
+"""Strict JSON loading and canonical JSON output for Model IR v5."""
 
 from __future__ import annotations
 
@@ -129,11 +129,34 @@ def _predicate(value: object, path: str) -> ModelPredicate:
 
 
 def _type(value: object, path: str) -> ModelType:
-    data = _require_object(value, frozenset({"name", "fields"}), path)
+    data = _require_object(
+        value,
+        frozenset(
+            {
+                "name",
+                "fields",
+                "base_type",
+                "continuation",
+                "initial_state",
+                "states",
+            }
+        ),
+        path,
+    )
     fields = data["fields"]
+    base_type = data["base_type"]
+    initial_state = data["initial_state"]
     return ModelType(
         name=_qualified_name(data["name"], f"{path}.name"),
         fields=None if fields is None else _array(fields, f"{path}.fields", _field),
+        base_type=None
+        if base_type is None
+        else _type_expression(base_type, f"{path}.base_type"),
+        continuation=data["continuation"],
+        initial_state=None
+        if initial_state is None
+        else _qualified_name(initial_state, f"{path}.initial_state"),
+        states=_array(data["states"], f"{path}.states", _state),
     )
 
 
@@ -179,19 +202,32 @@ def _handler_block(value: object, path: str) -> ModelHandlerBlock:
 
 
 def _transition(value: object, path: str) -> ModelTransition:
-    data = _require_object(value, frozenset({"signal", "target_state", "blocks"}), path)
+    data = _require_object(
+        value,
+        frozenset({"signal", "target_state", "blocks", "abstract", "override"}),
+        path,
+    )
+    target_state = data["target_state"]
     return ModelTransition(
         signal=_qualified_name(data["signal"], f"{path}.signal"),
-        target_state=_qualified_name(data["target_state"], f"{path}.target_state"),
+        target_state=None
+        if target_state is None
+        else _qualified_name(target_state, f"{path}.target_state"),
         blocks=_array(data["blocks"], f"{path}.blocks", _handler_block),
+        abstract=data["abstract"],
+        override=data["override"],
     )
 
 
 def _action(value: object, path: str) -> ModelAction:
-    data = _require_object(value, frozenset({"signal", "blocks"}), path)
+    data = _require_object(
+        value, frozenset({"signal", "blocks", "abstract", "override"}), path
+    )
     return ModelAction(
         signal=_qualified_name(data["signal"], f"{path}.signal"),
         blocks=_array(data["blocks"], f"{path}.blocks", _handler_block),
+        abstract=data["abstract"],
+        override=data["override"],
     )
 
 
@@ -233,7 +269,7 @@ def _object(value: object, path: str) -> ModelObject:
     data = _require_object(
         value,
         frozenset(
-            {"name", "base_type", "initial_state", "parent", "source", "attrs", "states", "references"}
+            {"name", "base_type", "initial_state", "parent", "source", "attrs", "states", "references", "continuation"}
         ),
         path,
     )
@@ -249,6 +285,7 @@ def _object(value: object, path: str) -> ModelObject:
         attrs=None if data["attrs"] is None else _array(data["attrs"], f"{path}.attrs", _field),
         states=_array(data["states"], f"{path}.states", _state),
         references=_array(data["references"], f"{path}.references", _reference),
+        continuation=data["continuation"],
     )
 
 
@@ -278,7 +315,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v4 JSON document."""
+    """Load and strictly validate one Model IR schema-v5 JSON document."""
 
     try:
         raw = json.load(
@@ -362,8 +399,12 @@ def _state_data(state: ModelState) -> dict[str, Any]:
         "transitions": [
             {
                 "signal": list(handler.signal),
-                "target_state": list(handler.target_state),
+                "target_state": None
+                if handler.target_state is None
+                else list(handler.target_state),
                 "blocks": [_block_data(block) for block in handler.blocks],
+                "abstract": handler.abstract,
+                "override": handler.override,
             }
             for handler in state.transitions
         ],
@@ -371,6 +412,8 @@ def _state_data(state: ModelState) -> dict[str, Any]:
             {
                 "signal": list(handler.signal),
                 "blocks": [_block_data(block) for block in handler.blocks],
+                "abstract": handler.abstract,
+                "override": handler.override,
             }
             for handler in state.actions
         ],
@@ -397,6 +440,14 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
             {
                 "name": list(item.name),
                 "fields": None if item.fields is None else [_field_data(field) for field in item.fields],
+                "base_type": None
+                if item.base_type is None
+                else _type_expr_data(item.base_type),
+                "continuation": item.continuation,
+                "initial_state": None
+                if item.initial_state is None
+                else list(item.initial_state),
+                "states": [_state_data(state) for state in item.states],
             }
             for item in module.types
         ],
@@ -419,6 +470,7 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
                     }
                     for reference in item.references
                 ],
+                "continuation": item.continuation,
             }
             for item in module.objects
         ],

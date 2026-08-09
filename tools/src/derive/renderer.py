@@ -1,4 +1,4 @@
-"""Stable human rendering for schema-v2 derivation results."""
+"""Stable human rendering for schema-v3 derivation results."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ def _all_units(units: tuple[DerivationUnit, ...]):
     for unit in units:
         yield unit
         yield from _all_units(unit.drives)
+        yield from _all_units(unit.yields)
         yield from _all_units(unit.emits)
 
 
@@ -49,6 +50,8 @@ def _render_unit(
     lines.append(f"{detail_indent}current state: {_special(unit.state_before)}")
     for child in unit.drives:
         lines.extend(_render_unit(child, depth + 1, names))
+    for child in unit.yields:
+        lines.extend(_render_unit(child, depth + 1, names))
     if unit.status == "passed":
         committed = (
             "unchanged"
@@ -58,6 +61,11 @@ def _render_unit(
         lines.append(f"{detail_indent}commit state: {committed}")
         for child in unit.emits:
             lines.extend(_render_unit(child, depth, names))
+    elif unit.status == "yielded":
+        generation = unit.yield_token_created.generation
+        lines.append(
+            f"{detail_indent}continuation yielded: generation {generation}"
+        )
     else:
         lines.append(f"{detail_indent}commit state: not committed ✗")
     return lines
@@ -86,6 +94,8 @@ def render_derivation_result(result: DerivationResult, stream: TextIO) -> None:
     lines.append(
         "Derivation passed!"
         if result.status == "passed"
+        else "Derivation yielded!"
+        if result.status == "yielded"
         else f"stopped: {result.status}"
     )
     stream.write("\n".join(lines))

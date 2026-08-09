@@ -18,18 +18,25 @@ parameter: IDENTIFIER ":" type_expression
 ?predicate_tail: ";" | predicate_body
 predicate_body: "{" expression_statement* "}"
 
-type_declaration: "type" IDENTIFIER type_tail
-?type_tail: ";" | "{" field_declaration* "}"
+type_declaration: "type" IDENTIFIER type_base? type_tail
+type_base: ":" type_expression
+?type_tail: ";" | "{" type_item* "}"
+?type_item: field_declaration
+          | continuation_property
+          | initial_state_property
+          | state_declaration
 field_declaration: IDENTIFIER ":" type_expression ";"
 
 object_declaration: "object" IDENTIFIER ":" type_expression "{" object_item* "}"
 ?object_item: initial_state_property
+            | continuation_property
             | parent_property
             | source_property
             | attrs_declaration
             | state_declaration
             | reference_declaration
 initial_state_property: "initial_state" ":" expression ";"
+continuation_property: "continuation" ":" IDENTIFIER ";"
 parent_property: "parent" ":" expression ";"
 source_property: "source" ":" expression ";"
 attrs_declaration: "attrs" "{" field_declaration* "}"
@@ -45,11 +52,18 @@ invariant_block: "invariant" expression_block
 transitions_block: "transitions" "{" transition_handler* "}"
 actions_block: "actions" "{" action_handler* "}"
 
-transition_handler: "on" expression "->" expression "{" handler_item* "}"
-action_handler: "on" expression "{" handler_item* "}"
+transition_handler: override_marker? "on" expression transition_handler_tail
+?transition_handler_tail: "->" expression handler_body -> concrete_transition_handler
+                        | ";"                         -> abstract_transition_handler
+action_handler: override_marker? "on" expression action_handler_tail
+?action_handler_tail: handler_body -> concrete_action_handler
+                    | ";"          -> abstract_action_handler
+override_marker: "override"
+handler_body: "{" handler_item* "}"
 ?handler_item: depends_on_block
              | may_change_block
              | drives_block
+             | yields_statement
              | ensures_block
              | establishes_block
              | emits_block
@@ -57,6 +71,7 @@ action_handler: "on" expression "{" handler_item* "}"
 depends_on_block: "depends_on" expression_block
 may_change_block: "may_change" expression_block
 drives_block: "drives" expression_block
+yields_statement: "yields" expression ";"
 ensures_block: "ensures" expression_block
 establishes_block: "establishes" expression_block
 emits_block: "emits" expression_block

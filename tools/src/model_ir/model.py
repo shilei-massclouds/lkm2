@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v4."""
+"""Frozen data model and semantic validation for Model IR schema v5."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -17,13 +17,14 @@ _BLOCK_KINDS = frozenset(
         "depends_on",
         "may_change",
         "drives",
+        "yields",
         "ensures",
         "establishes",
         "emits",
         "deferred",
     }
 )
-_SIGNAL_MODES = frozenset({"drive", "emit"})
+_SIGNAL_MODES = frozenset({"drive", "emit", "yield"})
 _UNARY_OPERATORS = frozenset({"!", "-"})
 _BINARY_OPERATORS = frozenset(
     {"||", "&&", "==", "!=", ">=", "<=", ">", "<", "+", "-", "*", "/", "%"}
@@ -226,14 +227,35 @@ class ModelPredicate:
 class ModelType:
     name: tuple[str, ...]
     fields: tuple[ModelField, ...] | None
+    base_type: ModelTypeExpression | None = None
+    continuation: bool = False
+    initial_state: tuple[str, ...] | None = None
+    states: tuple[ModelState, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.name, "type.name")
+        if self.base_type is not None and not isinstance(
+            self.base_type, ModelTypeExpression
+        ):
+            raise ModelIRValidationError(
+                "type.base_type must be a ModelTypeExpression or null"
+            )
+        if type(self.continuation) is not bool:
+            raise ModelIRValidationError("type.continuation must be a boolean")
         if self.fields is not None:
             _validate_tuple(self.fields, ModelField, "type.fields")
             names = [field.name for field in self.fields]
             if len(set(names)) != len(names):
                 raise ModelIRValidationError(f"duplicate field in type {'.'.join(self.name)!r}")
+        if self.initial_state is not None:
+            _validate_special_name(self.initial_state, "State", "type.initial_state")
+        _validate_tuple(self.states, ModelState, "type.states")
+        state_names = tuple(state.name for state in self.states)
+        if len(set(state_names)) != len(state_names):
+            raise ModelIRValidationError(
+                f"duplicate state in type {'.'.join(self.name)!r}"
+            )
+        object.__setattr__(self, "states", tuple(sorted(self.states, key=lambda item: item.name)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,7 +275,7 @@ class ModelSignal:
             )
         if self.mode not in _SIGNAL_MODES:
             raise ModelIRValidationError(
-                f"signal.mode must be 'drive' or 'emit', got {self.mode!r}"
+                f"signal.mode must be 'drive', 'emit', or 'yield', got {self.mode!r}"
             )
 
 
@@ -291,10 +313,14 @@ class ModelHandlerBlock:
             raise ModelIRValidationError(f"invalid handler block kind {self.kind!r}")
         _validate_tuple(self.expressions, ModelExpression, "handler_block.expressions")
         _validate_tuple(self.signals, ModelSignal, "handler_block.signals")
-        if self.kind in {"drives", "emits"}:
+        if self.kind in {"drives", "yields", "emits"}:
             if self.expressions or self.deferred is not None:
                 raise ModelIRValidationError(f"{self.kind} block may only contain signals")
-            expected_mode = "drive" if self.kind == "drives" else "emit"
+            expected_mode = {
+                "drives": "drive",
+                "yields": "yield",
+                "emits": "emit",
+            }[self.kind]
             if any(signal.mode != expected_mode for signal in self.signals):
                 raise ModelIRValidationError(f"{self.kind} block has a mismatched signal mode")
         elif self.kind == "deferred":
@@ -307,8 +333,10 @@ class ModelHandlerBlock:
 @dataclass(frozen=True, slots=True)
 class ModelTransition:
     signal: tuple[str, ...]
-    target_state: tuple[str, ...]
+    target_state: tuple[str, ...] | None
     blocks: tuple[ModelHandlerBlock, ...]
+    abstract: bool = False
+    override: bool = False
 
     def __post_init__(self) -> None:
         _validate_signal_name(self.signal, "transition.signal")
@@ -316,7 +344,17 @@ class ModelTransition:
             raise ModelIRValidationError(
                 "transition.signal must have the form Transition::<Name>"
             )
-        _validate_special_name(self.target_state, "State", "transition.target_state")
+        if type(self.abstract) is not bool or type(self.override) is not bool:
+            raise ModelIRValidationError("transition abstract/override flags must be booleans")
+        if self.target_state is None:
+            if not self.abstract:
+                raise ModelIRValidationError("concrete transition requires a target state")
+        else:
+            _validate_special_name(self.target_state, "State", "transition.target_state")
+        if self.abstract and (self.target_state is not None or self.blocks):
+            raise ModelIRValidationError(
+                "abstract transition must not contain a target state or blocks"
+            )
         _validate_tuple(self.blocks, ModelHandlerBlock, "transition.blocks")
 
 
@@ -324,10 +362,16 @@ class ModelTransition:
 class ModelAction:
     signal: tuple[str, ...]
     blocks: tuple[ModelHandlerBlock, ...]
+    abstract: bool = False
+    override: bool = False
 
     def __post_init__(self) -> None:
         _validate_special_name(self.signal, "Action", "action.signal")
         _validate_tuple(self.blocks, ModelHandlerBlock, "action.blocks")
+        if type(self.abstract) is not bool or type(self.override) is not bool:
+            raise ModelIRValidationError("action abstract/override flags must be booleans")
+        if self.abstract and self.blocks:
+            raise ModelIRValidationError("abstract action must not contain blocks")
 
 
 @dataclass(frozen=True, slots=True)
@@ -395,11 +439,14 @@ class ModelObject:
     attrs: tuple[ModelField, ...] | None
     states: tuple[ModelState, ...]
     references: tuple[ModelReference, ...]
+    continuation: bool = False
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.name, "object.name")
         if not isinstance(self.base_type, ModelTypeExpression):
             raise ModelIRValidationError("object.base_type must be a ModelTypeExpression")
+        if type(self.continuation) is not bool:
+            raise ModelIRValidationError("object.continuation must be a boolean")
         if self.initial_state is not None:
             _validate_special_name(self.initial_state, "State", "object.initial_state")
         for path, expression in (("object.parent", self.parent), ("object.source", self.source)):
@@ -415,24 +462,6 @@ class ModelObject:
         state_names = [state.name for state in ordered_states]
         if len(set(state_names)) != len(state_names):
             raise ModelIRValidationError(f"duplicate state in object {'.'.join(self.name)!r}")
-        if ordered_states and self.initial_state is None:
-            raise ModelIRValidationError(
-                f"stateful object {'.'.join(self.name)!r} requires initial_state"
-            )
-        if not ordered_states and self.initial_state is not None:
-            raise ModelIRValidationError(
-                f"stateless object {'.'.join(self.name)!r} must not have initial_state"
-            )
-        if self.initial_state is not None and self.initial_state not in set(state_names):
-            raise ModelIRValidationError(
-                f"object {'.'.join(self.name)!r} has invalid initial_state {'::'.join(self.initial_state)!r}"
-            )
-        for state in ordered_states:
-            for transition in state.transitions:
-                if transition.target_state not in set(state_names):
-                    raise ModelIRValidationError(
-                        f"transition in {'.'.join(self.name)!r} targets unknown state {'::'.join(transition.target_state)!r}"
-                    )
         _validate_tuple(self.references, ModelReference, "object.references")
         reference_names = [reference.name for reference in self.references]
         if len(set(reference_names)) != len(reference_names):
@@ -452,6 +481,10 @@ class ModelExternal:
         if any(signal.source != self.name for signal in self.signals):
             raise ModelIRValidationError(
                 f"external {'.'.join(self.name)!r} contains a signal with another source"
+            )
+        if any(signal.mode == "yield" for signal in self.signals):
+            raise ModelIRValidationError(
+                "external declarations cannot use the internal yield signal mode"
             )
 
 
@@ -522,22 +555,121 @@ class ModelIR:
         if self.entry.spec not in root_names:
             raise ModelIRValidationError("entry.spec must name a declared root module")
 
-        objects = {item.name for module in ordered for item in module.objects}
+        object_items = {
+            item.name: item for module in ordered for item in module.objects
+        }
+        objects = set(object_items)
         externals = {item.name for module in ordered for item in module.externals}
         if self.entry.origin not in externals:
             raise ModelIRValidationError(
                 f"entry.origin {'.'.join(self.entry.origin)!r} is not a declared external"
             )
         for module in ordered:
+            for model_type in module.types:
+                type_state_names = tuple(state.name for state in model_type.states)
+                if model_type.states and model_type.initial_state is None:
+                    raise ModelIRValidationError(
+                        f"stateful type {'.'.join(model_type.name)!r} requires initial_state"
+                    )
+                if (
+                    model_type.initial_state is not None
+                    and model_type.initial_state not in set(type_state_names)
+                ):
+                    raise ModelIRValidationError(
+                        f"type {'.'.join(model_type.name)!r} has invalid initial_state "
+                        f"{'::'.join(model_type.initial_state)!r}"
+                    )
+                if model_type.continuation and (
+                    model_type.initial_state != ("State", "Online")
+                    or type_state_names != (("State", "Online"),)
+                    or model_type.states[0].transitions
+                ):
+                    raise ModelIRValidationError(
+                        f"continuation type {'.'.join(model_type.name)!r} must have "
+                        "exactly initial_state State::Online, one State::Online, "
+                        "and no transitions"
+                    )
+                type_state_set = set(type_state_names)
+                for state in model_type.states:
+                    for transition in state.transitions:
+                        if (
+                            not transition.abstract
+                            and transition.target_state not in type_state_set
+                        ):
+                            assert transition.target_state is not None
+                            raise ModelIRValidationError(
+                                f"transition in type {'.'.join(model_type.name)!r} "
+                                f"targets unknown state {'::'.join(transition.target_state)!r}"
+                            )
             for external in module.externals:
                 for signal in external.signals:
                     if signal.target not in objects:
                         raise ModelIRValidationError(
                             f"signal targets unknown object {'.'.join(signal.target)!r}"
                         )
+                    target = object_items[signal.target]
+                    if target.continuation and signal.signal != ("Action", "Enter"):
+                        raise ModelIRValidationError(
+                            "external signals may only target Action::Enter on a "
+                            "continuation object"
+                        )
             for model_object in module.objects:
+                state_names = tuple(state.name for state in model_object.states)
+                state_name_set = set(state_names)
+                if state_names and model_object.initial_state is None:
+                    raise ModelIRValidationError(
+                        f"stateful object {'.'.join(model_object.name)!r} requires initial_state"
+                    )
+                if not state_names and model_object.initial_state is not None:
+                    raise ModelIRValidationError(
+                        f"stateless object {'.'.join(model_object.name)!r} must not have initial_state"
+                    )
+                if (
+                    model_object.initial_state is not None
+                    and model_object.initial_state not in state_name_set
+                ):
+                    raise ModelIRValidationError(
+                        f"object {'.'.join(model_object.name)!r} has invalid initial_state "
+                        f"{'::'.join(model_object.initial_state)!r}"
+                    )
+                if model_object.continuation:
+                    if (
+                        model_object.initial_state != ("State", "Online")
+                        or state_names != (("State", "Online"),)
+                    ):
+                        raise ModelIRValidationError(
+                            f"continuation object {'.'.join(model_object.name)!r} must have "
+                            "exactly initial_state State::Online and one State::Online"
+                        )
+                    if model_object.states[0].transitions:
+                        raise ModelIRValidationError(
+                            f"continuation object {'.'.join(model_object.name)!r} must not "
+                            "declare transitions"
+                        )
+                    if not any(
+                        action.signal == ("Action", "Enter")
+                        for action in model_object.states[0].actions
+                    ):
+                        raise ModelIRValidationError(
+                            f"continuation object {'.'.join(model_object.name)!r} requires "
+                            "a concrete Action::Enter handler"
+                        )
                 for state in model_object.states:
                     for handler in (*state.transitions, *state.actions):
+                        if handler.abstract:
+                            raise ModelIRValidationError(
+                                f"object {'.'.join(model_object.name)!r} contains an "
+                                f"abstract {'transition' if isinstance(handler, ModelTransition) else 'action'} handler"
+                            )
+                        if (
+                            isinstance(handler, ModelTransition)
+                            and handler.target_state not in state_name_set
+                        ):
+                            assert handler.target_state is not None
+                            raise ModelIRValidationError(
+                                f"transition in {'.'.join(model_object.name)!r} targets "
+                                f"unknown state {'::'.join(handler.target_state)!r}"
+                            )
                         for block in handler.blocks:
                             for signal in block.signals:
                                 if signal.source != model_object.name:
@@ -547,6 +679,27 @@ class ModelIR:
                                 if signal.target not in objects:
                                     raise ModelIRValidationError(
                                         f"signal targets unknown object {'.'.join(signal.target)!r}"
+                                    )
+                                target = object_items[signal.target]
+                                if target.continuation and signal.signal != (
+                                    "Action",
+                                    "Enter",
+                                ) and not (
+                                    signal.signal[0] == "Action"
+                                    and signal.source == signal.target
+                                    and signal.mode == "drive"
+                                ):
+                                    raise ModelIRValidationError(
+                                        "only Action::Enter may target a continuation "
+                                        "from outside"
+                                    )
+                                if block.kind == "yields" and (
+                                    not model_object.continuation
+                                    or not isinstance(handler, ModelAction)
+                                ):
+                                    raise ModelIRValidationError(
+                                        "yields is only allowed in a continuation "
+                                        "Action handler"
                                     )
         object.__setattr__(self, "modules", ordered)
 

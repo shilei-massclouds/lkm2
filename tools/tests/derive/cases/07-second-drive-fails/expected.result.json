@@ -1,4 +1,5 @@
 {
+  "continuations": [],
   "facts": [],
   "failure": {
     "code": "unhandled_signal",
@@ -38,7 +39,7 @@
       ]
     }
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "status": "unhandled_signal",
   "units": [
     {
@@ -87,7 +88,10 @@
             "State",
             "Idle"
           ],
-          "status": "passed"
+          "status": "passed",
+          "yield_token_consumed": null,
+          "yield_token_created": null,
+          "yields": []
         },
         {
           "candidate_state": null,
@@ -125,7 +129,10 @@
             "State",
             "Idle"
           ],
-          "status": "unhandled_signal"
+          "status": "unhandled_signal",
+          "yield_token_consumed": null,
+          "yield_token_created": null,
+          "yields": []
         }
       ],
       "emits": [],
@@ -157,7 +164,10 @@
         "State",
         "Idle"
       ],
-      "status": "stopped"
+      "status": "stopped",
+      "yield_token_consumed": null,
+      "yield_token_created": null,
+      "yields": []
     }
   ]
 }

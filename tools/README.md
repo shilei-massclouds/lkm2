@@ -5,27 +5,27 @@
 当前工具链处理流程为：
 
 ```text
-model/main.spec → entry AST → recursive module graph → Model IR v4 → canonical JSON
+model/main.spec → entry AST → recursive module graph → Model IR v5 → canonical JSON
 entry external signals → tools/build/derive/main.sequence.json
-Model IR v4 + external-root sequence v2 → derive → result JSON v2 / human stdout
+Model IR v5 + external-root sequence v2 → derive → result JSON v3 / human stdout
 ```
 
 有状态对象可以省略 `initial_state`；modelc 会将其规范化为
 `State::Base`。因此这类对象必须声明 `state State::Base`。显式指定的初始状态保持
-不变，无状态对象仍没有初始状态。Model IR v4 的严格 JSON schema 没有变化：
+不变，无状态对象仍没有初始状态。Model IR v5 的严格 JSON schema 中：
 `initial_state` 字段始终必需，有状态对象的默认值会明确写成
 `["State", "Base"]`，无状态对象写成 `null`。
 
 入口接受一条或多条简单的 `spec IDENT;`，然后是一条点分
 `origin <qualified-name>;`。每条入口 `spec` 都声明一个并列根模块；第一条是
-Model IR v4 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
+Model IR v5 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
 `flows` 三个并列根模块组成。`spec` 与 Rust 的 `mod` 类似：入口根
 声明 `spec systems;` 装载同目录的 `systems.spec`，其中的
 `spec human;` 再装载 `systems/human.spec`。只有显式声明会进入模块图，
 不自动发现目录，也不使用 `<module>/main.spec`。
 
 模块文件必须完整符合 [`module_grammar.lark`](src/modelc/module_grammar.lark)
-定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v4 lowering
+定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v5 lowering
 保留 predicate、type、object、external、state、handler、deferred 和通用表达式树。
 绝对 `use` 路径使用 `model::`，相对路径使用 `self::` 或连续的
 `super::`；不带根关键字的裸路径也从 model root 开始。`crate::` 不再受支持。
@@ -119,21 +119,28 @@ IR schema 版本；完全命中并能严格加载缓存 IR 时不会改写文件
 
 推导序列 schema v2 的每个事件显式指定 `source`、`target`、`signal` 和 `mode`，
 但 sequence 只选择外部根信号；drives 与 emits 由引擎按因果关系自动调度。
-结果 JSON schema v2 记录嵌套推导单元、逐项条件、最终状态和 predicate facts；
+结果 JSON schema v3 记录嵌套推导单元、逐项条件、最终状态、predicate facts、
+continuation frame 快照及 yield token 的创建/消费关联；
 `dump_derivation_result()` 提供包含完整检查细节的规范 JSON，CLI 默认使用精简的
 人类因果 renderer。当前支持
 Transition 与 Action 信号、对象状态比较、布尔组合、depends_on、drives、ensures、
-establishes、状态 invariant 和深度优先 emits；Action 提交事实但不改变状态。
+establishes、状态 invariant、深度优先 emits，以及 continuation Action 的同步
+drives、yields 和后续 `Action::Enter` 恢复；Action 提交事实但不改变状态。
 信号名使用完整的 `Transition::<Name>` 或 `Action::<Name>` 精确匹配。
 `Transition::Preset` 是正式名称；`Transition::Startup` 只在兼容输入边界可用，
 并会在进入核心前立即规范化为 `Transition::Preset`。兼容边界包括 `.spec` 中
 `drives`、`emits`、`external` 的 signal 调用，以及内存或 sequence JSON 的
 derive 请求。Transition handler 必须声明 `Transition::Preset`；Model IR JSON
 和 result JSON 只接受、保存并输出正式名称。`Action::Startup` 不属于该别名。
-attrs、reference、may_change、deferred 及其他表达式会明确返回
+type 支持单继承；modelc 按 base type、derived type、object 展开字段、state、
+invariant 和 handler，并检查显式 `override`、抽象 handler、继承环与 continuation
+的唯一 `State::Online` 生命周期。`continuation: true` 只能由 type 声明且不可取消。
+continuation 的 `yields` 目标立即深度优先执行；暂停帧只由未来的
+`Action::Enter` 消费对应 generation token 后恢复。attrs、reference、may_change、deferred 及其他表达式会明确返回
 `unsupported_feature`。当前 Computer 按顺序处理 `Preset`、`Setup` 和 `Enable`，
 依次提交到 `State::Prepared`、`State::Ready` 和 `State::Online`；Kernel 的
-Startup 兼容调用会以正式的 Preset 信号启动 BootInitFlow，再完成 Setup 和 Enable。
+Enable 提交后会向 BootInitFlow 投递 `Action::Enter`，首次从 Enter handler 入口执行；
+若 handler yields，后续 Enter 从稳定 frame 链恢复。
 默认 `make run` 输出完整推导，与结论空开一行，并以 `Derivation passed!` 和退出码 0 结束。
 
 公共库接口为：
@@ -147,6 +154,6 @@ Startup 兼容调用会以正式的 Preset 信号启动 BootInitFlow，再完成
 - `derive.load_derivation_result()`
 - `derive.render_derivation_result()`
 
-AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v4
+AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v5
 loader 严格拒绝旧版本、未知字段、重复声明、无效状态引用、重复 handler 和未知
 信号目标，并规范排序模块和声明。

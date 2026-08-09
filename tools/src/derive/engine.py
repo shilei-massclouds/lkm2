@@ -2,21 +2,43 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 
-from model_ir import ModelExpression, ModelIR, ModelObject, ModelSignal
+from model_ir import ModelAction, ModelExpression, ModelIR, ModelObject, ModelSignal
 
 from .model import (
     RESULT_SCHEMA_VERSION,
     DerivationCheck,
+    DerivationContinuation,
     DerivationEvent,
     DerivationFact,
     DerivationFailure,
+    DerivationFrame,
     DerivationResult,
     DerivationSequence,
     DerivationState,
     DerivationUnit,
+    DerivationYieldToken,
 )
+
+
+@dataclass(slots=True)
+class _ResumeFrame:
+    handler: tuple[str, ...]
+    control_index: int = 0
+    entered: bool = False
+
+
+@dataclass(slots=True)
+class _ContinuationRuntime:
+    object: tuple[str, ...]
+    frames: list[_ResumeFrame] = field(default_factory=list)
+    generation: int = 0
+    token: DerivationYieldToken | None = None
+    executing: bool = False
+    completed: bool = False
+    waiting_yield_target: bool = False
 
 
 class _UnsupportedExpression(Exception):
@@ -32,7 +54,7 @@ def _event(signal: ModelSignal) -> DerivationEvent:
 def _unsupported_features(model: ModelIR) -> tuple[str, ...]:
     features: set[str] = set()
     for model_object in model.objects:
-        if model_object.attrs is not None:
+        if model_object.attrs:
             features.add("attrs")
         if model_object.references:
             features.add("reference")
@@ -280,6 +302,33 @@ class _Execution:
         self.states = _states(model)
         self.facts: set[DerivationFact] = set()
         self.failure: DerivationFailure | None = None
+        self.continuations: dict[tuple[str, ...], _ContinuationRuntime] = {}
+        for model_object in model.objects:
+            if model_object.continuation:
+                self.continuations[model_object.name] = _ContinuationRuntime(
+                    model_object.name,
+                    [_ResumeFrame(("Action", "Enter"))],
+                )
+
+    def continuation_snapshots(self) -> tuple[DerivationContinuation, ...]:
+        return tuple(
+            DerivationContinuation(
+                runtime.object,
+                runtime.generation,
+                tuple(
+                    DerivationFrame(
+                        runtime.object,
+                        frame.handler,
+                        frame.control_index,
+                        runtime.generation,
+                    )
+                    for frame in runtime.frames
+                ),
+                runtime.token,
+            )
+            for runtime in self.continuations.values()
+            if runtime.frames
+        )
 
     def _set_failure(
         self,
@@ -310,6 +359,9 @@ class _Execution:
         emits: list[DerivationUnit],
         status: str,
         failure: DerivationFailure | None,
+        yields: list[DerivationUnit] | None = None,
+        yield_token_created: DerivationYieldToken | None = None,
+        yield_token_consumed: DerivationYieldToken | None = None,
     ) -> DerivationUnit:
         return DerivationUnit(
             kind,
@@ -326,6 +378,9 @@ class _Execution:
             tuple(emits),
             status,
             failure,
+            () if yields is None else tuple(yields),
+            yield_token_created,
+            yield_token_consumed,
         )
 
     def undeclared_root(self, event: DerivationEvent, path: str) -> DerivationUnit:
@@ -351,7 +406,511 @@ class _Execution:
             failure=failure,
         )
 
+    def _find_handler(
+        self, event: DerivationEvent
+    ) -> tuple[ModelObject, object | None]:
+        model_object = self.context.objects[event.target]
+        before = self.states[event.target]
+        current_state = next(
+            (state for state in model_object.states if state.name == before), None
+        )
+        handlers = ()
+        if current_state is not None:
+            handlers = (
+                current_state.transitions
+                if event.signal[0] == "Transition"
+                else current_state.actions
+            )
+        return model_object, next(
+            (item for item in handlers if item.signal == event.signal), None
+        )
+
+    @staticmethod
+    def _control_signals(handler: ModelAction) -> tuple[ModelSignal, ...]:
+        return tuple(
+            signal
+            for block in handler.blocks
+            if block.kind in {"drives", "yields"}
+            for signal in block.signals
+        )
+
+    def _continuation_failure_unit(
+        self,
+        event: DerivationEvent,
+        kind: str,
+        path: str,
+        code: str,
+        message: str,
+        handler: tuple[str, ...] | None = None,
+    ) -> DerivationUnit:
+        failure = self._set_failure(code, path, message)
+        return self._unit(
+            kind=kind,
+            event=event,
+            before=self.states.get(event.target),
+            handler=handler,
+            candidate=None,
+            depends_on=[],
+            drives=[],
+            ensures=[],
+            establishes=[],
+            invariants=[],
+            state_after=None,
+            emits=[],
+            status=code,
+            failure=failure,
+        )
+
+    def _preflight_yield(
+        self, event: DerivationEvent, path: str
+    ) -> DerivationFailure | None:
+        model_object, handler = self._find_handler(event)
+        if model_object.continuation:
+            runtime = self.continuations[event.target]
+            if event.signal != ("Action", "Enter"):
+                return self._set_failure(
+                    "invalid_continuation_action",
+                    f"{path}.handler",
+                    "a suspended continuation can only be entered through Action::Enter",
+                )
+            if runtime.executing:
+                return self._set_failure(
+                    "continuation_reentry",
+                    f"{path}.handler",
+                    "continuation cannot be re-entered before the current target settles",
+                )
+            if runtime.waiting_yield_target:
+                return self._set_failure(
+                    "continuation_reentry",
+                    f"{path}.handler",
+                    "yield target cannot synchronously re-enter the suspended continuation",
+                )
+            if not runtime.frames:
+                return self._set_failure(
+                    "no_resumable_continuation",
+                    f"{path}.handler",
+                    "continuation has exited and has no resumable frame",
+                )
+        if handler is None:
+            return self._set_failure(
+                "unhandled_signal",
+                f"{path}.handler",
+                "yield target has no matching handler in its current state",
+            )
+        return None
+
+    def _run_continuation(
+        self, event: DerivationEvent, kind: str, path: str
+    ) -> DerivationUnit:
+        runtime = self.continuations[event.target]
+        before = self.states[event.target]
+        if event.signal != ("Action", "Enter"):
+            return self._continuation_failure_unit(
+                event,
+                kind,
+                f"{path}.handler",
+                "invalid_continuation_action",
+                "only Action::Enter can externally start or resume a continuation",
+            )
+        if runtime.executing:
+            return self._continuation_failure_unit(
+                event,
+                kind,
+                f"{path}.handler",
+                "continuation_reentry",
+                "continuation is already executing",
+            )
+        if runtime.waiting_yield_target and kind != "emit":
+            return self._continuation_failure_unit(
+                event,
+                kind,
+                f"{path}.handler",
+                "continuation_reentry",
+                "yield target cannot synchronously re-enter the suspended continuation",
+            )
+        if not runtime.frames:
+            return self._continuation_failure_unit(
+                event,
+                kind,
+                f"{path}.handler",
+                "no_resumable_continuation",
+                "continuation has exited and has no resumable frame",
+            )
+
+        consumed = runtime.token
+        runtime.token = None
+        runtime.executing = True
+        root_frame = runtime.frames[0]
+        root_handler = root_frame.handler
+        drives: list[DerivationUnit] = []
+        yielded_units: list[DerivationUnit] = []
+        emits: list[DerivationUnit] = []
+        response_checks: dict[
+            int, dict[str, list[DerivationCheck]]
+        ] = {}
+
+        def checks_for(frame: _ResumeFrame) -> dict[str, list[DerivationCheck]]:
+            return response_checks.setdefault(
+                id(frame),
+                {
+                    "depends_on": [],
+                    "ensures": [],
+                    "establishes": [],
+                    "invariants": [],
+                },
+            )
+
+        def failed(
+            frame: _ResumeFrame,
+            handler: ModelAction,
+            failure: DerivationFailure,
+        ) -> DerivationUnit:
+            runtime.executing = False
+            checks = checks_for(frame)
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=root_handler,
+                candidate=None,
+                depends_on=checks["depends_on"],
+                drives=drives,
+                ensures=checks["ensures"],
+                establishes=checks["establishes"],
+                invariants=checks["invariants"],
+                state_after=None,
+                emits=emits,
+                status=failure.code,
+                failure=failure,
+                yield_token_consumed=consumed,
+            )
+
+        while runtime.frames:
+            frame = runtime.frames[-1]
+            model_object = self.context.objects[runtime.object]
+            state = model_object.states[0]
+            handler = next(
+                action for action in state.actions if action.signal == frame.handler
+            )
+            checks = checks_for(frame)
+            module = model_object.name[:-1]
+            if not frame.entered:
+                depends = tuple(
+                    expression
+                    for block in handler.blocks
+                    if block.kind == "depends_on"
+                    for expression in block.expressions
+                )
+                for index, expression in enumerate(depends):
+                    text = self.context.expression_text(expression, module)
+                    try:
+                        passed = self.context.evaluate(
+                            expression, module, self.states, self.facts
+                        )
+                    except _UnsupportedExpression as exc:
+                        checks["depends_on"].append(
+                            DerivationCheck(text, "unsupported")
+                        )
+                        return failed(
+                            frame,
+                            handler,
+                            self._set_failure(
+                                "unsupported_feature",
+                                f"{path}.depends_on[{index}]",
+                                "depends_on expression is not supported",
+                                (exc.feature,),
+                            ),
+                        )
+                    checks["depends_on"].append(
+                        DerivationCheck(text, "passed" if passed else "failed")
+                    )
+                    if not passed:
+                        return failed(
+                            frame,
+                            handler,
+                            self._set_failure(
+                                "depends_on_failed",
+                                f"{path}.depends_on[{index}]",
+                                "depends_on condition is false",
+                            ),
+                        )
+                frame.entered = True
+
+            controls = self._control_signals(handler)
+            if frame.control_index < len(controls):
+                signal = controls[frame.control_index]
+                child_event = _event(signal)
+                child_path = (
+                    f"{path}.yields[{len(yielded_units)}]"
+                    if signal.mode == "yield"
+                    else f"{path}.drives[{len(drives)}]"
+                )
+                if signal.mode == "yield":
+                    preflight = self._preflight_yield(child_event, child_path)
+                    if preflight is not None:
+                        return failed(frame, handler, preflight)
+                    frame.control_index += 1
+                    runtime.generation += 1
+                    token = DerivationYieldToken(
+                        runtime.object, runtime.generation
+                    )
+                    runtime.token = token
+                    # The suspension is stable before the target begins executing.
+                    runtime.executing = False
+                    runtime.waiting_yield_target = True
+                    yielded_units.append(self.run_unit(child_event, "yield", child_path))
+                    runtime.waiting_yield_target = False
+                    root_checks = checks_for(root_frame)
+                    return self._unit(
+                        kind=kind,
+                        event=event,
+                        before=before,
+                        handler=root_handler,
+                        candidate=None,
+                        depends_on=root_checks["depends_on"],
+                        drives=drives,
+                        ensures=root_checks["ensures"],
+                        establishes=root_checks["establishes"],
+                        invariants=root_checks["invariants"],
+                        state_after=None,
+                        emits=emits,
+                        status="yielded",
+                        failure=None,
+                        yields=yielded_units,
+                        yield_token_created=token,
+                        yield_token_consumed=consumed,
+                    )
+
+                frame.control_index += 1
+                if (
+                    child_event.target == runtime.object
+                    and child_event.signal[0] == "Action"
+                ):
+                    if child_event.signal == ("Action", "Enter"):
+                        return failed(
+                            frame,
+                            handler,
+                            self._set_failure(
+                                "continuation_reentry",
+                                f"{child_path}.handler",
+                                "a running continuation cannot synchronously call Action::Enter",
+                            ),
+                        )
+                    child_handler = next(
+                        (
+                            action
+                            for action in state.actions
+                            if action.signal == child_event.signal
+                        ),
+                        None,
+                    )
+                    if child_handler is None:
+                        return failed(
+                            frame,
+                            handler,
+                            self._set_failure(
+                                "unhandled_signal",
+                                f"{child_path}.handler",
+                                "continuation has no matching nested Action handler",
+                            ),
+                        )
+                    runtime.frames.append(_ResumeFrame(child_event.signal))
+                    continue
+                drives.append(self.run_unit(child_event, "drive", child_path))
+                if self.failure is not None:
+                    runtime.executing = False
+                    return self._unit(
+                        kind=kind,
+                        event=event,
+                        before=before,
+                        handler=root_handler,
+                        candidate=None,
+                        depends_on=checks["depends_on"],
+                        drives=drives,
+                        ensures=checks["ensures"],
+                        establishes=checks["establishes"],
+                        invariants=checks["invariants"],
+                        state_after=None,
+                        emits=emits,
+                        status="stopped",
+                        failure=None,
+                        yield_token_consumed=consumed,
+                    )
+                continue
+
+            ensures = tuple(
+                expression
+                for block in handler.blocks
+                if block.kind == "ensures"
+                for expression in block.expressions
+            )
+            for index, expression in enumerate(ensures):
+                text = self.context.expression_text(expression, module)
+                try:
+                    passed = self.context.evaluate(
+                        expression, module, self.states, self.facts
+                    )
+                except _UnsupportedExpression as exc:
+                    checks["ensures"].append(DerivationCheck(text, "unsupported"))
+                    return failed(
+                        frame,
+                        handler,
+                        self._set_failure(
+                            "unsupported_feature",
+                            f"{path}.ensures[{index}]",
+                            "ensures expression is not supported",
+                            (exc.feature,),
+                        ),
+                    )
+                checks["ensures"].append(
+                    DerivationCheck(text, "passed" if passed else "failed")
+                )
+                if not passed:
+                    return failed(
+                        frame,
+                        handler,
+                        self._set_failure(
+                            "ensures_failed",
+                            f"{path}.ensures[{index}]",
+                            "ensures condition is false",
+                        ),
+                    )
+
+            staged_facts: set[DerivationFact] = set()
+            establishes = tuple(
+                expression
+                for block in handler.blocks
+                if block.kind == "establishes"
+                for expression in block.expressions
+            )
+            for index, expression in enumerate(establishes):
+                text = self.context.expression_text(expression, module)
+                try:
+                    fact = self.context.normalize_fact(expression, module)
+                except _UnsupportedExpression as exc:
+                    checks["establishes"].append(
+                        DerivationCheck(text, "unsupported")
+                    )
+                    return failed(
+                        frame,
+                        handler,
+                        self._set_failure(
+                            "unsupported_feature",
+                            f"{path}.establishes[{index}]",
+                            "establishes only accepts normalizable positive predicate calls",
+                            (exc.feature,),
+                        ),
+                    )
+                checks["establishes"].append(
+                    DerivationCheck(self.context.fact_text(fact), "established")
+                )
+                staged_facts.add(fact)
+
+            candidate_facts = self.facts | staged_facts
+            invariant_expressions = tuple(
+                expression for block in state.invariants for expression in block
+            )
+            for index, expression in enumerate(invariant_expressions):
+                text = self.context.expression_text(expression, module)
+                try:
+                    passed = self.context.evaluate(
+                        expression, module, self.states, candidate_facts
+                    )
+                except _UnsupportedExpression as exc:
+                    checks["invariants"].append(
+                        DerivationCheck(text, "unsupported")
+                    )
+                    return failed(
+                        frame,
+                        handler,
+                        self._set_failure(
+                            "unsupported_feature",
+                            f"{path}.invariants[{index}]",
+                            "current-state invariant expression is not supported",
+                            (exc.feature,),
+                        ),
+                    )
+                checks["invariants"].append(
+                    DerivationCheck(text, "passed" if passed else "failed")
+                )
+                if not passed:
+                    return failed(
+                        frame,
+                        handler,
+                        self._set_failure(
+                            "invariant_failed",
+                            f"{path}.invariants[{index}]",
+                            "current-state invariant is false",
+                        ),
+                    )
+            self.facts.update(staged_facts)
+
+            completed_frame = runtime.frames.pop()
+            completed_event = DerivationEvent(
+                runtime.object,
+                runtime.object,
+                completed_frame.handler,
+                "drive",
+            )
+            completed_emits: list[DerivationUnit] = []
+            for block in handler.blocks:
+                if block.kind != "emits":
+                    continue
+                for signal in block.signals:
+                    emitted = self.run_unit(
+                        _event(signal),
+                        "emit",
+                        f"{path}.emits[{len(completed_emits)}]",
+                    )
+                    completed_emits.append(emitted)
+                    if self.failure is not None:
+                        break
+            if runtime.frames:
+                drives.append(
+                    self._unit(
+                        kind="drive",
+                        event=completed_event,
+                        before=before,
+                        handler=completed_frame.handler,
+                        candidate=None,
+                        depends_on=checks["depends_on"],
+                        drives=[],
+                        ensures=checks["ensures"],
+                        establishes=checks["establishes"],
+                        invariants=checks["invariants"],
+                        state_after=before,
+                        emits=completed_emits,
+                        status="passed",
+                        failure=None,
+                    )
+                )
+                continue
+
+            runtime.completed = True
+            runtime.executing = False
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=root_handler,
+                candidate=None,
+                depends_on=checks["depends_on"],
+                drives=drives,
+                ensures=checks["ensures"],
+                establishes=checks["establishes"],
+                invariants=checks["invariants"],
+                state_after=before,
+                emits=completed_emits,
+                status="passed",
+                failure=None,
+                yield_token_consumed=consumed,
+            )
+
+        raise RuntimeError("continuation execution exhausted without a result")
+
     def run_unit(self, event: DerivationEvent, kind: str, path: str) -> DerivationUnit:
+        if self.context.objects[event.target].continuation:
+            return self._run_continuation(event, kind, path)
         model_object: ModelObject = self.context.objects[event.target]
         before = self.states[event.target]
         current_state = next(
@@ -631,6 +1190,7 @@ def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
             _final_state(execution.states),
             (),
             failure,
+            execution.continuation_snapshots(),
         )
 
     origin = next(item for item in model.externals if item.name == model.entry.origin)
@@ -645,11 +1205,17 @@ def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
         if execution.failure is not None:
             break
 
+    outcome = "passed"
+    if execution.failure is None and any(
+        runtime.token is not None for runtime in execution.continuations.values()
+    ):
+        outcome = "yielded"
     return DerivationResult(
         RESULT_SCHEMA_VERSION,
-        "passed" if execution.failure is None else execution.failure.code,
+        outcome if execution.failure is None else execution.failure.code,
         tuple(units),
         _final_state(execution.states),
         tuple(execution.facts),
         execution.failure,
+        execution.continuation_snapshots(),
     )

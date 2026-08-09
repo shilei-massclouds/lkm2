@@ -219,7 +219,7 @@ class EngineTests(unittest.TestCase):
             object Computer: T {
                 initial_state: State::Idle;
                 state State::Idle {
-                    actions { on Action::Refresh {} }
+                    actions { on Action::Refresh { drives {} } }
                 }
             }
             external Human { drives { Computer.Action::Refresh; } }
@@ -438,7 +438,7 @@ class EngineTests(unittest.TestCase):
                 initial_state: State::Idle;
                 state State::Idle {}
                 state State::Ready {
-                    actions { on Action::Refresh {} }
+                    actions { on Action::Refresh { drives {} } }
                 }
             }
             external Human { drives { Computer.Action::Refresh; } }
@@ -652,7 +652,7 @@ class EngineTests(unittest.TestCase):
                             }
                         }
                     }
-                    actions { on Action::Refresh {} }
+                    actions { on Action::Refresh { drives {} } }
                 }
                 state State::Ready {}
                 reference implementation { value = symbol("value"); }
@@ -802,6 +802,228 @@ class EngineTests(unittest.TestCase):
                     directory, _ = _compile_text(body)
                     directory.cleanup()
 
+    def test_continuation_yields_immediately_and_resumes_exactly_once(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Worker: T {
+                state State::Base {
+                    actions { on Action::Step { drives {} } }
+                }
+            }
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object Boot: Flow {
+                state State::Online {
+                    actions { override on Action::Enter {
+                        yields Worker.Action::Step;
+                        yields Worker.Action::Step;
+                        ensures { true; }
+                    } }
+                }
+            }
+            external Human { emits {
+                Boot.Action::Enter;
+                Boot.Action::Enter;
+                Boot.Action::Enter;
+            } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        selected = default_derivation_sequence(model)
+        first = derive(model, DerivationSequence(2, selected.events[:1]))
+        self.assertEqual(first.status, "yielded")
+        self.assertEqual(first.units[0].status, "yielded")
+        self.assertEqual(first.units[0].yields[0].status, "passed")
+        self.assertEqual(first.continuations[0].frames[0].control_index, 1)
+        self.assertEqual(first.continuations[0].generation, 1)
+        serialized = StringIO()
+        dump_derivation_result(first, serialized)
+        self.assertEqual(
+            load_derivation_result(StringIO(serialized.getvalue())), first
+        )
+
+        complete = derive(model, selected)
+        self.assertEqual(
+            tuple(unit.status for unit in complete.units),
+            ("yielded", "yielded", "passed"),
+        )
+        first_token = complete.units[0].yield_token_created
+        second_token = complete.units[1].yield_token_created
+        self.assertEqual(complete.units[1].yield_token_consumed, first_token)
+        self.assertEqual(complete.units[2].yield_token_consumed, second_token)
+        self.assertEqual(first_token.generation, 1)
+        self.assertEqual(second_token.generation, 2)
+        self.assertEqual(complete.continuations, ())
+
+    def test_nested_continuation_action_uses_one_resume_frame_chain(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Worker: T {
+                state State::Base { actions { on Action::Step { drives {} } } }
+            }
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online {
+                    actions { on Action::Enter; on Action::Inner; }
+                }
+            }
+            object Boot: Flow {
+                state State::Online { actions {
+                    override on Action::Enter {
+                        drives { Boot.Action::Inner; }
+                    }
+                    override on Action::Inner {
+                        yields Worker.Action::Step;
+                    }
+                } }
+            }
+            external Human { emits { Boot.Action::Enter; Boot.Action::Enter; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        selected = default_derivation_sequence(model)
+        first = derive(model, DerivationSequence(2, selected.events[:1]))
+        self.assertEqual(
+            tuple(frame.handler for frame in first.continuations[0].frames),
+            (("Action", "Enter"), ("Action", "Inner")),
+        )
+        complete = derive(model, selected)
+        self.assertEqual(
+            tuple(unit.status for unit in complete.units), ("yielded", "passed")
+        )
+        self.assertEqual(complete.units[1].drives[0].handler, ("Action", "Inner"))
+        self.assertEqual(complete.continuations, ())
+
+    def test_two_continuations_pause_independently_and_yield_transition_commits(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Worker: T {
+                state State::Base {
+                    transitions { on Transition::Step -> State::Done {} }
+                }
+                state State::Done {}
+            }
+            object Waiter: T {
+                state State::Base {
+                    actions { on Action::Wait { drives {} } }
+                }
+            }
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object First: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { yields Worker.Transition::Step; }
+                } }
+            }
+            object Second: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { yields Waiter.Action::Wait; }
+                } }
+            }
+            external Human { emits { First.Action::Enter; Second.Action::Enter; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "yielded")
+        worker = next(item for item in result.final_state if item.object[-1] == "Worker")
+        self.assertEqual(worker.state, ("State", "Done"))
+        self.assertEqual(
+            tuple(unit.status for unit in result.units), ("yielded", "yielded")
+        )
+        snapshots = {item.object[-1]: item for item in result.continuations}
+        self.assertEqual(snapshots["First"].generation, 1)
+        self.assertEqual(snapshots["Second"].generation, 1)
+
+    def test_reentry_and_exit_report_precise_continuation_failures(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Worker: T {
+                state State::Base { actions {
+                    on Action::Step { drives { Boot.Action::Enter; } }
+                } }
+            }
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object Boot: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { yields Worker.Action::Step; }
+                } }
+            }
+            external Human { emits { Boot.Action::Enter; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "continuation_reentry")
+        self.assertEqual(result.units[0].status, "yielded")
+        self.assertEqual(result.continuations[0].generation, 1)
+        self.assertIsNotNone(result.continuations[0].yield_token)
+
+        directory_emit, model_emit = _compile_text(
+            """
+            object Worker: T {
+                state State::Base { actions {
+                    on Action::Step { emits { Boot.Action::Enter; } }
+                } }
+            }
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object Boot: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { yields Worker.Action::Step; }
+                } }
+            }
+            external Human { emits { Boot.Action::Enter; } }
+            """
+        )
+        self.addCleanup(directory_emit.cleanup)
+        resumed = derive(model_emit, default_derivation_sequence(model_emit))
+        self.assertEqual(resumed.status, "passed")
+        self.assertEqual(resumed.continuations, ())
+        resumed_unit = resumed.units[0].yields[0].emits[0]
+        self.assertEqual(
+            resumed_unit.yield_token_consumed,
+            resumed.units[0].yield_token_created,
+        )
+
+        directory2, model2 = _compile_text(
+            """
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object Boot: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { drives {} }
+                } }
+            }
+            external Human { emits { Boot.Action::Enter; Boot.Action::Enter; } }
+            """
+        )
+        self.addCleanup(directory2.cleanup)
+        exited = derive(model2, default_derivation_sequence(model2))
+        self.assertEqual(exited.status, "no_resumable_continuation")
+        self.assertEqual(
+            tuple(unit.status for unit in exited.units),
+            ("passed", "no_resumable_continuation"),
+        )
+        self.assertEqual(exited.continuations, ())
+
 
 class DerivationJSONTests(unittest.TestCase):
     def test_sequence_is_strict(self) -> None:
@@ -867,7 +1089,7 @@ class DerivationJSONTests(unittest.TestCase):
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 2)
+        self.assertEqual(document["schema_version"], 3)
         self.assertNotIn("failure", document)
 
         startup_event = json.loads(output.getvalue())
@@ -900,7 +1122,7 @@ class DerivationJSONTests(unittest.TestCase):
         missing = dict(document)
         del missing["facts"]
         invalid_documents.append(json.dumps(missing))
-        invalid_documents.append('{"schema_version":2,"status":"passed","status":"passed"}')
+        invalid_documents.append('{"schema_version":3,"status":"passed","status":"passed"}')
         for invalid in invalid_documents:
             with self.subTest(document=invalid):
                 with self.assertRaises(DerivationValidationError):

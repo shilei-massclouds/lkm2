@@ -15,6 +15,7 @@ SOURCE_DIRECTORY = REPOSITORY / "tools" / "src"
 sys.path.insert(0, str(SOURCE_DIRECTORY))
 
 from model_ir import (
+    ModelAction,
     ModelEntry,
     ModelExpression,
     ModelExternal,
@@ -108,6 +109,50 @@ def _object_module(
     )
 
 
+def _task_flow_module() -> ModelModule:
+    online = ("State", "Online")
+    enter = ("Action", "Enter")
+    return ModelModule(
+        name=("flows", "task_flow"),
+        types=(
+            ModelType(
+                ("flows", "task_flow", "TaskFlow"),
+                (),
+                continuation=True,
+                initial_state=online,
+                states=(ModelState(online, (), (), (ModelAction(enter, (), True),)),),
+            ),
+        ),
+        objects=(
+            ModelObject(
+                boot_flow_path,
+                ModelTypeExpression(("TaskFlow",)),
+                online,
+                ModelExpression("identifier", "BootTask"),
+                None,
+                (),
+                (
+                    ModelState(
+                        online,
+                        (),
+                        (),
+                        (
+                            ModelAction(
+                                enter,
+                                (ModelHandlerBlock("drives", signals=()),),
+                                False,
+                                True,
+                            ),
+                        ),
+                    ),
+                ),
+                (),
+                True,
+            ),
+        ),
+    )
+
+
 def _json_module(document: dict, *name: str) -> dict:
     return next(
         module
@@ -124,7 +169,7 @@ rootfs_path = ("systems", "rootfs", "RootFs")
 boot_flow_path = ("flows", "task_flow", "BootInitFlow")
 
 EXPECTED_MODEL = ModelIR(
-    schema_version=4,
+    schema_version=5,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -200,10 +245,10 @@ EXPECTED_MODEL = ModelIR(
                 enable_blocks=(
                     _block(
                         "emits",
-                        _signal(
+                        ModelSignal(
                             kernel_path,
                             boot_flow_path,
-                            "Preset",
+                            ("Action", "Enter"),
                             "emit",
                         ),
                     ),
@@ -212,26 +257,7 @@ EXPECTED_MODEL = ModelIR(
             parent="Computer",
         ),
         ModelModule(name=("flows",)),
-        _object_module(
-            ("flows", "task_flow"),
-            "TaskFlow",
-            "BootInitFlow",
-            _standard_states(
-                preset_blocks=(
-                    _block(
-                        "emits",
-                        _signal(boot_flow_path, boot_flow_path, "Setup", "emit"),
-                    ),
-                ),
-                setup_blocks=(
-                    _block(
-                        "emits",
-                        _signal(boot_flow_path, boot_flow_path, "Enable", "emit"),
-                    ),
-                ),
-            ),
-            parent="BootTask",
-        ),
+        _task_flow_module(),
         ModelModule(name=("objects",)),
         _object_module(
             ("objects", "task"),
@@ -650,7 +676,7 @@ class ParserAndCompilerTests(unittest.TestCase):
                     object Computer: T {
                         initial_state: State::Idle;
                         state State::Idle {
-                            actions { on Action::Refresh {} }
+                            actions { on Action::Refresh { drives {} } }
                         }
                     }
                     external Human { emits { Computer.Action::Refresh; } }
@@ -688,7 +714,7 @@ class ParserAndCompilerTests(unittest.TestCase):
                                     emits { Flow.Transition::Startup; }
                                 }
                             }
-                            actions { on Action::Startup {} }
+                            actions { on Action::Startup { drives {} } }
                         }
                         state State::Online {}
                     }
@@ -759,7 +785,7 @@ class ParserAndCompilerTests(unittest.TestCase):
                 object Computer: T {
                     initial_state: State::Idle;
                     state State::Idle {
-                        actions { on Action::Refresh {} }
+                        actions { on Action::Refresh { drives {} } }
                     }
                 }
             """,
@@ -794,6 +820,194 @@ class ParserAndCompilerTests(unittest.TestCase):
                     "accepted signal must have the form Action::<Name>",
                     caught.exception.diagnostic.message,
                 )
+
+    def test_type_inheritance_expands_fields_states_invariants_and_handlers(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    type Base {
+                        first: A;
+                        initial_state: State::Idle;
+                        state State::Idle {
+                            invariant { true; }
+                            actions { on Action::Enter; }
+                        }
+                    }
+                    type Mid: Base {
+                        first: B;
+                        second: C;
+                        state State::Idle {
+                            invariant { true; }
+                            actions {
+                                override on Action::Enter { drives {} }
+                            }
+                        }
+                    }
+                    type Leaf: Mid {
+                        state State::Idle {
+                            actions { on Action::Next { drives {} } }
+                        }
+                    }
+                    object Flow: Leaf {
+                        attrs { second: D; third: E; }
+                        state State::Idle { invariant { false; } }
+                    }
+                """
+            }
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        flow = model.objects[0]
+        self.assertEqual(
+            tuple((field.name, field.type.name) for field in flow.attrs or ()),
+            (("first", ("B",)), ("second", ("D",)), ("third", ("E",))),
+        )
+        self.assertEqual(flow.initial_state, ("State", "Idle"))
+        self.assertEqual(len(flow.states[0].invariants), 3)
+        self.assertEqual(
+            tuple(action.signal for action in flow.states[0].actions),
+            (("Action", "Enter"), ("Action", "Next")),
+        )
+
+    def test_type_inheritance_rejects_abstract_override_and_cycle_errors(self) -> None:
+        cases = (
+            (
+                """
+                    type Base {
+                        state State::Base { actions { on Action::Enter; } }
+                    }
+                    object Flow: Base {}
+                """,
+                "does not implement abstract handler",
+            ),
+            (
+                """
+                    type Base {
+                        state State::Base {
+                            actions { on Action::Enter { drives {} } }
+                        }
+                    }
+                    type Child: Base {
+                        state State::Base {
+                            actions { on Action::Enter { drives {} } }
+                        }
+                    }
+                """,
+                "must be declared with override",
+            ),
+            (
+                """
+                    type Base {
+                        state State::Base {
+                            actions {
+                                override on Action::Enter { drives {} }
+                            }
+                        }
+                    }
+                """,
+                "has no inherited handler",
+            ),
+            ("type First: Second {} type Second: First {}", "inheritance cycle"),
+        )
+        for source, message in cases:
+            with self.subTest(message=message):
+                with model_tree({"root.spec": source}) as (_, entry_path):
+                    with self.assertRaises(CompilationError) as caught:
+                        compile_spec(entry_path)
+                self.assertIn(message, caught.exception.diagnostic.message)
+
+    def test_continuation_declaration_lifecycle_and_yields_are_strict(self) -> None:
+        invalid = (
+            (
+                "type Flow { continuation: false; }",
+                "can only be declared as true",
+            ),
+            (
+                "type Flow; object F: Flow { continuation: true; }",
+                "may only be declared by a type",
+            ),
+            (
+                """
+                    type Flow {
+                        continuation: true;
+                        state State::Base { actions { on Action::Enter; } }
+                    }
+                """,
+                "continuation type must have exactly",
+            ),
+            (
+                """
+                    object Target: T { state State::Base {} }
+                    object Source: T {
+                        state State::Base {
+                            actions {
+                                on Action::Go { yields Target.Transition::Go; }
+                            }
+                        }
+                    }
+                """,
+                "yields is only allowed",
+            ),
+            (
+                """
+                    type Flow {
+                        continuation: true;
+                        initial_state: State::Online;
+                        state State::Online { actions { on Action::Enter; } }
+                    }
+                    object F: Flow {
+                        state State::Online {
+                            actions {
+                                override on Action::Enter { drives {} }
+                            }
+                        }
+                    }
+                    external Human { emits { F.Action::Other; } }
+                """,
+                "only Action::Enter",
+            ),
+        )
+        for source, message in invalid:
+            with self.subTest(message=message):
+                with model_tree({"root.spec": source}) as (_, entry_path):
+                    with self.assertRaises(CompilationError) as caught:
+                        compile_spec(entry_path)
+                self.assertIn(message, caught.exception.diagnostic.message)
+
+    def test_action_abstract_and_nonempty_concrete_forms_are_distinct(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    type Base {
+                        state State::Base { actions { on Action::Enter; } }
+                    }
+                    object Flow: Base {
+                        state State::Base {
+                            actions {
+                                override on Action::Enter { drives {} }
+                            }
+                        }
+                    }
+                """
+            }
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+        self.assertFalse(model.objects[0].states[0].actions[0].abstract)
+
+        with model_tree(
+            {
+                "root.spec": """
+                    object Flow: T {
+                        state State::Base {
+                            actions { on Action::Enter {} }
+                        }
+                    }
+                """
+            }
+        ) as (_, entry_path):
+            with self.assertRaises(CompilationError) as caught:
+                compile_spec(entry_path)
+        self.assertIn("must declare at least one block", caught.exception.diagnostic.message)
 
     def test_invalid_entry_root_and_origin_are_rejected(self) -> None:
         with model_tree(
@@ -919,9 +1133,9 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(duplicate_declaration),
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
-            EXPECTED_JSON.replace('"schema_version": 4', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 5', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":4,"schema_version":4}',
+            '{"schema_version":5,"schema_version":5}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -930,7 +1144,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=4,
+            schema_version=5,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -938,14 +1152,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=4,
+                schema_version=5,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=4,
+                schema_version=5,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

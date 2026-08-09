@@ -60,7 +60,7 @@ def main(
     except (OSError, UnicodeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    return 0 if result.status == "passed" else 1
+    return 0 if result.status in {"passed", "yielded"} else 1
 
 
 if __name__ == "__main__":

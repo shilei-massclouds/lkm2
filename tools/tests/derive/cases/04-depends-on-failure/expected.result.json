@@ -1,4 +1,5 @@
 {
+  "continuations": [],
   "facts": [],
   "failure": {
     "code": "depends_on_failed",
@@ -28,7 +29,7 @@
       ]
     }
   ],
-  "schema_version": 2,
+  "schema_version": 3,
   "status": "depends_on_failed",
   "units": [
     {
@@ -78,7 +79,10 @@
         "State",
         "Idle"
       ],
-      "status": "depends_on_failed"
+      "status": "depends_on_failed",
+      "yield_token_consumed": null,
+      "yield_token_created": null,
+      "yields": []
     }
   ]
 }

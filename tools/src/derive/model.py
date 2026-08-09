@@ -1,4 +1,4 @@
-"""Data model for derivation root selection and schema-v2 results."""
+"""Data model for derivation root selection and schema-v3 results."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from model_ir import canonicalize_signal_name
 
 
 SEQUENCE_SCHEMA_VERSION = 2
-RESULT_SCHEMA_VERSION = 2
+RESULT_SCHEMA_VERSION = 3
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_MODES = frozenset({"drive", "emit"})
-_UNIT_KINDS = frozenset({"root", "drive", "emit"})
+_MODES = frozenset({"drive", "emit", "yield"})
+_UNIT_KINDS = frozenset({"root", "drive", "emit", "yield"})
 _CHECK_STATUSES = frozenset({"passed", "failed", "established", "unsupported"})
 _FAILURE_CODES = frozenset(
     {
@@ -22,9 +22,12 @@ _FAILURE_CODES = frozenset(
         "invariant_failed",
         "unsupported_feature",
         "undeclared_external_signal",
+        "no_resumable_continuation",
+        "invalid_continuation_action",
+        "continuation_reentry",
     }
 )
-_UNIT_STATUSES = frozenset({"passed", "stopped", *_FAILURE_CODES})
+_UNIT_STATUSES = frozenset({"passed", "yielded", "stopped", *_FAILURE_CODES})
 
 
 class DerivationValidationError(ValueError):
@@ -83,7 +86,7 @@ class DerivationEvent:
         object.__setattr__(self, "signal", canonicalize_signal_name(self.signal))
         if self.mode not in _MODES:
             raise DerivationValidationError(
-                f"event.mode must be 'drive' or 'emit', got {self.mode!r}"
+                f"event.mode must be 'drive', 'emit', or 'yield', got {self.mode!r}"
             )
 
 
@@ -101,6 +104,10 @@ class DerivationSequence:
                 f"expected {SEQUENCE_SCHEMA_VERSION}"
             )
         _tuple_of(self.events, DerivationEvent, "events")
+        if any(event.mode == "yield" for event in self.events):
+            raise DerivationValidationError(
+                "sequence events cannot use the internal yield mode"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +156,85 @@ class DerivationFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class DerivationYieldToken:
+    object: tuple[str, ...]
+    generation: int
+
+    def __post_init__(self) -> None:
+        _name(self.object, "yield_token.object")
+        if len(self.object) < 2:
+            raise DerivationValidationError(
+                "yield_token.object must be an absolute declaration name"
+            )
+        if type(self.generation) is not int or self.generation < 1:
+            raise DerivationValidationError(
+                "yield_token.generation must be a positive integer"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationFrame:
+    object: tuple[str, ...]
+    handler: tuple[str, ...]
+    control_index: int
+    generation: int
+
+    def __post_init__(self) -> None:
+        _name(self.object, "frame.object")
+        _name(self.handler, "frame.handler")
+        if len(self.handler) != 2 or self.handler[0] != "Action":
+            raise DerivationValidationError(
+                "frame.handler must have the form Action::<Name>"
+            )
+        if type(self.control_index) is not int or self.control_index < 0:
+            raise DerivationValidationError(
+                "frame.control_index must be a non-negative integer"
+            )
+        if type(self.generation) is not int or self.generation < 0:
+            raise DerivationValidationError(
+                "frame.generation must be a non-negative integer"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationContinuation:
+    object: tuple[str, ...]
+    generation: int
+    frames: tuple[DerivationFrame, ...]
+    yield_token: DerivationYieldToken | None = None
+
+    def __post_init__(self) -> None:
+        _name(self.object, "continuation.object")
+        if type(self.generation) is not int or self.generation < 0:
+            raise DerivationValidationError(
+                "continuation.generation must be a non-negative integer"
+            )
+        _tuple_of(self.frames, DerivationFrame, "continuation.frames")
+        if not self.frames:
+            raise DerivationValidationError("continuation.frames must not be empty")
+        if any(frame.object != self.object for frame in self.frames):
+            raise DerivationValidationError(
+                "continuation frames must belong to the continuation object"
+            )
+        if any(frame.generation != self.generation for frame in self.frames):
+            raise DerivationValidationError(
+                "continuation frame generation must match its snapshot"
+            )
+        if self.yield_token is not None:
+            if not isinstance(self.yield_token, DerivationYieldToken):
+                raise DerivationValidationError(
+                    "continuation.yield_token must be a DerivationYieldToken or null"
+                )
+            if (
+                self.yield_token.object != self.object
+                or self.yield_token.generation != self.generation
+            ):
+                raise DerivationValidationError(
+                    "continuation yield token must match its object and generation"
+                )
+
+
+@dataclass(frozen=True, slots=True)
 class DerivationUnit:
     kind: str
     event: DerivationEvent
@@ -164,6 +250,9 @@ class DerivationUnit:
     emits: tuple[DerivationUnit, ...]
     status: str
     failure: DerivationFailure | None
+    yields: tuple[DerivationUnit, ...] = ()
+    yield_token_created: DerivationYieldToken | None = None
+    yield_token_consumed: DerivationYieldToken | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _UNIT_KINDS:
@@ -204,6 +293,15 @@ class DerivationUnit:
                 )
         _state(self.state_after, "unit.state_after")
         _tuple_of(self.emits, DerivationUnit, "unit.emits")
+        _tuple_of(self.yields, DerivationUnit, "unit.yields")
+        for label, token in (
+            ("yield_token_created", self.yield_token_created),
+            ("yield_token_consumed", self.yield_token_consumed),
+        ):
+            if token is not None and not isinstance(token, DerivationYieldToken):
+                raise DerivationValidationError(
+                    f"unit.{label} must be a DerivationYieldToken or null"
+                )
         if self.handler is not None and self.handler != self.event.signal:
             raise DerivationValidationError("unit.handler must match unit.event.signal")
         if self.handler is None and self.candidate_state is not None:
@@ -246,6 +344,23 @@ class DerivationUnit:
                 raise DerivationValidationError(
                     "passed unit must not contain a failed or unsupported check"
                 )
+            if self.yield_token_created is not None:
+                raise DerivationValidationError(
+                    "passed unit must not create a yield token"
+                )
+        elif self.status == "yielded":
+            if self.failure is not None or self.state_after is not None:
+                raise DerivationValidationError(
+                    "yielded unit must be suspended without a direct failure"
+                )
+            if self.handler is None or self.handler[0] != "Action":
+                raise DerivationValidationError(
+                    "yielded unit requires an Action handler"
+                )
+            if self.yield_token_created is None or not self.yields:
+                raise DerivationValidationError(
+                    "yielded unit requires a created token and yielded target"
+                )
         elif self.status == "stopped":
             if self.failure is not None:
                 raise DerivationValidationError("stopped unit must not duplicate child failure")
@@ -275,6 +390,7 @@ def _unit_failures(units: tuple[DerivationUnit, ...]) -> tuple[DerivationFailure
             failures.append(unit.failure)
         failures.extend(_unit_failures(unit.drives))
         failures.extend(_unit_failures(unit.emits))
+        failures.extend(_unit_failures(unit.yields))
     return tuple(failures)
 
 
@@ -300,17 +416,19 @@ class DerivationResult:
     final_state: tuple[DerivationState, ...]
     facts: tuple[DerivationFact, ...]
     failure: DerivationFailure | None = None
+    continuations: tuple[DerivationContinuation, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != RESULT_SCHEMA_VERSION:
             raise DerivationValidationError(
                 f"result schema_version must be {RESULT_SCHEMA_VERSION}"
             )
-        if self.status not in {"passed", *_FAILURE_CODES}:
+        if self.status not in {"passed", "yielded", *_FAILURE_CODES}:
             raise DerivationValidationError(f"invalid result status {self.status!r}")
         _tuple_of(self.units, DerivationUnit, "units")
         _tuple_of(self.final_state, DerivationState, "final_state")
         _tuple_of(self.facts, DerivationFact, "facts")
+        _tuple_of(self.continuations, DerivationContinuation, "continuations")
         names = [item.object for item in self.final_state]
         if len(set(names)) != len(names):
             raise DerivationValidationError("final_state contains a duplicate object")
@@ -322,12 +440,32 @@ class DerivationResult:
         object.__setattr__(
             self, "facts", tuple(sorted(self.facts, key=lambda item: (item.predicate, item.arguments)))
         )
-        if self.status == "passed" and self.failure is not None:
-            raise DerivationValidationError("passed result must not contain a failure")
+        continuation_names = [item.object for item in self.continuations]
+        if len(set(continuation_names)) != len(continuation_names):
+            raise DerivationValidationError(
+                "continuations contains a duplicate object"
+            )
+        object.__setattr__(
+            self,
+            "continuations",
+            tuple(sorted(self.continuations, key=lambda item: item.object)),
+        )
+        if self.status in {"passed", "yielded"} and self.failure is not None:
+            raise DerivationValidationError(
+                "passed/yielded result must not contain a failure"
+            )
         unit_failures = _unit_failures(self.units)
-        if self.status == "passed" and unit_failures:
-            raise DerivationValidationError("passed result contains a failed unit")
-        if self.status != "passed":
+        if self.status in {"passed", "yielded"} and unit_failures:
+            raise DerivationValidationError(
+                "passed/yielded result contains a failed unit"
+            )
+        if self.status == "yielded" and not any(
+            item.yield_token is not None for item in self.continuations
+        ):
+            raise DerivationValidationError(
+                "yielded result requires an outstanding continuation yield token"
+            )
+        if self.status not in {"passed", "yielded"}:
             if not isinstance(self.failure, DerivationFailure):
                 raise DerivationValidationError("failed result requires a failure")
             if self.failure.code != self.status:

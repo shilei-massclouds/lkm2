@@ -1,4 +1,4 @@
-"""Compilation pipeline from a model-root specification to Model IR v4."""
+"""Compilation pipeline from a model-root specification to Model IR v5."""
 
 from __future__ import annotations
 
@@ -302,6 +302,15 @@ def _handler_blocks(
                 for statement in expressions.children
             )
             result.append(ModelHandlerBlock(rule.removesuffix("_block"), signals=signals))
+        elif rule == "yields_statement":
+            result.append(
+                ModelHandlerBlock(
+                    "yields",
+                    signals=(
+                        _signal(module, child.children[0], source, "yield", imports),
+                    ),
+                )
+            )
         elif rule == "deferred_declaration":
             result.append(ModelHandlerBlock("deferred", deferred=_deferred(module, child)))
     return tuple(result)
@@ -324,22 +333,91 @@ def _state(
         elif child.data == "transitions_block":
             for handler in child.children:
                 assert isinstance(handler, Tree)
+                override = any(
+                    isinstance(item, Tree) and item.data == "override_marker"
+                    for item in handler.children
+                )
+                signal_node = next(
+                    item
+                    for item in handler.children
+                    if isinstance(item, Tree)
+                    and item.data
+                    not in {
+                        "override_marker",
+                        "concrete_transition_handler",
+                        "abstract_transition_handler",
+                    }
+                )
+                tail = next(
+                    item
+                    for item in handler.children
+                    if isinstance(item, Tree)
+                    and item.data
+                    in {"concrete_transition_handler", "abstract_transition_handler"}
+                )
+                abstract = tail.data == "abstract_transition_handler"
+                target_node = None if abstract else tail.children[0]
+                body = None if abstract else tail.children[1]
+                assert target_node is None or isinstance(target_node, Tree)
+                assert body is None or isinstance(body, Tree)
                 transitions.append(
                     ModelTransition(
-                        signal=_transition_handler_signal(module, handler.children[0]),
-                        target_state=_special_name(module, handler.children[1], "State", "target state"),
-                        blocks=_handler_blocks(module, handler, object_name, imports),
+                        signal=_transition_handler_signal(module, signal_node),
+                        target_state=None
+                        if target_node is None
+                        else _special_name(module, target_node, "State", "target state"),
+                        blocks=()
+                        if body is None
+                        else _handler_blocks(module, body, object_name, imports),
+                        abstract=abstract,
+                        override=override,
                     )
                 )
         elif child.data == "actions_block":
             for handler in child.children:
                 assert isinstance(handler, Tree)
+                override = any(
+                    isinstance(item, Tree) and item.data == "override_marker"
+                    for item in handler.children
+                )
+                signal_node = next(
+                    item
+                    for item in handler.children
+                    if isinstance(item, Tree)
+                    and item.data
+                    not in {
+                        "override_marker",
+                        "concrete_action_handler",
+                        "abstract_action_handler",
+                    }
+                )
+                tail = next(
+                    item
+                    for item in handler.children
+                    if isinstance(item, Tree)
+                    and item.data
+                    in {"concrete_action_handler", "abstract_action_handler"}
+                )
+                abstract = tail.data == "abstract_action_handler"
+                body = None if abstract else tail.children[0]
+                assert body is None or isinstance(body, Tree)
+                signal = _special_name(
+                    module, signal_node, "Action", "accepted signal"
+                )
+                if body is not None and not body.children:
+                    raise _semantic_error(
+                        module,
+                        handler,
+                        "concrete Action handler body must declare at least one block",
+                    )
                 actions.append(
                     ModelAction(
-                        signal=_special_name(
-                            module, handler.children[0], "Action", "accepted signal"
-                        ),
-                        blocks=_handler_blocks(module, handler, object_name, imports),
+                        signal=signal,
+                        blocks=()
+                        if body is None
+                        else _handler_blocks(module, body, object_name, imports),
+                        abstract=abstract,
+                        override=override,
                     )
                 )
     return ModelState(name, tuple(invariants), tuple(transitions), tuple(actions))
@@ -352,6 +430,13 @@ def _object(
     initial_node = _only(module, node, "initial_state_property", "initial_state")
     parent_node = _only(module, node, "parent_property", "parent")
     source_node = _only(module, node, "source_property", "source")
+    continuation_node = _only(module, node, "continuation_property", "continuation")
+    if continuation_node is not None:
+        raise _semantic_error(
+            module,
+            continuation_node,
+            "continuation may only be declared by a type; objects inherit it",
+        )
     attrs_nodes = _tree_children(node, "attrs_declaration")
     if len(attrs_nodes) > 1:
         raise _semantic_error(module, attrs_nodes[1], "duplicate attrs declaration")
@@ -368,7 +453,7 @@ def _object(
             "initial_state",
         )
         if initial_node is not None
-        else ("State", "Base") if states else None
+        else None
     )
     references = []
     for reference in _tree_children(node, "reference_declaration"):
@@ -412,11 +497,81 @@ def _predicate(module: LoadedModule, node: Tree) -> ModelPredicate:
     )
 
 
-def _model_type(module: LoadedModule, node: Tree) -> ModelType:
-    opaque = any(isinstance(child, Tree) and child.data == "type_tail" for child in node.children)
+def _type_items(node: Tree) -> tuple[Tree, ...]:
+    result: list[Tree] = []
+    for child in node.children[1:]:
+        if not isinstance(child, Tree) or child.data == "type_base":
+            continue
+        if child.data == "type_tail":
+            result.extend(
+                item for item in child.children if isinstance(item, Tree)
+            )
+        else:
+            result.append(child)
+    return tuple(result)
+
+
+def _model_type(
+    module: LoadedModule,
+    node: Tree,
+    imports: dict[str, tuple[str, ...]],
+) -> ModelType:
+    name = module.name + (str(node.children[0]),)
+    items = _type_items(node)
+    initial_nodes = tuple(
+        item for item in items if item.data == "initial_state_property"
+    )
+    if len(initial_nodes) > 1:
+        raise _semantic_error(module, initial_nodes[1], "duplicate initial_state")
+    continuation_nodes = tuple(
+        item for item in items if item.data == "continuation_property"
+    )
+    if len(continuation_nodes) > 1:
+        raise _semantic_error(module, continuation_nodes[1], "duplicate continuation")
+    continuation = False
+    if continuation_nodes:
+        value = str(continuation_nodes[0].children[0])
+        if value != "true":
+            raise _semantic_error(
+                module,
+                continuation_nodes[0],
+                "continuation can only be declared as true and cannot be cancelled",
+            )
+        continuation = True
+    base_node = next(
+        (
+            child
+            for child in node.children
+            if isinstance(child, Tree) and child.data == "type_base"
+        ),
+        None,
+    )
+    states = tuple(
+        _state(module, item, name, imports)
+        for item in items
+        if item.data == "state_declaration"
+    )
+    fields = tuple(
+        ModelField(str(item.children[0]), _type_expression(item.children[1]))
+        for item in items
+        if item.data == "field_declaration"
+    )
     return ModelType(
-        module.name + (str(node.children[0]),),
-        None if opaque else _fields(node),
+        name=name,
+        fields=None if not items and base_node is None else fields,
+        base_type=None
+        if base_node is None
+        else _type_expression(base_node.children[0]),
+        continuation=continuation,
+        initial_state=None
+        if not initial_nodes
+        else _special_name(
+            module,
+            initial_nodes[0].children[0],
+            "State",
+            "initial_state",
+        ),
+        states=states,
     )
 
 
@@ -448,7 +603,7 @@ def _lower_module(module: LoadedModule) -> ModelModule:
         if item.data == "predicate_declaration":
             predicates.append(_predicate(module, item))
         elif item.data == "type_declaration":
-            types.append(_model_type(module, item))
+            types.append(_model_type(module, item, imports))
         elif item.data == "object_declaration":
             objects.append(_object(module, item, imports))
         elif item.data == "external_declaration":
@@ -459,9 +614,396 @@ def _lower_module(module: LoadedModule) -> ModelModule:
         raise _semantic_error(module, module.tree, str(exc)) from exc
 
 
+def _merge_fields(
+    inherited: tuple[ModelField, ...] | None,
+    declared: tuple[ModelField, ...] | None,
+) -> tuple[ModelField, ...] | None:
+    if inherited is None and declared is None:
+        return None
+    result = list(inherited or ())
+    positions = {field.name: index for index, field in enumerate(result)}
+    for field in declared or ():
+        if field.name in positions:
+            result[positions[field.name]] = field
+        else:
+            positions[field.name] = len(result)
+            result.append(field)
+    return tuple(result)
+
+
+def _merge_handler_group(
+    module: LoadedModule,
+    owner: Tree,
+    inherited: tuple[ModelTransition, ...] | tuple[ModelAction, ...],
+    declared: tuple[ModelTransition, ...] | tuple[ModelAction, ...],
+    label: str,
+) -> tuple[ModelTransition, ...] | tuple[ModelAction, ...]:
+    result = list(inherited)
+    positions = {handler.signal: index for index, handler in enumerate(result)}
+    for handler in declared:
+        exists = handler.signal in positions
+        if exists and not handler.override:
+            raise _semantic_error(
+                module,
+                owner,
+                f"inherited {label} handler {'::'.join(handler.signal)!r} "
+                "must be declared with override",
+            )
+        if not exists and handler.override:
+            raise _semantic_error(
+                module,
+                owner,
+                f"override {label} handler {'::'.join(handler.signal)!r} "
+                "has no inherited handler",
+            )
+        if exists:
+            result[positions[handler.signal]] = handler
+        else:
+            positions[handler.signal] = len(result)
+            result.append(handler)
+    return tuple(result)
+
+
+def _merge_states(
+    module: LoadedModule,
+    owner: Tree,
+    inherited: tuple[ModelState, ...],
+    declared: tuple[ModelState, ...],
+) -> tuple[ModelState, ...]:
+    result = list(inherited)
+    positions = {state.name: index for index, state in enumerate(result)}
+    for state in declared:
+        if state.name not in positions:
+            # A new state cannot override a handler because it has no inherited scope.
+            transitions = _merge_handler_group(
+                module, owner, (), state.transitions, "transition"
+            )
+            actions = _merge_handler_group(module, owner, (), state.actions, "action")
+            positions[state.name] = len(result)
+            result.append(
+                ModelState(state.name, state.invariants, transitions, actions)
+            )
+            continue
+        index = positions[state.name]
+        base = result[index]
+        result[index] = ModelState(
+            state.name,
+            base.invariants + state.invariants,
+            _merge_handler_group(
+                module,
+                owner,
+                base.transitions,
+                state.transitions,
+                "transition",
+            ),
+            _merge_handler_group(
+                module, owner, base.actions, state.actions, "action"
+            ),
+        )
+    return tuple(result)
+
+
+def _rebind_signal(signal: ModelSignal, source: tuple[str, ...]) -> ModelSignal:
+    return ModelSignal(source, signal.target, signal.signal, signal.mode)
+
+
+def _rebind_states(
+    states: tuple[ModelState, ...], source: tuple[str, ...]
+) -> tuple[ModelState, ...]:
+    def blocks(values: tuple[ModelHandlerBlock, ...]) -> tuple[ModelHandlerBlock, ...]:
+        return tuple(
+            ModelHandlerBlock(
+                block.kind,
+                block.expressions,
+                tuple(_rebind_signal(signal, source) for signal in block.signals),
+                block.deferred,
+            )
+            for block in values
+        )
+
+    return tuple(
+        ModelState(
+            state.name,
+            state.invariants,
+            tuple(
+                ModelTransition(
+                    handler.signal,
+                    handler.target_state,
+                    blocks(handler.blocks),
+                    handler.abstract,
+                    handler.override,
+                )
+                for handler in state.transitions
+            ),
+            tuple(
+                ModelAction(
+                    handler.signal,
+                    blocks(handler.blocks),
+                    handler.abstract,
+                    handler.override,
+                )
+                for handler in state.actions
+            ),
+        )
+        for state in states
+    )
+
+
+def _expand_inheritance(
+    lowered: tuple[ModelModule, ...],
+    modules: tuple[LoadedModule, ...],
+) -> tuple[ModelModule, ...]:
+    loaded = {module.name: module for module in modules}
+    imports = {
+        module.name: dict(
+            resolve_use_name(module.name, declaration) for declaration in module.uses
+        )
+        for module in modules
+    }
+    type_nodes: dict[tuple[str, ...], Tree] = {}
+    object_nodes: dict[tuple[str, ...], Tree] = {}
+    for module in modules:
+        for item in module.tree.children:
+            if not isinstance(item, Tree):
+                continue
+            if item.data == "type_declaration":
+                type_nodes[module.name + (str(item.children[0]),)] = item
+            elif item.data == "object_declaration":
+                object_nodes[module.name + (str(item.children[0]),)] = item
+
+    raw_types = {
+        item.name: item for module in lowered for item in module.types
+    }
+    expanded_types: dict[tuple[str, ...], ModelType] = {}
+    visiting: list[tuple[str, ...]] = []
+
+    def resolve_base(
+        expression: ModelTypeExpression, module_name: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        return _resolve_target(expression.name, module_name, imports[module_name])
+
+    def expand_type(name: tuple[str, ...]) -> ModelType:
+        if name in expanded_types:
+            return expanded_types[name]
+        raw = raw_types[name]
+        module = loaded[name[:-1]]
+        node = type_nodes[name]
+        if name in visiting:
+            cycle = visiting[visiting.index(name) :] + [name]
+            raise _semantic_error(
+                module,
+                node,
+                "type inheritance cycle: "
+                + " -> ".join("::".join(item) for item in cycle),
+            )
+        visiting.append(name)
+        base: ModelType | None = None
+        if raw.base_type is not None:
+            base_name = resolve_base(raw.base_type, name[:-1])
+            if base_name not in raw_types:
+                raise _semantic_error(
+                    module,
+                    node,
+                    f"base type {'::'.join(raw.base_type.name)!r} is not declared",
+                )
+            base = expand_type(base_name)
+        fields = _merge_fields(None if base is None else base.fields, raw.fields)
+        states = _merge_states(
+            module,
+            node,
+            () if base is None else base.states,
+            raw.states,
+        )
+        initial_state = raw.initial_state
+        if initial_state is None and base is not None:
+            initial_state = base.initial_state
+        if initial_state is None and states:
+            initial_state = ("State", "Base")
+        continuation = raw.continuation or (base is not None and base.continuation)
+        expanded = ModelType(
+            raw.name,
+            fields,
+            raw.base_type,
+            continuation,
+            initial_state,
+            states,
+        )
+        state_names = {state.name for state in states}
+        if initial_state is not None and initial_state not in state_names:
+            raise _semantic_error(
+                module,
+                node,
+                f"invalid initial_state {'::'.join(initial_state)!r}",
+            )
+        if continuation and (
+            initial_state != ("State", "Online")
+            or tuple(state.name for state in states) != (("State", "Online"),)
+            or states[0].transitions
+        ):
+            raise _semantic_error(
+                module,
+                node,
+                "continuation type must have exactly initial_state State::Online, "
+                "one State::Online, and no transitions",
+            )
+        visiting.pop()
+        expanded_types[name] = expanded
+        return expanded
+
+    for name in raw_types:
+        expand_type(name)
+
+    expanded_objects: dict[tuple[str, ...], ModelObject] = {}
+    for source_module in lowered:
+        module = loaded[source_module.name]
+        for raw in source_module.objects:
+            node = object_nodes[raw.name]
+            base_name = resolve_base(raw.base_type, source_module.name)
+            base = expanded_types.get(base_name)
+            states = _merge_states(
+                module,
+                node,
+                () if base is None else base.states,
+                raw.states,
+            )
+            initial_state = raw.initial_state
+            if initial_state is None and base is not None:
+                initial_state = base.initial_state
+            if initial_state is None and states:
+                initial_state = ("State", "Base")
+            continuation = False if base is None else base.continuation
+            states = _rebind_states(states, raw.name)
+            fields = _merge_fields(None if base is None else base.fields, raw.attrs)
+            abstract = tuple(
+                (state.name, handler.signal)
+                for state in states
+                for handler in (*state.transitions, *state.actions)
+                if handler.abstract
+            )
+            if abstract:
+                state_name, signal = abstract[0]
+                raise _semantic_error(
+                    module,
+                    node,
+                    f"object {'::'.join(raw.name)!r} does not implement abstract handler "
+                    f"{'::'.join(state_name)} + {'::'.join(signal)}",
+                )
+            if continuation:
+                state_names = tuple(state.name for state in states)
+                if (
+                    initial_state != ("State", "Online")
+                    or state_names != (("State", "Online"),)
+                    or states[0].transitions
+                ):
+                    raise _semantic_error(
+                        module,
+                        node,
+                        "continuation object must have exactly initial_state State::Online, "
+                        "one State::Online, and no transitions",
+                    )
+                if not any(
+                    action.signal == ("Action", "Enter")
+                    for action in states[0].actions
+                ):
+                    raise _semantic_error(
+                        module, node, "continuation object requires Action::Enter"
+                    )
+            for state in states:
+                for transition in state.transitions:
+                    if transition.target_state not in {item.name for item in states}:
+                        assert transition.target_state is not None
+                        raise _semantic_error(
+                            module,
+                            node,
+                            f"transition targets unknown state "
+                            f"{'::'.join(transition.target_state)!r}",
+                        )
+                for handler in (*state.transitions, *state.actions):
+                    for block in handler.blocks:
+                        if block.kind == "yields" and (
+                            not continuation
+                            or not isinstance(handler, ModelAction)
+                        ):
+                            raise _semantic_error(
+                                module,
+                                node,
+                                "yields is only allowed in an Action handler of a "
+                                "continuation object",
+                            )
+            expanded_objects[raw.name] = ModelObject(
+                raw.name,
+                raw.base_type,
+                initial_state,
+                raw.parent,
+                raw.source,
+                fields,
+                states,
+                raw.references,
+                continuation,
+            )
+
+    continuation_names = {
+        name for name, model_object in expanded_objects.items() if model_object.continuation
+    }
+
+    def validate_continuation_target(
+        module: LoadedModule, owner: Tree, signal: ModelSignal
+    ) -> None:
+        if signal.target not in continuation_names:
+            return
+        if signal.signal == ("Action", "Enter"):
+            return
+        if not (
+            signal.signal[0] == "Action"
+            and signal.source == signal.target
+            and signal.mode == "drive"
+        ):
+            raise _semantic_error(
+                module,
+                owner,
+                "only Action::Enter may start or resume a continuation from outside; "
+                "other Actions must be synchronous calls from the same continuation",
+            )
+
+    for module in lowered:
+        loaded_module = loaded[module.name]
+        for external in module.externals:
+            owner = next(
+                item
+                for item in loaded_module.tree.children
+                if isinstance(item, Tree)
+                and item.data == "external_declaration"
+                and str(item.children[0]) == external.name[-1]
+            )
+            for signal in external.signals:
+                validate_continuation_target(loaded_module, owner, signal)
+        for model_object in module.objects:
+            effective = expanded_objects[model_object.name]
+            owner = object_nodes[model_object.name]
+            for state in effective.states:
+                for handler in (*state.transitions, *state.actions):
+                    for block in handler.blocks:
+                        for signal in block.signals:
+                            validate_continuation_target(
+                                loaded_module, owner, signal
+                            )
+
+    return tuple(
+        ModelModule(
+            module.name,
+            module.predicates,
+            tuple(expanded_types[item.name] for item in module.types),
+            tuple(expanded_objects[item.name] for item in module.objects),
+            module.externals,
+        )
+        for module in lowered
+    )
+
+
 def _lower_ast(document: ModelSpec, modules: tuple[LoadedModule, ...]) -> ModelIR:
     try:
         lowered = tuple(_lower_module(module) for module in modules)
+        lowered = _expand_inheritance(lowered, modules)
         return ModelIR(
             schema_version=SCHEMA_VERSION,
             entry=ModelEntry(origin=document.origin.name.parts, spec=document.spec.name.parts),
