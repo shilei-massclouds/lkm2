@@ -60,6 +60,8 @@ def _render_unit(
         )
         lines.append(f"{detail_indent}commit state: {committed}")
         for child in unit.emits:
+            if depth == 0:
+                lines.append("")
             lines.extend(_render_unit(child, depth, names))
     elif unit.status == "yielded":
         generation = unit.yield_token_created.generation

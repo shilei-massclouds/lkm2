@@ -1,9 +1,11 @@
 Human -> Producer: drives Transition::Start
   current state: State::Idle
   commit state: State::Done
+
 Producer -> First: emits Transition::Mark
   current state: State::Idle
   commit state: State::Done
+
 Producer -> Second: emits Transition::Mark
   current state: State::Idle
   commit state: State::Done

@@ -43,15 +43,19 @@ Human -> Computer: drives Transition::Setup
 Human -> Computer: emits Transition::Enable
   current state: State::Ready
   commit state: State::Online
+
 Computer -> QemuVirtPlatform: emits Transition::Enable
   current state: State::Ready
   commit state: State::Online
+
 QemuVirtPlatform -> OpenSBI: emits Transition::Enable
   current state: State::Ready
   commit state: State::Online
+
 OpenSBI -> Kernel: emits Transition::Enable
   current state: State::Ready
   commit state: State::Online
+
 Kernel -> BootInitFlow: emits Action::Enter
   current state: State::Online
   commit state: unchanged
