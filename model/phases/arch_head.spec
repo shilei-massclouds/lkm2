@@ -1,20 +1,15 @@
 /* ArchHead - architecture-specific kernel entry phase. */
 
 use model::flows::task_flow::BootInitFlow;
+use model::phases::phase::PhaseType;
 
-type ArchHeadPhase;
-
-object ArchHead: ArchHeadPhase {
+object ArchHead: PhaseType {
     parent: BootInitFlow;
-    initial_state: State::Ready;
 
     state State::Ready {
         transitions {
-            on Transition::Enable -> State::Online {
+            override on Transition::Enable -> State::Online {
             }
         }
-    }
-
-    state State::Online {
     }
 }

@@ -59,7 +59,7 @@ OpenSBI -> Kernel: emits Transition::Enable
 Kernel -> BootInitFlow: emits Action::Enter
   current state: State::Online
   BootInitFlow -> ArchHead: drives Transition::Enable
-    current state: State::Base
+    current state: State::Ready
     commit state: State::Online
   commit state: unchanged
 

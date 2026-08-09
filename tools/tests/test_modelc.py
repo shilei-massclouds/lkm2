@@ -165,6 +165,64 @@ def _task_flow_module() -> ModelModule:
     )
 
 
+def _phase_type_module() -> ModelModule:
+    return ModelModule(
+        name=("phases", "phase"),
+        types=(
+            ModelType(
+                ("phases", "phase", "PhaseType"),
+                (),
+                initial_state=("State", "Ready"),
+                states=(
+                    _state("Online"),
+                    ModelState(
+                        ("State", "Ready"),
+                        (),
+                        (
+                            ModelTransition(
+                                ("Transition", "Enable"),
+                                None,
+                                (),
+                                abstract=True,
+                            ),
+                        ),
+                        (),
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def _arch_head_module() -> ModelModule:
+    return ModelModule(
+        name=("phases", "arch_head"),
+        objects=(
+            ModelObject(
+                arch_head_path,
+                ModelTypeExpression(("PhaseType",)),
+                ("State", "Ready"),
+                ModelExpression("identifier", "BootInitFlow"),
+                None,
+                (),
+                (
+                    _state("Online"),
+                    _state(
+                        "Ready",
+                        ModelTransition(
+                            ("Transition", "Enable"),
+                            ("State", "Online"),
+                            (),
+                            override=True,
+                        ),
+                    ),
+                ),
+                (),
+            ),
+        ),
+    )
+
+
 def _json_module(document: dict, *name: str) -> dict:
     return next(
         module
@@ -284,16 +342,8 @@ EXPECTED_MODEL = ModelIR(
             parent="Kernel",
         ),
         ModelModule(name=("phases",)),
-        _object_module(
-            ("phases", "arch_head"),
-            "ArchHeadPhase",
-            "ArchHead",
-            (
-                _state("Base", _transition("Enable", "Online")),
-                _state("Online"),
-            ),
-            parent="BootInitFlow",
-        ),
+        _arch_head_module(),
+        _phase_type_module(),
         _object_module(
             ("systems", "opensbi"),
             "OpenSBIType",
@@ -400,6 +450,35 @@ class ParserAndCompilerTests(unittest.TestCase):
             flow_module.objects[0].parent,
             ModelExpression("identifier", "BootTask"),
         )
+
+    def test_real_phase_type_and_arch_head_override_are_preserved(self) -> None:
+        model = compile_spec(REPOSITORY / "model" / "main.spec")
+        phase_type = next(
+            module.types[0]
+            for module in model.modules
+            if module.name == ("phases", "phase")
+        )
+        arch_head = next(
+            module.objects[0]
+            for module in model.modules
+            if module.name == ("phases", "arch_head")
+        )
+
+        abstract_enable = next(
+            state.transitions[0]
+            for state in phase_type.states
+            if state.name == ("State", "Ready")
+        )
+        concrete_enable = next(
+            state.transitions[0]
+            for state in arch_head.states
+            if state.name == ("State", "Ready")
+        )
+        self.assertTrue(abstract_enable.abstract)
+        self.assertIsNone(abstract_enable.target_state)
+        self.assertTrue(concrete_enable.override)
+        self.assertFalse(concrete_enable.abstract)
+        self.assertEqual(concrete_enable.target_state, ("State", "Online"))
 
     def test_comments_whitespace_and_long_origin(self) -> None:
         document = parse_spec(
@@ -940,6 +1019,30 @@ class ParserAndCompilerTests(unittest.TestCase):
                         compile_spec(entry_path)
                 self.assertIn(message, caught.exception.diagnostic.message)
 
+    def test_phase_type_requires_an_enable_override(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    type PhaseType {
+                        initial_state: State::Ready;
+                        state State::Ready {
+                            transitions { on Transition::Enable; }
+                        }
+                        state State::Online {}
+                    }
+                    object MissingPhase: PhaseType {}
+                """
+            }
+        ) as (_, entry_path):
+            with self.assertRaises(CompilationError) as caught:
+                compile_spec(entry_path)
+
+        self.assertIn(
+            "does not implement abstract handler State::Ready + "
+            "Transition::Enable",
+            caught.exception.diagnostic.message,
+        )
+
     def test_continuation_declaration_lifecycle_and_yields_are_strict(self) -> None:
         invalid = (
             (
@@ -1125,6 +1228,7 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("objects", "task"),
                 ("phases",),
                 ("phases", "arch_head"),
+                ("phases", "phase"),
                 ("systems",),
                 ("systems", "computer"),
                 ("systems", "human"),
