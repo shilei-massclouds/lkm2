@@ -1,4 +1,4 @@
-"""Compilation pipeline from a crate-root specification to Model IR v4."""
+"""Compilation pipeline from a model-root specification to Model IR v4."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from model_ir import (
     ModelTransition,
     ModelType,
     ModelTypeExpression,
+    canonicalize_signal_name,
 )
 
 from .ast import ModelSpec
@@ -49,7 +50,7 @@ def _read_entry(path: Path) -> tuple[ModelSpec, tuple[LoadedModule, ...]]:
     origin_module = document.origin.name.parts[:-1]
     if origin_module not in {module.name for module in modules}:
         span = document.origin.name.span
-        rendered = ".".join(origin_module) or "<crate>"
+        rendered = ".".join(origin_module) or "<model>"
         raise error(
             path,
             span.start_line,
@@ -189,7 +190,7 @@ def _resolve_target(
     if raw[0] in imports:
         return imports[raw[0]] + raw[1:]
     cursor = 0
-    if raw[0] == "crate":
+    if raw[0] == "model":
         cursor = 1
         return raw[cursor:]
     if raw[0] == "self":
@@ -223,7 +224,25 @@ def _signal(
     ):
         raise _semantic_error(module, node, expected)
     target = _resolve_target(tuple(segments[:-2]), module.name, imports)
-    return ModelSignal(source, target, (segments[-2], segments[-1]), mode)
+    signal = canonicalize_signal_name((segments[-2], segments[-1]))
+    return ModelSignal(source, target, signal, mode)
+
+
+def _transition_handler_signal(
+    module: LoadedModule, node: Tree | Token
+) -> tuple[str, ...]:
+    signal = _special_name(module, node, "Transition", "accepted signal")
+    canonical = canonicalize_signal_name(signal)
+    if canonical != signal:
+        raise _semantic_error(
+            module,
+            node,
+            (
+                f"transition handler signal {'::'.join(signal)} is non-canonical; "
+                f"use {'::'.join(canonical)}"
+            ),
+        )
+    return signal
 
 
 def _fields(node: Tree) -> tuple[ModelField, ...]:
@@ -307,7 +326,7 @@ def _state(
                 assert isinstance(handler, Tree)
                 transitions.append(
                     ModelTransition(
-                        signal=_special_name(module, handler.children[0], "Transition", "accepted signal"),
+                        signal=_transition_handler_signal(module, handler.children[0]),
                         target_state=_special_name(module, handler.children[1], "State", "target state"),
                         blocks=_handler_blocks(module, handler, object_name, imports),
                     )

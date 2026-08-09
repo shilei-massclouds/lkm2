@@ -34,6 +34,14 @@ class ModelIRValidationError(ValueError):
     """Raised when an in-memory or serialized Model IR is invalid."""
 
 
+def canonicalize_signal_name(value: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the canonical signal name for a compatibility-boundary input."""
+
+    if value == ("Transition", "Startup"):
+        return ("Transition", "Preset")
+    return value
+
+
 def _validate_identifier(value: object, path: str) -> None:
     if type(value) is not str or _IDENTIFIER.fullmatch(value) is None:
         raise ModelIRValidationError(f"{path} is not a valid identifier: {value!r}")
@@ -72,6 +80,11 @@ def _validate_signal_name(value: tuple[str, ...], path: str) -> None:
         raise ModelIRValidationError(
             f"{path} must have the form Transition::<Name> or Action::<Name>"
         )
+    canonical = canonicalize_signal_name(value)
+    if canonical != value:
+        raise ModelIRValidationError(
+            f"{path} must use canonical signal {'::'.join(canonical)}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +97,7 @@ class ModelEntry:
         _validate_qualified_name(self.spec, "entry.spec")
         if len(self.spec) != 1:
             raise ModelIRValidationError(
-                "entry.spec must contain exactly one root module identifier"
+                "entry.spec must contain exactly one primary root module identifier"
             )
         if len(self.origin) < 2:
             raise ModelIRValidationError("entry.origin must be an absolute declaration name")
@@ -298,7 +311,11 @@ class ModelTransition:
     blocks: tuple[ModelHandlerBlock, ...]
 
     def __post_init__(self) -> None:
-        _validate_special_name(self.signal, "Transition", "transition.signal")
+        _validate_signal_name(self.signal, "transition.signal")
+        if self.signal[0] != "Transition":
+            raise ModelIRValidationError(
+                "transition.signal must have the form Transition::<Name>"
+            )
         _validate_special_name(self.target_state, "State", "transition.target_state")
         _validate_tuple(self.blocks, ModelHandlerBlock, "transition.blocks")
 
@@ -501,8 +518,9 @@ class ModelIR:
                 raise ModelIRValidationError(
                     f"module {'.'.join(name)!r} is missing parent module {'.'.join(name[:-1])!r}"
                 )
-        if {name for name in names if len(name) == 1} != {self.entry.spec}:
-            raise ModelIRValidationError("root modules must exactly match entry.spec")
+        root_names = {name for name in names if len(name) == 1}
+        if self.entry.spec not in root_names:
+            raise ModelIRValidationError("entry.spec must name a declared root module")
 
         objects = {item.name for module in ordered for item in module.objects}
         externals = {item.name for module in ordered for item in module.externals}

@@ -16,7 +16,9 @@ sys.path.insert(0, str(SOURCE_DIRECTORY))
 
 from model_ir import (
     ModelEntry,
+    ModelExpression,
     ModelExternal,
+    ModelHandlerBlock,
     ModelIR,
     ModelIRValidationError,
     ModelModule,
@@ -33,6 +35,94 @@ from modelc import CompilationError, SourceSpan, compile_spec, parse_spec
 from modelc.cli import main
 
 
+def _signal(
+    source: tuple[str, ...],
+    target: tuple[str, ...],
+    name: str,
+    mode: str,
+) -> ModelSignal:
+    return ModelSignal(source, target, ("Transition", name), mode)
+
+
+def _block(kind: str, *signals: ModelSignal) -> ModelHandlerBlock:
+    return ModelHandlerBlock(kind, signals=signals)
+
+
+def _transition(
+    name: str,
+    target: str,
+    *blocks: ModelHandlerBlock,
+) -> ModelTransition:
+    return ModelTransition(("Transition", name), ("State", target), blocks)
+
+
+def _state(
+    name: str,
+    transition: ModelTransition | None = None,
+) -> ModelState:
+    return ModelState(
+        ("State", name),
+        (),
+        () if transition is None else (transition,),
+        (),
+    )
+
+
+def _standard_states(
+    preset_blocks: tuple[ModelHandlerBlock, ...] = (),
+    setup_blocks: tuple[ModelHandlerBlock, ...] = (),
+    enable_blocks: tuple[ModelHandlerBlock, ...] = (),
+) -> tuple[ModelState, ...]:
+    return (
+        _state("Base", _transition("Preset", "Prepared", *preset_blocks)),
+        _state("Online"),
+        _state("Prepared", _transition("Setup", "Ready", *setup_blocks)),
+        _state("Ready", _transition("Enable", "Online", *enable_blocks)),
+    )
+
+
+def _object_module(
+    path: tuple[str, ...],
+    type_name: str,
+    object_name: str,
+    states: tuple[ModelState, ...],
+    *,
+    initial_state: str = "Base",
+    parent: str | None = None,
+) -> ModelModule:
+    return ModelModule(
+        name=path,
+        types=(ModelType(path + (type_name,), None),),
+        objects=(
+            ModelObject(
+                path + (object_name,),
+                ModelTypeExpression((type_name,)),
+                ("State", initial_state),
+                None if parent is None else ModelExpression("identifier", parent),
+                None,
+                None,
+                states,
+                (),
+            ),
+        ),
+    )
+
+
+def _json_module(document: dict, *name: str) -> dict:
+    return next(
+        module
+        for module in document["modules"]
+        if module["name"] == list(name)
+    )
+
+
+computer_path = ("systems", "computer", "Computer")
+qemu_path = ("systems", "qemu_virt_platform", "QemuVirtPlatform")
+opensbi_path = ("systems", "opensbi", "OpenSBI")
+kernel_path = ("systems", "kernel", "Kernel")
+rootfs_path = ("systems", "rootfs", "RootFs")
+boot_flow_path = ("flows", "task_flow", "BootInitFlow")
+
 EXPECTED_MODEL = ModelIR(
     schema_version=4,
     entry=ModelEntry(
@@ -40,57 +130,44 @@ EXPECTED_MODEL = ModelIR(
     ),
     modules=(
         ModelModule(name=("systems",)),
-        ModelModule(
-            name=("systems", "computer"),
-            types=(ModelType(("systems", "computer", "ComputerType"), None),),
-            objects=(
-                ModelObject(
-                    ("systems", "computer", "Computer"),
-                    ModelTypeExpression(("ComputerType",)),
-                    ("State", "Base"),
-                    None,
-                    None,
-                    None,
-                    (
-                        ModelState(
-                            ("State", "Base"),
-                            (),
-                            (
-                                ModelTransition(
-                                    ("Transition", "Preset"),
-                                    ("State", "Prepared"),
-                                    (),
-                                ),
-                            ),
-                            (),
-                        ),
-                        ModelState(("State", "Online"), (), (), ()),
-                        ModelState(
-                            ("State", "Prepared"),
-                            (),
-                            (
-                                ModelTransition(
-                                    ("Transition", "Setup"),
-                                    ("State", "Ready"),
-                                    (),
-                                ),
-                            ),
-                            (),
-                        ),
-                        ModelState(
-                            ("State", "Ready"),
-                            (),
-                            (
-                                ModelTransition(
-                                    ("Transition", "Enable"),
-                                    ("State", "Online"),
-                                    (),
-                                ),
-                            ),
-                            (),
+        _object_module(
+            ("systems", "computer"),
+            "ComputerType",
+            "Computer",
+            _standard_states(
+                preset_blocks=(
+                    _block(
+                        "drives",
+                        *(
+                            _signal(computer_path, target, "Preset", "drive")
+                            for target in (
+                                qemu_path,
+                                opensbi_path,
+                                kernel_path,
+                                rootfs_path,
+                            )
                         ),
                     ),
-                    (),
+                ),
+                setup_blocks=(
+                    _block(
+                        "drives",
+                        *(
+                            _signal(computer_path, target, "Setup", "drive")
+                            for target in (
+                                qemu_path,
+                                opensbi_path,
+                                kernel_path,
+                                rootfs_path,
+                            )
+                        ),
+                    ),
+                ),
+                enable_blocks=(
+                    _block(
+                        "emits",
+                        _signal(computer_path, qemu_path, "Enable", "emit"),
+                    ),
                 ),
             ),
         ),
@@ -114,6 +191,92 @@ EXPECTED_MODEL = ModelIR(
                     ),
                 ),
             ),
+        ),
+        _object_module(
+            ("systems", "kernel"),
+            "KernelType",
+            "Kernel",
+            _standard_states(
+                enable_blocks=(
+                    _block(
+                        "emits",
+                        _signal(
+                            kernel_path,
+                            boot_flow_path,
+                            "Preset",
+                            "emit",
+                        ),
+                    ),
+                ),
+            ),
+            parent="Computer",
+        ),
+        ModelModule(name=("flows",)),
+        _object_module(
+            ("flows", "task_flow"),
+            "TaskFlow",
+            "BootInitFlow",
+            _standard_states(
+                preset_blocks=(
+                    _block(
+                        "emits",
+                        _signal(boot_flow_path, boot_flow_path, "Setup", "emit"),
+                    ),
+                ),
+                setup_blocks=(
+                    _block(
+                        "emits",
+                        _signal(boot_flow_path, boot_flow_path, "Enable", "emit"),
+                    ),
+                ),
+            ),
+            parent="BootTask",
+        ),
+        ModelModule(name=("objects",)),
+        _object_module(
+            ("objects", "task"),
+            "Task",
+            "BootTask",
+            (
+                _state("OnCpu", _transition("Suspend", "Online")),
+                _state("Online", _transition("Dispatch", "OnCpu")),
+            ),
+            initial_state="OnCpu",
+            parent="Kernel",
+        ),
+        _object_module(
+            ("systems", "opensbi"),
+            "OpenSBIType",
+            "OpenSBI",
+            _standard_states(
+                enable_blocks=(
+                    _block(
+                        "emits",
+                        _signal(opensbi_path, kernel_path, "Enable", "emit"),
+                    ),
+                ),
+            ),
+            parent="Computer",
+        ),
+        _object_module(
+            ("systems", "qemu_virt_platform"),
+            "QemuVirtPlatformType",
+            "QemuVirtPlatform",
+            _standard_states(
+                enable_blocks=(
+                    _block(
+                        "emits",
+                        _signal(qemu_path, opensbi_path, "Enable", "emit"),
+                    ),
+                ),
+            ),
+            parent="Computer",
+        ),
+        _object_module(
+            ("systems", "rootfs"),
+            "RootFsType",
+            "RootFs",
+            _standard_states(),
         ),
     ),
 )
@@ -154,25 +317,90 @@ class ParserAndCompilerTests(unittest.TestCase):
 
         self.assertEqual(document.spec.name.parts, ("systems",))
         self.assertEqual(
+            tuple(spec.name.parts for spec in document.specs),
+            (("systems",), ("objects",), ("flows",)),
+        )
+        self.assertEqual(
             document.origin.name.parts, ("systems", "human", "Human")
         )
         self.assertEqual(document.spec.name.span, SourceSpan(5, 6, 5, 13))
         self.assertEqual(document.spec.span, SourceSpan(5, 1, 5, 14))
-        self.assertEqual(document.origin.name.span, SourceSpan(7, 8, 7, 27))
-        self.assertEqual(document.origin.span, SourceSpan(7, 1, 7, 28))
+        self.assertEqual(document.origin.name.span, SourceSpan(9, 8, 9, 27))
+        self.assertEqual(document.origin.span, SourceSpan(9, 1, 9, 28))
         self.assertEqual(compile_spec(path), EXPECTED_MODEL)
+
+    def test_real_task_types_and_boot_instances_are_separated(self) -> None:
+        model = compile_spec(REPOSITORY / "model" / "main.spec")
+        task_module = next(
+            module
+            for module in model.modules
+            if module.name == ("objects", "task")
+        )
+        flow_module = next(
+            module
+            for module in model.modules
+            if module.name == ("flows", "task_flow")
+        )
+
+        self.assertEqual(task_module.types[0].name[-1], "Task")
+        self.assertEqual(task_module.objects[0].name[-1], "BootTask")
+        self.assertEqual(flow_module.types[0].name[-1], "TaskFlow")
+        self.assertEqual(flow_module.objects[0].name[-1], "BootInitFlow")
+        self.assertEqual(
+            flow_module.objects[0].parent,
+            ModelExpression("identifier", "BootTask"),
+        )
 
     def test_comments_whitespace_and_long_origin(self) -> None:
         document = parse_spec(
             """
             // entry namespace
             spec alpha; /* between declarations */
+            spec beta;
             origin alpha.beta_gamma.Person2; // end
             """
         )
         self.assertEqual(document.spec.name.parts, ("alpha",))
         self.assertEqual(
+            tuple(spec.name.parts for spec in document.specs),
+            (("alpha",), ("beta",)),
+        )
+        self.assertEqual(
             document.origin.name.parts, ("alpha", "beta_gamma", "Person2")
+        )
+
+    def test_entry_can_compose_peer_root_modules(self) -> None:
+        files = {
+            "root.spec": "external Origin {}",
+            "objects.spec": "type Task;",
+            "flows.spec": "type TaskFlow;",
+        }
+        entry = (
+            "spec root;\n"
+            "spec objects;\n"
+            "spec flows;\n"
+            "origin root.Origin;\n"
+        )
+        with model_tree(files, entry) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        self.assertEqual(model.entry.spec, ("root",))
+        self.assertEqual(
+            tuple(module.name for module in model.modules),
+            (("flows",), ("objects",), ("root",)),
+        )
+
+    def test_duplicate_entry_root_is_rejected(self) -> None:
+        entry = "spec root;\nspec root;\norigin root.Root;\n"
+        with model_tree({"root.spec": "external Root {}"}, entry) as (
+            _,
+            entry_path,
+        ):
+            with self.assertRaises(CompilationError) as caught:
+                compile_spec(entry_path)
+        self.assertIn(
+            "duplicate root module declaration 'root'",
+            caught.exception.diagnostic.message,
         )
 
     def test_syntax_errors_have_source_positions(self) -> None:
@@ -226,7 +454,7 @@ class ParserAndCompilerTests(unittest.TestCase):
             "root.spec": "spec a; spec b;",
             "root/a.spec": """
                 spec child;
-                use crate::root::b::FromCrate;
+                use model::root::b::FromModel;
                 use self::child::FromSelf;
                 use super::b::FromSuper;
                 use root::b::FromBare;
@@ -255,6 +483,10 @@ class ParserAndCompilerTests(unittest.TestCase):
             (
                 {"root.spec": "use super::super::Thing;"},
                 "too many leading 'super'",
+            ),
+            (
+                {"root.spec": "use crate::root::Thing;"},
+                "'crate' is no longer supported in use paths; use 'model' instead",
             ),
             (
                 {"root.spec": "use root::missing::Thing;"},
@@ -444,6 +676,103 @@ class ParserAndCompilerTests(unittest.TestCase):
         with self.assertRaises(ModelIRValidationError):
             load_model_ir(StringIO(json.dumps(document)))
 
+    def test_startup_alias_is_canonicalized_only_for_signal_calls(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    object Flow: T {
+                        state State::Base {
+                            transitions {
+                                on Transition::Preset -> State::Online {
+                                    drives { Flow.Transition::Startup; }
+                                    emits { Flow.Transition::Startup; }
+                                }
+                            }
+                            actions { on Action::Startup {} }
+                        }
+                        state State::Online {}
+                    }
+                    external Human {
+                        drives {
+                            Flow.Transition::Startup;
+                            Flow.Transition::startup;
+                            Flow.Action::Startup;
+                        }
+                    }
+                """
+            },
+            entry="spec root;\norigin root.Human;\n",
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        state = model.objects[0].states[0]
+        transition = state.transitions[0]
+        self.assertEqual(
+            tuple(signal.signal for block in transition.blocks for signal in block.signals),
+            (("Transition", "Preset"), ("Transition", "Preset")),
+        )
+        self.assertEqual(state.actions[0].signal, ("Action", "Startup"))
+        self.assertEqual(
+            tuple(signal.signal for signal in model.externals[0].signals),
+            (
+                ("Transition", "Preset"),
+                ("Transition", "startup"),
+                ("Action", "Startup"),
+            ),
+        )
+
+    def test_startup_alias_is_rejected_as_a_transition_handler_name(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    object Flow: T {
+                        state State::Base {
+                            transitions {
+                                on Transition::Startup -> State::Online {}
+                            }
+                        }
+                        state State::Online {}
+                    }
+                """
+            }
+        ) as (_, entry_path):
+            with self.assertRaises(CompilationError) as caught:
+                compile_spec(entry_path)
+
+        self.assertIn(
+            "transition handler signal Transition::Startup is non-canonical; "
+            "use Transition::Preset",
+            caught.exception.diagnostic.message,
+        )
+
+    def test_model_root_prefix_resolves_signal_targets(self) -> None:
+        files = {
+            "root.spec": """
+                spec child;
+                external Human {
+                    emits {
+                        model::root::child::Computer.Action::Refresh;
+                    }
+                }
+            """,
+            "root/child.spec": """
+                object Computer: T {
+                    initial_state: State::Idle;
+                    state State::Idle {
+                        actions { on Action::Refresh {} }
+                    }
+                }
+            """,
+        }
+        entry = "spec root;\norigin root.Human;\n"
+        with model_tree(files, entry) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        self.assertEqual(
+            model.externals[0].signals[0].target,
+            ("root", "child", "Computer"),
+        )
+
     def test_action_handler_rejects_non_action_expressions(self) -> None:
         for accepted_signal in ("Transition::Refresh", "refresh()"):
             with self.subTest(accepted_signal=accepted_signal):
@@ -496,19 +825,53 @@ class ModelIRJSONTests(unittest.TestCase):
         self.assertEqual(load_model_ir(StringIO(first.getvalue())), EXPECTED_MODEL)
         document = json.loads(first.getvalue())
         self.assertEqual(
-            document["modules"][1]["objects"][0]["initial_state"],
+            _json_module(document, "systems", "computer")["objects"][0][
+                "initial_state"
+            ],
             ["State", "Base"],
         )
 
     def test_initial_state_json_field_remains_strict(self) -> None:
         missing = json.loads(EXPECTED_JSON)
-        del missing["modules"][1]["objects"][0]["initial_state"]
+        del _json_module(missing, "systems", "computer")["objects"][0][
+            "initial_state"
+        ]
         null_for_stateful = json.loads(EXPECTED_JSON)
-        null_for_stateful["modules"][1]["objects"][0]["initial_state"] = None
+        _json_module(null_for_stateful, "systems", "computer")["objects"][0][
+            "initial_state"
+        ] = None
 
         for document in (missing, null_for_stateful):
             with self.subTest(document=document):
                 with self.assertRaises(ModelIRValidationError):
+                    load_model_ir(StringIO(json.dumps(document)))
+
+    def test_startup_alias_is_rejected_in_model_ir(self) -> None:
+        signal_document = json.loads(EXPECTED_JSON)
+        kernel = _json_module(signal_document, "systems", "kernel")
+        ready = next(
+            state
+            for state in kernel["objects"][0]["states"]
+            if state["name"] == ["State", "Ready"]
+        )
+        ready["transitions"][0]["blocks"][0]["signals"][0]["signal"] = [
+            "Transition",
+            "Startup",
+        ]
+
+        handler_document = json.loads(EXPECTED_JSON)
+        computer = _json_module(handler_document, "systems", "computer")
+        computer["objects"][0]["states"][0]["transitions"][0]["signal"] = [
+            "Transition",
+            "Startup",
+        ]
+
+        for document in (signal_document, handler_document):
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(
+                    ModelIRValidationError,
+                    "must use canonical signal Transition::Preset",
+                ):
                     load_model_ir(StringIO(json.dumps(document)))
 
     def test_loader_normalizes_module_order(self) -> None:
@@ -517,7 +880,19 @@ class ModelIRJSONTests(unittest.TestCase):
         model = load_model_ir(StringIO(json.dumps(document)))
         self.assertEqual(
             tuple(module.name for module in model.modules),
-            (("systems",), ("systems", "computer"), ("systems", "human")),
+            (
+                ("flows",),
+                ("flows", "task_flow"),
+                ("objects",),
+                ("objects", "task"),
+                ("systems",),
+                ("systems", "computer"),
+                ("systems", "human"),
+                ("systems", "kernel"),
+                ("systems", "opensbi"),
+                ("systems", "qemu_virt_platform"),
+                ("systems", "rootfs"),
+            ),
         )
 
     def test_invalid_documents_are_rejected(self) -> None:
@@ -528,13 +903,14 @@ class ModelIRJSONTests(unittest.TestCase):
         duplicate_module = json.loads(EXPECTED_JSON)
         duplicate_module["modules"].append(duplicate_module["modules"][0])
         duplicate_declaration = json.loads(EXPECTED_JSON)
-        duplicate_declaration["modules"][1]["types"].append(
-            duplicate_declaration["modules"][1]["types"][0]
-        )
+        computer = _json_module(duplicate_declaration, "systems", "computer")
+        computer["types"].append(computer["types"][0])
         unknown_signal_target = json.loads(EXPECTED_JSON)
-        unknown_signal_target["modules"][2]["externals"][0]["signals"][0]["target"] = ["missing", "Object"]
+        human = _json_module(unknown_signal_target, "systems", "human")
+        human["externals"][0]["signals"][0]["target"] = ["missing", "Object"]
         invalid_signal_prefix = json.loads(EXPECTED_JSON)
-        invalid_signal_prefix["modules"][2]["externals"][0]["signals"][0]["signal"] = ["Effect", "Preset"]
+        human = _json_module(invalid_signal_prefix, "systems", "human")
+        human["externals"][0]["signals"][0]["signal"] = ["Effect", "Preset"]
         invalid_documents = [
             "{",
             json.dumps(wrong_version),
@@ -558,13 +934,44 @@ class ModelIRJSONTests(unittest.TestCase):
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
-        self.assertEqual(model.modules[0].name, ("systems",))
+        self.assertEqual(model.modules[0].name, ("flows",))
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
                 schema_version=4,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
+            )
+
+        with self.assertRaises(ModelIRValidationError):
+            ModelIR(
+                schema_version=4,
+                entry=ModelEntry(
+                    origin=EXPECTED_MODEL.entry.origin,
+                    spec=("missing",),
+                ),
+                modules=EXPECTED_MODEL.modules,
+            )
+
+        with self.assertRaisesRegex(
+            ModelIRValidationError,
+            "must use canonical signal Transition::Preset",
+        ):
+            ModelSignal(
+                computer_path,
+                kernel_path,
+                ("Transition", "Startup"),
+                "drive",
+            )
+
+        with self.assertRaisesRegex(
+            ModelIRValidationError,
+            "must use canonical signal Transition::Preset",
+        ):
+            ModelTransition(
+                ("Transition", "Startup"),
+                ("State", "Prepared"),
+                (),
             )
 
 

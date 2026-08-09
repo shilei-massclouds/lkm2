@@ -120,7 +120,7 @@ class _Context:
         candidates: dict[tuple[str, ...], object],
         module: tuple[str, ...],
     ) -> tuple[str, ...] | None:
-        if raw and raw[0] == "crate":
+        if raw and raw[0] == "model":
             raw = raw[1:]
         elif raw and raw[0] == "self":
             raw = module + raw[1:]

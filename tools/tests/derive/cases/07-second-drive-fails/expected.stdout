@@ -7,4 +7,5 @@ Human -> Parent: drives Transition::Start
     current state: State::Idle
     commit state: not committed ✗
   commit state: not committed ✗
+
 stopped: unhandled_signal

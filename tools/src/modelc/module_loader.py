@@ -31,15 +31,23 @@ class _ModuleGraphLoader:
         return tuple(module.name for module in self.load_sources(document))
 
     def load_sources(self, document: ModelSpec) -> tuple[LoadedModule, ...]:
-        root_name = document.spec.name.parts
-        root_path = self.entry_path.parent / f"{root_name[0]}.spec"
-        span = document.spec.span
-        self._load_module(
-            root_name,
-            root_path,
-            self.entry_path,
-            Location(span.start_line, span.start_column),
-        )
+        for declaration in document.specs:
+            root_name = declaration.name.parts
+            root_path = self.entry_path.parent / f"{root_name[0]}.spec"
+            span = declaration.span
+            if root_name in self.modules:
+                raise error(
+                    self.entry_path,
+                    span.start_line,
+                    span.start_column,
+                    f"duplicate root module declaration {root_name[0]!r}",
+                )
+            self._load_module(
+                root_name,
+                root_path,
+                self.entry_path,
+                Location(span.start_line, span.start_column),
+            )
         self._resolve_uses()
         return tuple(self.modules[name] for name in sorted(self.modules))
 
@@ -130,6 +138,14 @@ class _ModuleGraphLoader:
         cursor = 0
 
         if first == "crate":
+            location = declaration.locations[0]
+            raise error(
+                module.path,
+                location.line,
+                location.column,
+                "'crate' is no longer supported in use paths; use 'model' instead",
+            )
+        if first == "model":
             base: tuple[str, ...] = ()
             cursor = 1
         elif first == "self":
@@ -160,7 +176,7 @@ class _ModuleGraphLoader:
             )
 
         for index in range(cursor, len(parts)):
-            if parts[index] in {"crate", "self", "super"}:
+            if parts[index] in {"model", "self", "super"}:
                 location = declaration.locations[index]
                 raise error(
                     module.path,
@@ -196,7 +212,7 @@ def resolve_use_name(
 
     parts = declaration.parts
     cursor = 0
-    if parts[0] == "crate":
+    if parts[0] == "model":
         base: tuple[str, ...] = ()
         cursor = 1
     elif parts[0] == "self":

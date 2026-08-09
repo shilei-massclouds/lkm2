@@ -35,5 +35,11 @@ class OriginDeclaration:
 
 @dataclass(frozen=True, slots=True)
 class ModelSpec:
-    spec: SpecDeclaration
+    specs: tuple[SpecDeclaration, ...]
     origin: OriginDeclaration
+
+    @property
+    def spec(self) -> SpecDeclaration:
+        """Return the primary root retained in Model IR's singular entry field."""
+
+        return self.specs[0]

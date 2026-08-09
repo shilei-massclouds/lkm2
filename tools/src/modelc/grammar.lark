@@ -1,4 +1,4 @@
-start: spec_declaration origin_declaration
+start: spec_declaration+ origin_declaration
 
 spec_declaration: "spec" module_name ";"
 origin_declaration: "origin" qualified_name ";"

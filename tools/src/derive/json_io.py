@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, TextIO, TypeVar
 
+from model_ir import canonicalize_signal_name
+
 from .model import (
     DerivationCheck,
     DerivationEvent,
@@ -77,16 +79,28 @@ def _optional_name(value: object, path: str) -> tuple[str, ...] | None:
     return None if value is None else _name(value, path)
 
 
-def _event(value: object, path: str) -> DerivationEvent:
+def _event(
+    value: object, path: str, *, accept_compatibility_aliases: bool
+) -> DerivationEvent:
     data = _object(
         value, frozenset({"source", "target", "signal", "mode"}), path
     )
+    signal = _name(data["signal"], f"{path}.signal")
+    canonical = canonicalize_signal_name(signal)
+    if not accept_compatibility_aliases and canonical != signal:
+        raise DerivationValidationError(
+            f"{path}.signal must use canonical signal {'::'.join(canonical)}"
+        )
     return DerivationEvent(
         source=_name(data["source"], f"{path}.source"),
         target=_name(data["target"], f"{path}.target"),
-        signal=_name(data["signal"], f"{path}.signal"),
+        signal=signal,
         mode=_string(data["mode"], f"{path}.mode"),
     )
+
+
+def _sequence_event(value: object, path: str) -> DerivationEvent:
+    return _event(value, path, accept_compatibility_aliases=True)
 
 
 def _load_json(stream: TextIO) -> object:
@@ -111,7 +125,7 @@ def load_derivation_sequence(stream: TextIO) -> DerivationSequence:
     document = _object(raw, frozenset({"schema_version", "events"}), "document")
     return DerivationSequence(
         _integer(document["schema_version"], "schema_version"),
-        _array(document["events"], "events", _event),
+        _array(document["events"], "events", _sequence_event),
     )
 
 
@@ -174,11 +188,23 @@ def _unit(value: object, path: str) -> DerivationUnit:
         path,
         frozenset({"failure"}),
     )
+    handler = _optional_name(data["handler"], f"{path}.handler")
+    if handler is not None:
+        canonical_handler = canonicalize_signal_name(handler)
+        if canonical_handler != handler:
+            raise DerivationValidationError(
+                f"{path}.handler must use canonical signal "
+                f"{'::'.join(canonical_handler)}"
+            )
     return DerivationUnit(
         kind=_string(data["kind"], f"{path}.kind"),
-        event=_event(data["event"], f"{path}.event"),
+        event=_event(
+            data["event"],
+            f"{path}.event",
+            accept_compatibility_aliases=False,
+        ),
         state_before=_optional_name(data["state_before"], f"{path}.state_before"),
-        handler=_optional_name(data["handler"], f"{path}.handler"),
+        handler=handler,
         candidate_state=_optional_name(
             data["candidate_state"], f"{path}.candidate_state"
         ),

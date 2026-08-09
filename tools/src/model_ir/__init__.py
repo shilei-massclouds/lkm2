@@ -23,6 +23,7 @@ from .model import (
     ModelTransition,
     ModelType,
     ModelTypeExpression,
+    canonicalize_signal_name,
 )
 
 __all__ = [
@@ -47,6 +48,7 @@ __all__ = [
     "ModelTransition",
     "ModelType",
     "ModelTypeExpression",
+    "canonicalize_signal_name",
     "dump_model_ir",
     "load_model_ir",
 ]

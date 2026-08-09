@@ -1,4 +1,5 @@
 Human -> Computer: drives Action::Refresh
   current state: State::Idle
   commit state: not committed ✗
+
 stopped: invariant_failed

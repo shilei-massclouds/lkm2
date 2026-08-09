@@ -11,4 +11,5 @@ Producer -> Second: emits Transition::Mark
 Human -> Observer: drives Transition::Check
   current state: State::Idle
   commit state: State::Done
-passed
+
+Derivation passed!

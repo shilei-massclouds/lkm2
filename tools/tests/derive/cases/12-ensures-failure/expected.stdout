@@ -1,4 +1,5 @@
 Human -> Computer: drives Transition::Go
   current state: State::Idle
   commit state: not committed ✗
+
 stopped: ensures_failed

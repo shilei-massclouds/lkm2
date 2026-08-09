@@ -1,5 +1,7 @@
 /* Kernel - core of lkm2 */
 
+use model::flows::task_flow::BootInitFlow;
+
 type KernelType;
 
 object Kernel: KernelType {
@@ -22,6 +24,9 @@ object Kernel: KernelType {
     state State::Ready {
         transitions {
             on Transition::Enable -> State::Online {
+                emits {
+                    BootInitFlow.Action::Enter;
+                }
             }
         }
     }

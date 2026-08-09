@@ -59,7 +59,7 @@ class _ASTBuilder(Transformer[Any, Any]):
 
     def start(self, meta: Meta, children: list[Any]) -> ModelSpec:
         del meta
-        return ModelSpec(spec=children[0], origin=children[1])
+        return ModelSpec(specs=tuple(children[:-1]), origin=children[-1])
 
 
 def _end_position(source: str) -> tuple[int, int]:

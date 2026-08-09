@@ -4,4 +4,5 @@ Human -> Producer: drives Transition::Start
 Producer -> Logger: emits Transition::Log
   current state: State::Idle
   commit state: State::Done
-passed
+
+Derivation passed!

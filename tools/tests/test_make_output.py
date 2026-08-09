@@ -10,16 +10,59 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 EXPECTED_DERIVATION_OUTPUT = """\
 Human -> Computer: drives Transition::Preset
   current state: State::Base
+  Computer -> QemuVirtPlatform: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
+  Computer -> OpenSBI: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
+  Computer -> Kernel: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
+  Computer -> RootFs: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
   commit state: State::Prepared
 
 Human -> Computer: drives Transition::Setup
   current state: State::Prepared
+  Computer -> QemuVirtPlatform: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
+  Computer -> OpenSBI: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
+  Computer -> Kernel: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
+  Computer -> RootFs: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
   commit state: State::Ready
 
 Human -> Computer: emits Transition::Enable
   current state: State::Ready
   commit state: State::Online
-passed
+Computer -> QemuVirtPlatform: emits Transition::Enable
+  current state: State::Ready
+  commit state: State::Online
+QemuVirtPlatform -> OpenSBI: emits Transition::Enable
+  current state: State::Ready
+  commit state: State::Online
+OpenSBI -> Kernel: emits Transition::Enable
+  current state: State::Ready
+  commit state: State::Online
+Kernel -> BootInitFlow: emits Transition::Preset
+  current state: State::Base
+  commit state: State::Prepared
+BootInitFlow -> BootInitFlow: emits Transition::Setup
+  current state: State::Prepared
+  commit state: State::Ready
+BootInitFlow -> BootInitFlow: emits Transition::Enable
+  current state: State::Ready
+  commit state: State::Online
+
+Derivation passed!
 """
 
 

@@ -81,6 +81,12 @@ def render_derivation_result(result: DerivationResult, stream: TextIO) -> None:
         if features:
             label = f"{label}: {features}"
         lines.append(f"{label} ✗")
-    lines.append("passed" if result.status == "passed" else f"stopped: {result.status}")
+    if lines:
+        lines.append("")
+    lines.append(
+        "Derivation passed!"
+        if result.status == "passed"
+        else f"stopped: {result.status}"
+    )
     stream.write("\n".join(lines))
     stream.write("\n")

@@ -7,4 +7,5 @@ Human -> Parent: drives Transition::Start
     current state: State::Idle
     commit state: State::Done
   commit state: State::Done
-passed
+
+Derivation passed!

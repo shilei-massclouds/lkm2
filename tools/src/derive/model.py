@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
+from model_ir import canonicalize_signal_name
+
 
 SEQUENCE_SCHEMA_VERSION = 2
 RESULT_SCHEMA_VERSION = 2
@@ -78,6 +80,7 @@ class DerivationEvent:
             raise DerivationValidationError(
                 "event.signal must have the form Transition::<Name> or Action::<Name>"
             )
+        object.__setattr__(self, "signal", canonicalize_signal_name(self.signal))
         if self.mode not in _MODES:
             raise DerivationValidationError(
                 f"event.mode must be 'drive' or 'emit', got {self.mode!r}"
@@ -177,6 +180,11 @@ class DerivationUnit:
             if len(self.handler) != 2 or self.handler[0] not in {"Transition", "Action"}:
                 raise DerivationValidationError(
                     "unit.handler must have the form Transition::<Name>, Action::<Name>, or null"
+                )
+            canonical = canonicalize_signal_name(self.handler)
+            if canonical != self.handler:
+                raise DerivationValidationError(
+                    f"unit.handler must use canonical signal {'::'.join(canonical)}"
                 )
         _state(self.candidate_state, "unit.candidate_state")
         _tuple_of(self.depends_on, DerivationCheck, "unit.depends_on")

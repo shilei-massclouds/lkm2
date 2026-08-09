@@ -244,8 +244,60 @@ class EngineTests(unittest.TestCase):
             "Human -> Computer: drives Action::Refresh\n"
             "  current state: State::Idle\n"
             "  commit state: unchanged\n"
-            "passed\n",
+            "\n"
+            "Derivation passed!\n",
         )
+
+    def test_model_root_prefix_resolves_object_references(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Computer: T {
+                initial_state: State::Idle;
+                state State::Idle {
+                    actions {
+                        on Action::Refresh {
+                            depends_on {
+                                model::root::Computer.state == State::Idle;
+                            }
+                        }
+                    }
+                }
+            }
+            external Human { drives { Computer.Action::Refresh; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.units[0].depends_on[0].status, "passed")
+
+    def test_startup_request_is_canonicalized_and_matches_preset(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Flow: T {
+                state State::Base {
+                    transitions {
+                        on Transition::Preset -> State::Online {}
+                    }
+                }
+                state State::Online {}
+            }
+            external Human { drives { Flow.Transition::Preset; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        requested = DerivationEvent(
+            ("root", "Human"),
+            ("root", "Flow"),
+            ("Transition", "Startup"),
+            "drive",
+        )
+        self.assertEqual(requested.signal, ("Transition", "Preset"))
+
+        result = derive(model, DerivationSequence(2, (requested,)))
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.units[0].event.signal, ("Transition", "Preset"))
+        self.assertEqual(result.units[0].handler, ("Transition", "Preset"))
 
     def test_drives_and_emits_can_both_carry_actions(self) -> None:
         directory, model = _compile_text(
@@ -375,6 +427,7 @@ class EngineTests(unittest.TestCase):
             "Human -> Computer: drives Action::Refresh\n"
             "  current state: State::Idle\n"
             "  commit state: not committed ✗\n"
+            "\n"
             "stopped: invariant_failed\n",
         )
 
@@ -547,6 +600,7 @@ class EngineTests(unittest.TestCase):
             "Producer -> Broken: emits Action::Run\n"
             "  current state: State::Idle\n"
             "  commit state: not committed ✗\n"
+            "\n"
             "stopped: invariant_failed\n",
         )
 
@@ -720,6 +774,7 @@ class EngineTests(unittest.TestCase):
             "Computer -> Computer: drives Transition::Go\n"
             "  current state: State::Idle\n"
             "  commit state: not committed ✗\n"
+            "\n"
             "stopped: undeclared_external_signal\n",
         )
 
@@ -776,6 +831,22 @@ class DerivationJSONTests(unittest.TestCase):
         self.assertEqual(
             load_derivation_sequence(StringIO(action_output.getvalue())), action
         )
+
+        startup_document = json.loads(valid)
+        startup_document["events"][0]["signal"] = ["Transition", "Startup"]
+        startup = load_derivation_sequence(StringIO(json.dumps(startup_document)))
+        self.assertEqual(startup.events[0].signal, ("Transition", "Preset"))
+        startup_output = StringIO()
+        dump_derivation_sequence(startup, startup_output)
+        self.assertNotIn("Startup", startup_output.getvalue())
+        self.assertIn('"Preset"', startup_output.getvalue())
+
+        action_startup_document = json.loads(valid)
+        action_startup_document["events"][0]["signal"] = ["Action", "Startup"]
+        action_startup = load_derivation_sequence(
+            StringIO(json.dumps(action_startup_document))
+        )
+        self.assertEqual(action_startup.events[0].signal, ("Action", "Startup"))
         invalid = (
             valid.replace('"schema_version": 2', '"schema_version": 1'),
             valid.replace('"events":', '"extra": 0, "events":'),
@@ -798,6 +869,26 @@ class DerivationJSONTests(unittest.TestCase):
         document = json.loads(output.getvalue())
         self.assertEqual(document["schema_version"], 2)
         self.assertNotIn("failure", document)
+
+        startup_event = json.loads(output.getvalue())
+        startup_event["units"][0]["event"]["signal"] = [
+            "Transition",
+            "Startup",
+        ]
+        startup_event["units"][0]["handler"] = ["Transition", "Preset"]
+        startup_handler = json.loads(output.getvalue())
+        startup_handler["units"][0]["event"]["signal"] = [
+            "Transition",
+            "Preset",
+        ]
+        startup_handler["units"][0]["handler"] = ["Transition", "Startup"]
+        for alias_document in (startup_event, startup_handler):
+            with self.subTest(alias_document=alias_document):
+                with self.assertRaisesRegex(
+                    DerivationValidationError,
+                    "must use canonical signal Transition::Preset",
+                ):
+                    load_derivation_result(StringIO(json.dumps(alias_document)))
 
         invalid_documents = []
         wrong_version = dict(document)
@@ -856,7 +947,7 @@ class CLITests(unittest.TestCase):
                     default_model=case / "main.spec",
                 )
         self.assertEqual(status, 0)
-        self.assertTrue(stdout.getvalue().endswith("passed\n"))
+        self.assertTrue(stdout.getvalue().endswith("Derivation passed!\n"))
         self.assertEqual(stderr.getvalue(), "")
 
     def test_wrapper_default_works_outside_the_repository(self) -> None:
@@ -876,7 +967,7 @@ class CLITests(unittest.TestCase):
         ):
             with self.subTest(signal=signal):
                 self.assertIn(signal, completed.stdout)
-        self.assertTrue(completed.stdout.endswith("passed\n"))
+        self.assertTrue(completed.stdout.endswith("Derivation passed!\n"))
         self.assertEqual(completed.stderr, "")
 
     def test_model_and_sequence_options_are_mutually_exclusive(self) -> None:
