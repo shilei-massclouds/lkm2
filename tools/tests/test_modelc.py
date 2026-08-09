@@ -139,7 +139,19 @@ def _task_flow_module() -> ModelModule:
                         (
                             ModelAction(
                                 enter,
-                                (ModelHandlerBlock("drives", signals=()),),
+                                (
+                                    ModelHandlerBlock(
+                                        "drives",
+                                        signals=(
+                                            ModelSignal(
+                                                boot_flow_path,
+                                                arch_head_path,
+                                                ("Transition", "Enable"),
+                                                "drive",
+                                            ),
+                                        ),
+                                    ),
+                                ),
                                 False,
                                 True,
                             ),
@@ -167,6 +179,7 @@ opensbi_path = ("systems", "opensbi", "OpenSBI")
 kernel_path = ("systems", "kernel", "Kernel")
 rootfs_path = ("systems", "rootfs", "RootFs")
 boot_flow_path = ("flows", "task_flow", "BootInitFlow")
+arch_head_path = ("phases", "arch_head", "ArchHead")
 
 EXPECTED_MODEL = ModelIR(
     schema_version=5,
@@ -270,6 +283,17 @@ EXPECTED_MODEL = ModelIR(
             initial_state="OnCpu",
             parent="Kernel",
         ),
+        ModelModule(name=("phases",)),
+        _object_module(
+            ("phases", "arch_head"),
+            "ArchHeadPhase",
+            "ArchHead",
+            (
+                _state("Base", _transition("Enable", "Online")),
+                _state("Online"),
+            ),
+            parent="BootInitFlow",
+        ),
         _object_module(
             ("systems", "opensbi"),
             "OpenSBIType",
@@ -344,15 +368,15 @@ class ParserAndCompilerTests(unittest.TestCase):
         self.assertEqual(document.spec.name.parts, ("systems",))
         self.assertEqual(
             tuple(spec.name.parts for spec in document.specs),
-            (("systems",), ("objects",), ("flows",)),
+            (("systems",), ("objects",), ("phases",), ("flows",)),
         )
         self.assertEqual(
             document.origin.name.parts, ("systems", "human", "Human")
         )
         self.assertEqual(document.spec.name.span, SourceSpan(5, 6, 5, 13))
         self.assertEqual(document.spec.span, SourceSpan(5, 1, 5, 14))
-        self.assertEqual(document.origin.name.span, SourceSpan(9, 8, 9, 27))
-        self.assertEqual(document.origin.span, SourceSpan(9, 1, 9, 28))
+        self.assertEqual(document.origin.name.span, SourceSpan(10, 8, 10, 27))
+        self.assertEqual(document.origin.span, SourceSpan(10, 1, 10, 28))
         self.assertEqual(compile_spec(path), EXPECTED_MODEL)
 
     def test_real_task_types_and_boot_instances_are_separated(self) -> None:
@@ -1099,6 +1123,8 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("flows", "task_flow"),
                 ("objects",),
                 ("objects", "task"),
+                ("phases",),
+                ("phases", "arch_head"),
                 ("systems",),
                 ("systems", "computer"),
                 ("systems", "human"),

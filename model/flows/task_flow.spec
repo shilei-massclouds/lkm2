@@ -1,6 +1,7 @@
 /* TaskFlow - flow of task. */
 
 use model::objects::task::BootTask;
+use model::phases::arch_head::ArchHead;
 
 type TaskFlow {
     continuation: true;
@@ -20,7 +21,7 @@ object BootInitFlow: TaskFlow {
         actions {
             override on Action::Enter {
                 drives {
-                    /* The first Enter starts here; later Enter signals resume a yield. */
+                    ArchHead.Transition::Enable;
                 }
             }
         }
