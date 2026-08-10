@@ -383,14 +383,14 @@ cpu_1 上的 token=205 不受影响。
 第一版 SMP 建议使用：
 
 ```text
-一个中央 Scheduler
+每个逻辑 CPU 一个独立 Scheduler 对象
 多个逻辑 CPU
-一个全局事件循环
+一个中央、确定性的事件循环
 顺序一致的共享状态
 可选的完整信号/响应序列枚举
 ```
 
-若以后需要研究 Scheduler 自身的并发，再拆成每 CPU Scheduler、局部 runqueue 和共享负载均衡系统。
+这里中央化的是推导器的确定性事件循环，不是内核模型中的 Scheduler 实例。事件循环可以按确定顺序串行执行多个 per-CPU Scheduler 对象；每个对象仍保有独立身份、状态和 run token。局部 runqueue 与共享负载均衡系统可以后续补充，但不应先用一个全局 Scheduler 单例代替 per-CPU ownership。
 
 ## 8. 事件前沿，而不是逐轮扫描 CPU
 
@@ -619,6 +619,7 @@ SearchCoverageTracker
 可靠的进程内信号
 单线程事件循环
 单核确定性执行
+BootCPU 的独立 Scheduler 对象
 同步请求/应答
 YIELD、BLOCK、WAKE、DISPATCH
 一次性 run_token
@@ -644,7 +645,7 @@ YIELD、BLOCK、WAKE、DISPATCH
 
 ```text
 弱内存模型
-每 CPU Scheduler
+完整的 per-CPU runqueue 与共享负载均衡
 并行执行彼此独立的确定序列搜索 worker
 不可靠或分布式信号
 持久化和故障恢复

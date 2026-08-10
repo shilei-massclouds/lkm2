@@ -7,11 +7,11 @@ use super::start_kernel::StartKernel;
 object ArchHead: PhaseType {
     parent: BootInitFlow;
 
-    state State::Ready {
-        transitions {
-            override on Transition::Enable -> State::Online {
+    state State::Online {
+        actions {
+            override on Action::Enter {
                 drives {
-                    StartKernel.Transition::Enable;
+                    StartKernel.Action::Enter;
                 }
             }
         }

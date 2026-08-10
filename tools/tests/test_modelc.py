@@ -24,6 +24,8 @@ from model_ir import (
     ModelIRValidationError,
     ModelModule,
     ModelObject,
+    ModelParameter,
+    ModelPredicate,
     ModelSignal,
     ModelState,
     ModelTransition,
@@ -47,6 +49,16 @@ def _signal(
 
 def _block(kind: str, *signals: ModelSignal) -> ModelHandlerBlock:
     return ModelHandlerBlock(kind, signals=signals)
+
+
+def _call(name: str, *arguments: str) -> ModelExpression:
+    return ModelExpression(
+        "call",
+        children=(
+            ModelExpression("identifier", name),
+            *(ModelExpression("identifier", argument) for argument in arguments),
+        ),
+    )
 
 
 def _transition(
@@ -151,6 +163,27 @@ def _task_flow_module() -> ModelModule:
                                             ),
                                         ),
                                     ),
+                                    ModelHandlerBlock(
+                                        "yields",
+                                        signals=(
+                                            ModelSignal(
+                                                boot_flow_path,
+                                                cpu0_scheduler_path,
+                                                ("Action", "Schedule"),
+                                                "yield",
+                                            ),
+                                        ),
+                                    ),
+                                    ModelHandlerBlock(
+                                        "ensures",
+                                        expressions=(
+                                            _call(
+                                                "scheduler_identity_schedule_committed",
+                                                "Cpu0Scheduler",
+                                                "BootInitFlow",
+                                            ),
+                                        ),
+                                    ),
                                 ),
                                 False,
                                 True,
@@ -194,15 +227,33 @@ def _phase_type_module() -> ModelModule:
     )
 
 
-def _arch_head_module() -> ModelModule:
+def _phase_object_module(
+    path: tuple[str, ...],
+    object_name: str,
+    drive_targets: tuple[tuple[str, ...], ...] = (),
+    *,
+    parent: str | None = None,
+) -> ModelModule:
+    object_path = path + (object_name,)
+    blocks = ()
+    if drive_targets:
+        blocks = (
+            _block(
+                "drives",
+                *(
+                    _signal(object_path, target, "Enable", "drive")
+                    for target in drive_targets
+                ),
+            ),
+        )
     return ModelModule(
-        name=("phases", "arch_head"),
+        name=path,
         objects=(
             ModelObject(
-                arch_head_path,
+                object_path,
                 ModelTypeExpression(("PhaseType",)),
                 ("State", "Ready"),
-                ModelExpression("identifier", "BootInitFlow"),
+                None if parent is None else ModelExpression("identifier", parent),
                 None,
                 (),
                 (
@@ -212,9 +263,120 @@ def _arch_head_module() -> ModelModule:
                         ModelTransition(
                             ("Transition", "Enable"),
                             ("State", "Online"),
-                            (),
+                            blocks,
                             override=True,
                         ),
+                    ),
+                ),
+                (),
+            ),
+        ),
+    )
+
+
+def _arch_head_module() -> ModelModule:
+    return _phase_object_module(
+        ("phases", "arch_head"),
+        "ArchHead",
+        (start_kernel_path,),
+        parent="BootInitFlow",
+    )
+
+
+def _scheduler_module() -> ModelModule:
+    ready = ("State", "Ready")
+    online = ("State", "Online")
+    enable = ("Transition", "Enable")
+    schedule = ("Action", "Schedule")
+    identity_fact = _call(
+        "scheduler_identity_schedule_committed",
+        "Cpu0Scheduler",
+        "BootInitFlow",
+    )
+    return ModelModule(
+        name=("objects", "scheduler"),
+        predicates=(
+            ModelPredicate(
+                scheduler_identity_predicate_path,
+                (),
+                (
+                    ModelParameter("scheduler", ModelTypeExpression(("Scheduler",))),
+                    ModelParameter("flow", ModelTypeExpression(("TaskFlow",))),
+                ),
+                ModelTypeExpression(("bool",)),
+                None,
+            ),
+        ),
+        types=(
+            ModelType(
+                scheduler_type_path,
+                (),
+                base_type=ModelTypeExpression(("PhaseType",)),
+                initial_state=ready,
+                states=(
+                    ModelState(
+                        online,
+                        (),
+                        (),
+                        (ModelAction(schedule, (), abstract=True),),
+                    ),
+                    ModelState(
+                        ready,
+                        (),
+                        (ModelTransition(enable, None, (), abstract=True),),
+                        (),
+                    ),
+                ),
+            ),
+        ),
+        objects=(
+            ModelObject(
+                cpu0_scheduler_path,
+                ModelTypeExpression(("Scheduler",)),
+                ready,
+                None,
+                None,
+                (),
+                (
+                    ModelState(
+                        online,
+                        (),
+                        (),
+                        (
+                            ModelAction(
+                                schedule,
+                                (
+                                    ModelHandlerBlock(
+                                        "establishes", expressions=(identity_fact,)
+                                    ),
+                                    ModelHandlerBlock(
+                                        "emits",
+                                        signals=(
+                                            ModelSignal(
+                                                cpu0_scheduler_path,
+                                                boot_flow_path,
+                                                ("Action", "Enter"),
+                                                "emit",
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                                override=True,
+                            ),
+                        ),
+                    ),
+                    ModelState(
+                        ready,
+                        (),
+                        (
+                            ModelTransition(
+                                enable,
+                                online,
+                                (),
+                                override=True,
+                            ),
+                        ),
+                        (),
                     ),
                 ),
                 (),
@@ -238,6 +400,18 @@ kernel_path = ("systems", "kernel", "Kernel")
 rootfs_path = ("systems", "rootfs", "RootFs")
 boot_flow_path = ("flows", "task_flow", "BootInitFlow")
 arch_head_path = ("phases", "arch_head", "ArchHead")
+start_kernel_path = ("phases", "start_kernel", "StartKernel")
+early_boot_path = ("phases", "start_kernel", "early_boot", "EarlyBoot")
+boot_setup_path = ("phases", "start_kernel", "boot_setup", "BootSetup")
+boot_handoff_path = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
+boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
+scheduler_type_path = ("objects", "scheduler", "Scheduler")
+cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
+scheduler_identity_predicate_path = (
+    "objects",
+    "scheduler",
+    "scheduler_identity_schedule_committed",
+)
 
 EXPECTED_MODEL = ModelIR(
     schema_version=6,
@@ -330,6 +504,7 @@ EXPECTED_MODEL = ModelIR(
         ModelModule(name=("flows",)),
         _task_flow_module(),
         ModelModule(name=("objects",)),
+        _scheduler_module(),
         _object_module(
             ("objects", "task"),
             "Task",
@@ -344,6 +519,26 @@ EXPECTED_MODEL = ModelIR(
         ModelModule(name=("phases",)),
         _arch_head_module(),
         _phase_type_module(),
+        _phase_object_module(
+            ("phases", "start_kernel"),
+            "StartKernel",
+            (early_boot_path, boot_setup_path, boot_handoff_path, boot_idle_path),
+            parent="BootInitFlow",
+        ),
+        _phase_object_module(
+            ("phases", "start_kernel", "boot_handoff"), "BootHandoff"
+        ),
+        _phase_object_module(
+            ("phases", "start_kernel", "boot_idle"), "BootIdle"
+        ),
+        _phase_object_module(
+            ("phases", "start_kernel", "boot_setup"),
+            "BootSetup",
+            (cpu0_scheduler_path,),
+        ),
+        _phase_object_module(
+            ("phases", "start_kernel", "early_boot"), "EarlyBoot"
+        ),
         _object_module(
             ("systems", "opensbi"),
             "OpenSBIType",
@@ -1225,10 +1420,16 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("flows",),
                 ("flows", "task_flow"),
                 ("objects",),
+                ("objects", "scheduler"),
                 ("objects", "task"),
                 ("phases",),
                 ("phases", "arch_head"),
                 ("phases", "phase"),
+                ("phases", "start_kernel"),
+                ("phases", "start_kernel", "boot_handoff"),
+                ("phases", "start_kernel", "boot_idle"),
+                ("phases", "start_kernel", "boot_setup"),
+                ("phases", "start_kernel", "early_boot"),
                 ("systems",),
                 ("systems", "computer"),
                 ("systems", "human"),

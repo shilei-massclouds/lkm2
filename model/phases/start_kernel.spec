@@ -14,14 +14,14 @@ use self::boot_idle::BootIdle;
 object StartKernel: PhaseType {
     parent: BootInitFlow;
 
-    state State::Ready {
-        transitions {
-            override on Transition::Enable -> State::Online {
+    state State::Online {
+        actions {
+            override on Action::Enter {
                 drives {
-                    EarlyBoot.Transition::Enable;
-                    BootSetup.Transition::Enable;
-                    BootHandoff.Transition::Enable;
-                    BootIdle.Transition::Enable;
+                    EarlyBoot.Action::Enter;
+                    BootSetup.Action::Enter;
+                    BootHandoff.Action::Enter;
+                    BootIdle.Action::Enter;
                 }
             }
         }

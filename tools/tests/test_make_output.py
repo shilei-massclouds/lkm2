@@ -60,8 +60,32 @@ Kernel -> BootInitFlow: emits Action::Enter
   current state: State::Online
   BootInitFlow -> ArchHead: drives Transition::Enable
     current state: State::Ready
+    ArchHead -> StartKernel: drives Transition::Enable
+      current state: State::Ready
+      StartKernel -> EarlyBoot: drives Transition::Enable
+        current state: State::Ready
+        commit state: State::Online
+      StartKernel -> BootSetup: drives Transition::Enable
+        current state: State::Ready
+        BootSetup -> Cpu0Scheduler: drives Transition::Enable
+          current state: State::Ready
+          commit state: State::Online
+        commit state: State::Online
+      StartKernel -> BootHandoff: drives Transition::Enable
+        current state: State::Ready
+        commit state: State::Online
+      StartKernel -> BootIdle: drives Transition::Enable
+        current state: State::Ready
+        commit state: State::Online
+      commit state: State::Online
     commit state: State::Online
-  commit state: unchanged
+  BootInitFlow -> Cpu0Scheduler: yields Action::Schedule
+    current state: State::Online
+    commit state: unchanged
+  Cpu0Scheduler -> BootInitFlow: emits Action::Enter
+    current state: State::Online
+    commit state: unchanged
+  continuation yielded: generation 1
 
 Derivation passed!
 """

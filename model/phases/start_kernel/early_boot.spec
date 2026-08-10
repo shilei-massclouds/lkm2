@@ -3,9 +3,10 @@
 use model::phases::phase::PhaseType;
 
 object EarlyBoot: PhaseType {
-    state State::Ready {
-        transitions {
-            override on Transition::Enable -> State::Online {
+    state State::Online {
+        actions {
+            override on Action::Enter {
+                print "here";
             }
         }
     }

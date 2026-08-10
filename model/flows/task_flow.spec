@@ -1,6 +1,7 @@
 /* TaskFlow - flow of task. */
 
 use model::objects::task::BootTask;
+use model::objects::scheduler::Cpu0Scheduler;
 use model::phases::arch_head::ArchHead;
 
 type TaskFlow {
@@ -21,7 +22,7 @@ object BootInitFlow: TaskFlow {
         actions {
             override on Action::Enter {
                 drives {
-                    ArchHead.Transition::Enable;
+                    ArchHead.Action::Enter;
                 }
             }
         }
