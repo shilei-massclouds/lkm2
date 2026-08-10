@@ -1091,7 +1091,7 @@ class DerivationJSONTests(unittest.TestCase):
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 3)
+        self.assertEqual(document["schema_version"], 4)
         self.assertNotIn("failure", document)
 
         startup_event = json.loads(output.getvalue())
@@ -1124,7 +1124,7 @@ class DerivationJSONTests(unittest.TestCase):
         missing = dict(document)
         del missing["facts"]
         invalid_documents.append(json.dumps(missing))
-        invalid_documents.append('{"schema_version":3,"status":"passed","status":"passed"}')
+        invalid_documents.append('{"schema_version":4,"status":"passed","status":"passed"}')
         for invalid in invalid_documents:
             with self.subTest(document=invalid):
                 with self.assertRaises(DerivationValidationError):

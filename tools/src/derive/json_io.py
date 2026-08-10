@@ -1,4 +1,4 @@
-"""Strict JSON boundaries for sequence schema v2 and result schema v3."""
+"""Strict JSON boundaries for sequence schema v2 and result schema v4."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from model_ir import canonicalize_signal_name
 from .model import (
     DerivationCheck,
     DerivationContinuation,
+    DerivationDirective,
     DerivationEvent,
     DerivationFact,
     DerivationFailure,
@@ -152,6 +153,14 @@ def _check(value: object, path: str) -> DerivationCheck:
     )
 
 
+def _directive(value: object, path: str) -> DerivationDirective:
+    data = _object(value, frozenset({"kind", "message"}), path)
+    return DerivationDirective(
+        _string(data["kind"], f"{path}.kind"),
+        _string(data["message"], f"{path}.message"),
+    )
+
+
 def _fact(value: object, path: str) -> DerivationFact:
     data = _object(value, frozenset({"predicate", "arguments"}), path)
     return DerivationFact(
@@ -222,6 +231,7 @@ def _unit(value: object, path: str) -> DerivationUnit:
                 "candidate_state",
                 "depends_on",
                 "drives",
+                "directives",
                 "ensures",
                 "establishes",
                 "invariants",
@@ -258,6 +268,7 @@ def _unit(value: object, path: str) -> DerivationUnit:
         ),
         depends_on=_array(data["depends_on"], f"{path}.depends_on", _check),
         drives=_array(data["drives"], f"{path}.drives", _unit),
+        directives=_array(data["directives"], f"{path}.directives", _directive),
         ensures=_array(data["ensures"], f"{path}.ensures", _check),
         establishes=_array(data["establishes"], f"{path}.establishes", _check),
         invariants=_array(data["invariants"], f"{path}.invariants", _check),
@@ -278,7 +289,7 @@ def _unit(value: object, path: str) -> DerivationUnit:
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v3 result document."""
+    """Load and strictly validate one schema-v4 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -333,6 +344,10 @@ def _check_data(check: DerivationCheck) -> dict[str, Any]:
     return {"expression": check.expression, "status": check.status}
 
 
+def _directive_data(directive: DerivationDirective) -> dict[str, Any]:
+    return {"kind": directive.kind, "message": directive.message}
+
+
 def _yield_token_data(token: DerivationYieldToken) -> dict[str, Any]:
     return {"object": list(token.object), "generation": token.generation}
 
@@ -367,6 +382,7 @@ def _unit_data(unit: DerivationUnit) -> dict[str, Any]:
         ),
         "depends_on": [_check_data(item) for item in unit.depends_on],
         "drives": [_unit_data(item) for item in unit.drives],
+        "directives": [_directive_data(item) for item in unit.directives],
         "ensures": [_check_data(item) for item in unit.ensures],
         "establishes": [_check_data(item) for item in unit.establishes],
         "invariants": [_check_data(item) for item in unit.invariants],
@@ -403,7 +419,7 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v3 derivation result followed by a newline."""
+    """Write one canonical schema-v4 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")

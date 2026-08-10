@@ -1,4 +1,4 @@
-"""Data model for derivation root selection and schema-v3 results."""
+"""Data model for derivation root selection and schema-v4 results."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from model_ir import canonicalize_signal_name
 
 
 SEQUENCE_SCHEMA_VERSION = 2
-RESULT_SCHEMA_VERSION = 3
+RESULT_SCHEMA_VERSION = 4
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MODES = frozenset({"drive", "emit", "yield"})
 _UNIT_KINDS = frozenset({"root", "drive", "emit", "yield"})
@@ -25,6 +25,7 @@ _FAILURE_CODES = frozenset(
         "no_resumable_continuation",
         "invalid_continuation_action",
         "continuation_reentry",
+        "panic",
     }
 )
 _UNIT_STATUSES = frozenset({"passed", "yielded", "stopped", *_FAILURE_CODES})
@@ -235,6 +236,20 @@ class DerivationContinuation:
 
 
 @dataclass(frozen=True, slots=True)
+class DerivationDirective:
+    kind: str
+    message: str
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"print", "panic"}:
+            raise DerivationValidationError(
+                f"invalid derivation directive kind {self.kind!r}"
+            )
+        if type(self.message) is not str:
+            raise DerivationValidationError("directive.message must be a string")
+
+
+@dataclass(frozen=True, slots=True)
 class DerivationUnit:
     kind: str
     event: DerivationEvent
@@ -253,6 +268,7 @@ class DerivationUnit:
     yields: tuple[DerivationUnit, ...] = ()
     yield_token_created: DerivationYieldToken | None = None
     yield_token_consumed: DerivationYieldToken | None = None
+    directives: tuple[DerivationDirective, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _UNIT_KINDS:
@@ -294,6 +310,7 @@ class DerivationUnit:
         _state(self.state_after, "unit.state_after")
         _tuple_of(self.emits, DerivationUnit, "unit.emits")
         _tuple_of(self.yields, DerivationUnit, "unit.yields")
+        _tuple_of(self.directives, DerivationDirective, "unit.directives")
         for label, token in (
             ("yield_token_created", self.yield_token_created),
             ("yield_token_consumed", self.yield_token_consumed),
@@ -316,6 +333,23 @@ class DerivationUnit:
                 )
         if self.status not in _UNIT_STATUSES:
             raise DerivationValidationError(f"invalid unit status {self.status!r}")
+        panic_directives = tuple(
+            directive for directive in self.directives if directive.kind == "panic"
+        )
+        if self.status == "panic":
+            if (
+                len(panic_directives) != 1
+                or self.directives[-1] != panic_directives[0]
+                or self.failure is None
+                or self.failure.message != panic_directives[0].message
+            ):
+                raise DerivationValidationError(
+                    "panic unit must end with the matching panic directive"
+                )
+        elif panic_directives:
+            raise DerivationValidationError(
+                "only a panic unit may contain a panic directive"
+            )
         if self.status == "passed":
             if self.failure is not None:
                 raise DerivationValidationError("passed unit must not contain a failure")
@@ -476,3 +510,7 @@ class DerivationResult:
                 raise DerivationValidationError(
                     "result failure is not recorded at a nested unit failure point"
                 )
+        if self.status == "panic" and self.continuations:
+            raise DerivationValidationError(
+                "panic result must not retain continuation frames or tokens"
+            )

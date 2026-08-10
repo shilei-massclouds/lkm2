@@ -240,7 +240,7 @@ boot_flow_path = ("flows", "task_flow", "BootInitFlow")
 arch_head_path = ("phases", "arch_head", "ArchHead")
 
 EXPECTED_MODEL = ModelIR(
-    schema_version=5,
+    schema_version=6,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -1263,9 +1263,9 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(duplicate_declaration),
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
-            EXPECTED_JSON.replace('"schema_version": 5', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 6', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":5,"schema_version":5}',
+            '{"schema_version":6,"schema_version":6}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -1274,7 +1274,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=5,
+            schema_version=6,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -1282,14 +1282,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=5,
+                schema_version=6,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=5,
+                schema_version=6,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

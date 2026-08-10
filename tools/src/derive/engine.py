@@ -11,6 +11,7 @@ from .model import (
     RESULT_SCHEMA_VERSION,
     DerivationCheck,
     DerivationContinuation,
+    DerivationDirective,
     DerivationEvent,
     DerivationFact,
     DerivationFailure,
@@ -362,6 +363,7 @@ class _Execution:
         yields: list[DerivationUnit] | None = None,
         yield_token_created: DerivationYieldToken | None = None,
         yield_token_consumed: DerivationYieldToken | None = None,
+        directives: list[DerivationDirective] | None = None,
     ) -> DerivationUnit:
         return DerivationUnit(
             kind,
@@ -381,7 +383,19 @@ class _Execution:
             () if yields is None else tuple(yields),
             yield_token_created,
             yield_token_consumed,
+            () if directives is None else tuple(directives),
         )
+
+    def _panic(
+        self, path: str, directive: DerivationDirective
+    ) -> DerivationFailure:
+        failure = self._set_failure("panic", path, directive.message)
+        for runtime in self.continuations.values():
+            runtime.frames.clear()
+            runtime.token = None
+            runtime.executing = False
+            runtime.waiting_yield_target = False
+        return failure
 
     def undeclared_root(self, event: DerivationEvent, path: str) -> DerivationUnit:
         failure = self._set_failure(
@@ -426,12 +440,22 @@ class _Execution:
         )
 
     @staticmethod
-    def _control_signals(handler: ModelAction) -> tuple[ModelSignal, ...]:
+    def _control_items(
+        handler: ModelAction,
+    ) -> tuple[ModelSignal | DerivationDirective, ...]:
         return tuple(
-            signal
+            item
             for block in handler.blocks
-            if block.kind in {"drives", "yields"}
-            for signal in block.signals
+            if block.kind in {"drives", "yields", "print", "panic"}
+            for item in (
+                block.signals
+                if block.kind in {"drives", "yields"}
+                else (
+                    DerivationDirective(
+                        block.kind, str(block.expressions[0].value)
+                    ),
+                )
+            )
         )
 
     def _continuation_failure_unit(
@@ -548,6 +572,7 @@ class _Execution:
         response_checks: dict[
             int, dict[str, list[DerivationCheck]]
         ] = {}
+        response_directives: dict[int, list[DerivationDirective]] = {}
 
         def checks_for(frame: _ResumeFrame) -> dict[str, list[DerivationCheck]]:
             return response_checks.setdefault(
@@ -559,6 +584,9 @@ class _Execution:
                     "invariants": [],
                 },
             )
+
+        def directives_for(frame: _ResumeFrame) -> list[DerivationDirective]:
+            return response_directives.setdefault(id(frame), [])
 
         def failed(
             frame: _ResumeFrame,
@@ -583,6 +611,7 @@ class _Execution:
                 status=failure.code,
                 failure=failure,
                 yield_token_consumed=consumed,
+                directives=directives_for(frame),
             )
 
         while runtime.frames:
@@ -636,9 +665,25 @@ class _Execution:
                         )
                 frame.entered = True
 
-            controls = self._control_signals(handler)
+            controls = self._control_items(handler)
             if frame.control_index < len(controls):
-                signal = controls[frame.control_index]
+                control = controls[frame.control_index]
+                if isinstance(control, DerivationDirective):
+                    frame.control_index += 1
+                    frame_directives = directives_for(frame)
+                    frame_directives.append(control)
+                    if control.kind == "panic":
+                        return failed(
+                            frame,
+                            handler,
+                            self._panic(
+                                f"{path}.directives[{len(frame_directives) - 1}]",
+                                control,
+                            ),
+                        )
+                    continue
+
+                signal = control
                 child_event = _event(signal)
                 child_path = (
                     f"{path}.yields[{len(yielded_units)}]"
@@ -679,6 +724,7 @@ class _Execution:
                         yields=yielded_units,
                         yield_token_created=token,
                         yield_token_consumed=consumed,
+                        directives=directives_for(root_frame),
                     )
 
                 frame.control_index += 1
@@ -735,6 +781,7 @@ class _Execution:
                         status="stopped",
                         failure=None,
                         yield_token_consumed=consumed,
+                        directives=directives_for(root_frame),
                     )
                 continue
 
@@ -882,6 +929,7 @@ class _Execution:
                         emits=completed_emits,
                         status="passed",
                         failure=None,
+                        directives=directives_for(frame),
                     )
                 )
                 continue
@@ -904,6 +952,7 @@ class _Execution:
                 status="passed",
                 failure=None,
                 yield_token_consumed=consumed,
+                directives=directives_for(root_frame),
             )
 
         raise RuntimeError("continuation execution exhausted without a result")
@@ -932,6 +981,7 @@ class _Execution:
         }
         drives: list[DerivationUnit] = []
         emits: list[DerivationUnit] = []
+        directives: list[DerivationDirective] = []
         if handler is None:
             signal_kind = event.signal[0].lower()
             failure = self._set_failure(
@@ -967,12 +1017,6 @@ class _Execution:
             )
             for name in ("depends_on", "ensures", "establishes")
         }
-        drive_events = tuple(
-            _event(signal)
-            for block in blocks
-            if block.kind == "drives"
-            for signal in block.signals
-        )
         emit_events = tuple(
             _event(signal)
             for block in blocks
@@ -999,6 +1043,7 @@ class _Execution:
                 emits=emits,
                 status=failure.code,
                 failure=failure,
+                directives=directives,
             )
 
         for index, expression in enumerate(expressions["depends_on"]):
@@ -1027,8 +1072,37 @@ class _Execution:
                 )
                 return failed_unit(failure)
 
-        for index, child_event in enumerate(drive_events):
-            drives.append(self.run_unit(child_event, "drive", f"{path}.drives[{index}]"))
+        controls = tuple(
+            item
+            for block in blocks
+            if block.kind in {"drives", "print", "panic"}
+            for item in (
+                block.signals
+                if block.kind == "drives"
+                else (
+                    DerivationDirective(
+                        block.kind, str(block.expressions[0].value)
+                    ),
+                )
+            )
+        )
+        for control in controls:
+            if isinstance(control, DerivationDirective):
+                directives.append(control)
+                if control.kind == "panic":
+                    return failed_unit(
+                        self._panic(
+                            f"{path}.directives[{len(directives) - 1}]",
+                            control,
+                        )
+                    )
+                continue
+            child_event = _event(control)
+            drives.append(
+                self.run_unit(
+                    child_event, "drive", f"{path}.drives[{len(drives)}]"
+                )
+            )
             if self.failure is not None:
                 return self._unit(
                     kind=kind,
@@ -1045,6 +1119,7 @@ class _Execution:
                     emits=emits,
                     status="stopped",
                     failure=None,
+                    directives=directives,
                 )
 
         for index, expression in enumerate(expressions["ensures"]):
@@ -1163,6 +1238,7 @@ class _Execution:
             emits=emits,
             status="passed",
             failure=None,
+            directives=directives,
         )
 
 

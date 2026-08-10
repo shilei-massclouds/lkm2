@@ -19,7 +19,7 @@
       ]
     }
   ],
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "ensures_failed",
   "units": [
     {
@@ -28,6 +28,7 @@
         "Ready"
       ],
       "depends_on": [],
+      "directives": [],
       "drives": [],
       "emits": [],
       "ensures": [

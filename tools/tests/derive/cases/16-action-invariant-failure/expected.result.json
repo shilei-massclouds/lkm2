@@ -19,12 +19,13 @@
       ]
     }
   ],
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "invariant_failed",
   "units": [
     {
       "candidate_state": null,
       "depends_on": [],
+      "directives": [],
       "drives": [],
       "emits": [],
       "ensures": [],

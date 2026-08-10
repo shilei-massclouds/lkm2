@@ -21,7 +21,7 @@
       ]
     }
   ],
-  "schema_version": 3,
+  "schema_version": 4,
   "status": "passed",
   "units": [
     {
@@ -30,6 +30,7 @@
         "Ready"
       ],
       "depends_on": [],
+      "directives": [],
       "drives": [],
       "emits": [],
       "ensures": [],

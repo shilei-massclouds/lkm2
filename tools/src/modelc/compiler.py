@@ -1,4 +1,4 @@
-"""Compilation pipeline from a model-root specification to Model IR v5."""
+"""Compilation pipeline from a model-root specification to Model IR v6."""
 
 from __future__ import annotations
 
@@ -311,6 +311,16 @@ def _handler_blocks(
                     ),
                 )
             )
+        elif rule in {"print_statement", "panic_statement"}:
+            expression = _lower_expression(child.children[0])
+            kind = rule.removesuffix("_statement")
+            if expression.kind != "string":
+                raise _semantic_error(
+                    module,
+                    child.children[0],
+                    f"{kind} requires exactly one string literal",
+                )
+            result.append(ModelHandlerBlock(kind, expressions=(expression,)))
         elif rule == "deferred_declaration":
             result.append(ModelHandlerBlock("deferred", deferred=_deferred(module, child)))
     return tuple(result)

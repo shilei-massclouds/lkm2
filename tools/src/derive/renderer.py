@@ -1,7 +1,8 @@
-"""Stable human rendering for schema-v3 derivation results."""
+"""Stable human rendering for schema-v4 derivation results."""
 
 from __future__ import annotations
 
+import unicodedata
 from typing import TextIO
 
 from .model import DerivationResult, DerivationUnit
@@ -35,6 +36,29 @@ def _special(name: tuple[str, ...] | None) -> str:
     return "<none>" if name is None else "::".join(name)
 
 
+def _single_line(message: str) -> str:
+    escapes = {
+        "\\": "\\\\",
+        "\b": "\\b",
+        "\f": "\\f",
+        "\n": "\\n",
+        "\r": "\\r",
+        "\t": "\\t",
+    }
+    result: list[str] = []
+    for character in message:
+        if character in escapes:
+            result.append(escapes[character])
+        elif unicodedata.category(character) in {"Cc", "Cs", "Zl", "Zp"}:
+            codepoint = ord(character)
+            width = 4 if codepoint <= 0xFFFF else 8
+            prefix = "u" if width == 4 else "U"
+            result.append(f"\\{prefix}{codepoint:0{width}x}")
+        else:
+            result.append(character)
+    return "".join(result)
+
+
 def _render_unit(
     unit: DerivationUnit,
     depth: int,
@@ -52,6 +76,11 @@ def _render_unit(
         lines.extend(_render_unit(child, depth + 1, names))
     for child in unit.yields:
         lines.extend(_render_unit(child, depth + 1, names))
+    for directive in unit.directives:
+        marker = " ✗" if directive.kind == "panic" else ""
+        lines.append(
+            f"{detail_indent}{directive.kind}: {_single_line(directive.message)}{marker}"
+        )
     if unit.status == "passed":
         committed = (
             "unchanged"

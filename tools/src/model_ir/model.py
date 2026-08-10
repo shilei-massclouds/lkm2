@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v5."""
+"""Frozen data model and semantic validation for Model IR schema v6."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -21,6 +21,8 @@ _BLOCK_KINDS = frozenset(
         "ensures",
         "establishes",
         "emits",
+        "print",
+        "panic",
         "deferred",
     }
 )
@@ -326,6 +328,15 @@ class ModelHandlerBlock:
         elif self.kind == "deferred":
             if self.expressions or self.signals or self.deferred is None:
                 raise ModelIRValidationError("deferred block must contain one deferred declaration")
+        elif self.kind in {"print", "panic"}:
+            if self.signals or self.deferred is not None:
+                raise ModelIRValidationError(
+                    f"{self.kind} block may only contain one string expression"
+                )
+            if len(self.expressions) != 1 or self.expressions[0].kind != "string":
+                raise ModelIRValidationError(
+                    f"{self.kind} block requires exactly one string expression"
+                )
         elif self.signals or self.deferred is not None:
             raise ModelIRValidationError(f"{self.kind} block may only contain expressions")
 
@@ -372,6 +383,10 @@ class ModelAction:
             raise ModelIRValidationError("action abstract/override flags must be booleans")
         if self.abstract and self.blocks:
             raise ModelIRValidationError("abstract action must not contain blocks")
+        if not self.abstract and not self.blocks:
+            raise ModelIRValidationError(
+                "concrete action must contain at least one handler block"
+            )
 
 
 @dataclass(frozen=True, slots=True)
