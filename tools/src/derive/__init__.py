@@ -23,7 +23,6 @@ from .model import (
     DerivationState,
     DerivationUnit,
     DerivationValidationError,
-    DerivationYieldToken,
 )
 from .renderer import render_derivation_result
 
@@ -42,7 +41,6 @@ __all__ = [
     "DerivationState",
     "DerivationUnit",
     "DerivationValidationError",
-    "DerivationYieldToken",
     "derive",
     "default_derivation_sequence",
     "dump_derivation_result",

@@ -1,4 +1,4 @@
-"""Strict JSON boundaries for sequence schema v2 and result schema v4."""
+"""Strict JSON boundaries for sequence schema v2 and result schema v5."""
 
 from __future__ import annotations
 
@@ -20,7 +20,6 @@ from .model import (
     DerivationState,
     DerivationUnit,
     DerivationValidationError,
-    DerivationYieldToken,
 )
 
 
@@ -177,45 +176,28 @@ def _state(value: object, path: str) -> DerivationState:
     )
 
 
-def _yield_token(value: object, path: str) -> DerivationYieldToken:
-    data = _object(value, frozenset({"object", "generation"}), path)
-    return DerivationYieldToken(
-        _name(data["object"], f"{path}.object"),
-        _integer(data["generation"], f"{path}.generation"),
-    )
-
-
-def _optional_yield_token(
-    value: object, path: str
-) -> DerivationYieldToken | None:
-    return None if value is None else _yield_token(value, path)
-
-
 def _frame(value: object, path: str) -> DerivationFrame:
     data = _object(
         value,
-        frozenset({"object", "handler", "control_index", "generation"}),
+        frozenset({"object", "handler", "control_index"}),
         path,
     )
     return DerivationFrame(
         _name(data["object"], f"{path}.object"),
         _name(data["handler"], f"{path}.handler"),
         _integer(data["control_index"], f"{path}.control_index"),
-        _integer(data["generation"], f"{path}.generation"),
     )
 
 
 def _continuation(value: object, path: str) -> DerivationContinuation:
     data = _object(
         value,
-        frozenset({"object", "generation", "frames", "yield_token"}),
+        frozenset({"root", "frames"}),
         path,
     )
     return DerivationContinuation(
-        _name(data["object"], f"{path}.object"),
-        _integer(data["generation"], f"{path}.generation"),
+        _name(data["root"], f"{path}.root"),
         _array(data["frames"], f"{path}.frames", _frame),
-        _optional_yield_token(data["yield_token"], f"{path}.yield_token"),
     )
 
 
@@ -238,8 +220,6 @@ def _unit(value: object, path: str) -> DerivationUnit:
                 "state_after",
                 "emits",
                 "yields",
-                "yield_token_created",
-                "yield_token_consumed",
                 "status",
             }
         ),
@@ -279,17 +259,11 @@ def _unit(value: object, path: str) -> DerivationUnit:
         if "failure" not in data
         else _failure(data["failure"], f"{path}.failure"),
         yields=_array(data["yields"], f"{path}.yields", _unit),
-        yield_token_created=_optional_yield_token(
-            data["yield_token_created"], f"{path}.yield_token_created"
-        ),
-        yield_token_consumed=_optional_yield_token(
-            data["yield_token_consumed"], f"{path}.yield_token_consumed"
-        ),
     )
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v4 result document."""
+    """Load and strictly validate one schema-v5 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -348,26 +322,17 @@ def _directive_data(directive: DerivationDirective) -> dict[str, Any]:
     return {"kind": directive.kind, "message": directive.message}
 
 
-def _yield_token_data(token: DerivationYieldToken) -> dict[str, Any]:
-    return {"object": list(token.object), "generation": token.generation}
-
-
 def _continuation_data(item: DerivationContinuation) -> dict[str, Any]:
     return {
-        "object": list(item.object),
-        "generation": item.generation,
+        "root": list(item.root),
         "frames": [
             {
                 "object": list(frame.object),
                 "handler": list(frame.handler),
                 "control_index": frame.control_index,
-                "generation": frame.generation,
             }
             for frame in item.frames
         ],
-        "yield_token": None
-        if item.yield_token is None
-        else _yield_token_data(item.yield_token),
     }
 
 
@@ -389,12 +354,6 @@ def _unit_data(unit: DerivationUnit) -> dict[str, Any]:
         "state_after": None if unit.state_after is None else list(unit.state_after),
         "emits": [_unit_data(item) for item in unit.emits],
         "yields": [_unit_data(item) for item in unit.yields],
-        "yield_token_created": None
-        if unit.yield_token_created is None
-        else _yield_token_data(unit.yield_token_created),
-        "yield_token_consumed": None
-        if unit.yield_token_consumed is None
-        else _yield_token_data(unit.yield_token_consumed),
         "status": unit.status,
     }
     if unit.failure is not None:
@@ -419,7 +378,7 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v4 derivation result followed by a newline."""
+    """Write one canonical schema-v5 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")

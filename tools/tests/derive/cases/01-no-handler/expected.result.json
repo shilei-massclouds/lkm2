@@ -19,7 +19,7 @@
       ]
     }
   ],
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "unhandled_signal",
   "units": [
     {
@@ -60,8 +60,6 @@
         "Idle"
       ],
       "status": "unhandled_signal",
-      "yield_token_consumed": null,
-      "yield_token_created": null,
       "yields": []
     }
   ]

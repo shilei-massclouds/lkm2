@@ -20,26 +20,49 @@ from .model import (
     DerivationSequence,
     DerivationState,
     DerivationUnit,
-    DerivationYieldToken,
 )
 
 
 @dataclass(slots=True)
 class _ResumeFrame:
+    object: tuple[str, ...]
+    event: DerivationEvent
+    kind: str
     handler: tuple[str, ...]
     control_index: int = 0
     entered: bool = False
+    before: tuple[str, ...] | None = None
+    depends_on: list[DerivationCheck] = field(default_factory=list)
+    drives: list[DerivationUnit] = field(default_factory=list)
+    ensures: list[DerivationCheck] = field(default_factory=list)
+    establishes: list[DerivationCheck] = field(default_factory=list)
+    invariants: list[DerivationCheck] = field(default_factory=list)
+    emits: list[DerivationUnit] = field(default_factory=list)
+    yields: list[DerivationUnit] = field(default_factory=list)
+    directives: list[DerivationDirective] = field(default_factory=list)
+
+    def reset_segment(self) -> None:
+        self.depends_on.clear()
+        self.drives.clear()
+        self.ensures.clear()
+        self.establishes.clear()
+        self.invariants.clear()
+        self.emits.clear()
+        self.yields.clear()
+        self.directives.clear()
 
 
 @dataclass(slots=True)
 class _ContinuationRuntime:
-    object: tuple[str, ...]
+    root: tuple[str, ...]
     frames: list[_ResumeFrame] = field(default_factory=list)
-    generation: int = 0
-    token: DerivationYieldToken | None = None
     executing: bool = False
+    suspended: bool = False
     completed: bool = False
     waiting_yield_target: bool = False
+    resume_requested: bool = False
+    owner_active: bool = False
+    result_unit: DerivationUnit | None = None
 
 
 class _UnsupportedExpression(Exception):
@@ -304,31 +327,22 @@ class _Execution:
         self.facts: set[DerivationFact] = set()
         self.failure: DerivationFailure | None = None
         self.continuations: dict[tuple[str, ...], _ContinuationRuntime] = {}
-        for model_object in model.objects:
-            if model_object.continuation:
-                self.continuations[model_object.name] = _ContinuationRuntime(
-                    model_object.name,
-                    [_ResumeFrame(("Action", "Enter"))],
-                )
 
     def continuation_snapshots(self) -> tuple[DerivationContinuation, ...]:
         return tuple(
             DerivationContinuation(
-                runtime.object,
-                runtime.generation,
+                runtime.root,
                 tuple(
                     DerivationFrame(
-                        runtime.object,
+                        frame.object,
                         frame.handler,
                         frame.control_index,
-                        runtime.generation,
                     )
                     for frame in runtime.frames
                 ),
-                runtime.token,
             )
             for runtime in self.continuations.values()
-            if runtime.frames
+            if runtime.suspended and runtime.frames
         )
 
     def _set_failure(
@@ -361,41 +375,40 @@ class _Execution:
         status: str,
         failure: DerivationFailure | None,
         yields: list[DerivationUnit] | None = None,
-        yield_token_created: DerivationYieldToken | None = None,
-        yield_token_consumed: DerivationYieldToken | None = None,
         directives: list[DerivationDirective] | None = None,
     ) -> DerivationUnit:
         return DerivationUnit(
-            kind,
-            event,
-            before,
-            handler,
-            candidate,
-            tuple(depends_on),
-            tuple(drives),
-            tuple(ensures),
-            tuple(establishes),
-            tuple(invariants),
-            state_after,
-            tuple(emits),
-            status,
-            failure,
-            () if yields is None else tuple(yields),
-            yield_token_created,
-            yield_token_consumed,
-            () if directives is None else tuple(directives),
+            kind=kind,
+            event=event,
+            state_before=before,
+            handler=handler,
+            candidate_state=candidate,
+            depends_on=tuple(depends_on),
+            drives=tuple(drives),
+            ensures=tuple(ensures),
+            establishes=tuple(establishes),
+            invariants=tuple(invariants),
+            state_after=state_after,
+            emits=tuple(emits),
+            status=status,
+            failure=failure,
+            yields=() if yields is None else tuple(yields),
+            directives=() if directives is None else tuple(directives),
         )
+
+    def _clear_continuations_for_panic(self) -> None:
+        for runtime in self.continuations.values():
+            runtime.frames.clear()
+            runtime.executing = False
+            runtime.suspended = False
+            runtime.completed = True
+            runtime.waiting_yield_target = False
+            runtime.resume_requested = False
 
     def _panic(
         self, path: str, directive: DerivationDirective
     ) -> DerivationFailure:
-        failure = self._set_failure("panic", path, directive.message)
-        for runtime in self.continuations.values():
-            runtime.frames.clear()
-            runtime.token = None
-            runtime.executing = False
-            runtime.waiting_yield_target = False
-        return failure
+        return self._set_failure("panic", path, directive.message)
 
     def undeclared_root(self, event: DerivationEvent, path: str) -> DerivationUnit:
         failure = self._set_failure(
@@ -490,26 +503,28 @@ class _Execution:
     ) -> DerivationFailure | None:
         model_object, handler = self._find_handler(event)
         if model_object.continuation:
-            runtime = self.continuations[event.target]
             if event.signal != ("Action", "Enter"):
                 return self._set_failure(
                     "invalid_continuation_action",
                     f"{path}.handler",
                     "a suspended continuation can only be entered through Action::Enter",
                 )
-            if runtime.executing:
+            runtime = self.continuations.get(event.target)
+            if runtime is not None and (
+                runtime.executing or runtime.resume_requested
+            ):
                 return self._set_failure(
                     "continuation_reentry",
                     f"{path}.handler",
                     "continuation cannot be re-entered before the current target settles",
                 )
-            if runtime.waiting_yield_target:
+            if runtime is not None and runtime.waiting_yield_target:
                 return self._set_failure(
                     "continuation_reentry",
                     f"{path}.handler",
                     "yield target cannot synchronously re-enter the suspended continuation",
                 )
-            if not runtime.frames:
+            if runtime is not None and runtime.completed:
                 return self._set_failure(
                     "no_resumable_continuation",
                     f"{path}.handler",
@@ -523,106 +538,139 @@ class _Execution:
             )
         return None
 
-    def _run_continuation(
-        self, event: DerivationEvent, kind: str, path: str
+    def _frame_unit(
+        self,
+        frame: _ResumeFrame,
+        status: str,
+        failure: DerivationFailure | None = None,
+        *,
+        drives: list[DerivationUnit] | None = None,
     ) -> DerivationUnit:
-        runtime = self.continuations[event.target]
-        before = self.states[event.target]
-        if event.signal != ("Action", "Enter"):
-            return self._continuation_failure_unit(
-                event,
-                kind,
-                f"{path}.handler",
-                "invalid_continuation_action",
-                "only Action::Enter can externally start or resume a continuation",
-            )
-        if runtime.executing:
-            return self._continuation_failure_unit(
-                event,
-                kind,
-                f"{path}.handler",
-                "continuation_reentry",
-                "continuation is already executing",
-            )
-        if runtime.waiting_yield_target and kind != "emit":
-            return self._continuation_failure_unit(
-                event,
-                kind,
-                f"{path}.handler",
-                "continuation_reentry",
-                "yield target cannot synchronously re-enter the suspended continuation",
-            )
-        if not runtime.frames:
-            return self._continuation_failure_unit(
-                event,
-                kind,
-                f"{path}.handler",
-                "no_resumable_continuation",
-                "continuation has exited and has no resumable frame",
-            )
+        return self._unit(
+            kind=frame.kind,
+            event=frame.event,
+            before=frame.before,
+            handler=frame.handler,
+            candidate=None,
+            depends_on=frame.depends_on,
+            drives=frame.drives if drives is None else drives,
+            ensures=frame.ensures,
+            establishes=frame.establishes,
+            invariants=frame.invariants,
+            state_after=frame.before if status == "passed" else None,
+            emits=frame.emits,
+            status=status,
+            failure=failure,
+            yields=frame.yields,
+            directives=frame.directives,
+        )
 
-        consumed = runtime.token
-        runtime.token = None
-        runtime.executing = True
-        root_frame = runtime.frames[0]
-        root_handler = root_frame.handler
-        drives: list[DerivationUnit] = []
-        yielded_units: list[DerivationUnit] = []
-        emits: list[DerivationUnit] = []
-        response_checks: dict[
-            int, dict[str, list[DerivationCheck]]
-        ] = {}
-        response_directives: dict[int, list[DerivationDirective]] = {}
+    def _finish_runtime(
+        self, runtime: _ContinuationRuntime, unit: DerivationUnit
+    ) -> None:
+        runtime.result_unit = unit
+        runtime.executing = False
+        runtime.suspended = False
+        runtime.completed = True
+        runtime.waiting_yield_target = False
+        runtime.resume_requested = False
 
-        def checks_for(frame: _ResumeFrame) -> dict[str, list[DerivationCheck]]:
-            return response_checks.setdefault(
-                id(frame),
-                {
-                    "depends_on": [],
-                    "ensures": [],
-                    "establishes": [],
-                    "invariants": [],
-                },
-            )
-
-        def directives_for(frame: _ResumeFrame) -> list[DerivationDirective]:
-            return response_directives.setdefault(id(frame), [])
-
-        def failed(
-            frame: _ResumeFrame,
-            handler: ModelAction,
-            failure: DerivationFailure,
-        ) -> DerivationUnit:
-            runtime.executing = False
-            checks = checks_for(frame)
-            return self._unit(
-                kind=kind,
-                event=event,
-                before=before,
-                handler=root_handler,
-                candidate=None,
-                depends_on=checks["depends_on"],
-                drives=drives,
-                ensures=checks["ensures"],
-                establishes=checks["establishes"],
-                invariants=checks["invariants"],
-                state_after=None,
-                emits=emits,
-                status=failure.code,
-                failure=failure,
-                yield_token_consumed=consumed,
-                directives=directives_for(frame),
-            )
-
+    def _abort_frame(
+        self,
+        runtime: _ContinuationRuntime,
+        status: str,
+        failure: DerivationFailure | None,
+    ) -> None:
+        frame = runtime.frames.pop()
+        unit = self._frame_unit(frame, status, failure)
         while runtime.frames:
+            parent = runtime.frames.pop()
+            parent.drives.append(unit)
+            unit = self._frame_unit(parent, "stopped")
+        self._finish_runtime(runtime, unit)
+
+    def _suspended_unit(self, runtime: _ContinuationRuntime) -> DerivationUnit:
+        active: DerivationUnit | None = None
+        for frame in reversed(runtime.frames):
+            drives = list(frame.drives)
+            if active is not None:
+                drives.append(active)
+            active = self._frame_unit(frame, "yielded", drives=drives)
+        if active is None:
+            raise RuntimeError("suspended continuation has no frame")
+        return active
+
+    @staticmethod
+    def _reset_runtime_segment(runtime: _ContinuationRuntime) -> None:
+        for frame in runtime.frames:
+            frame.reset_segment()
+
+    def _resume_ack(
+        self, event: DerivationEvent, kind: str
+    ) -> DerivationUnit:
+        before = self.states[event.target]
+        return self._unit(
+            kind=kind,
+            event=event,
+            before=before,
+            handler=event.signal,
+            candidate=None,
+            depends_on=[],
+            drives=[],
+            ensures=[],
+            establishes=[],
+            invariants=[],
+            state_after=before,
+            emits=[],
+            status="passed",
+            failure=None,
+        )
+
+    def _push_continuation_frame(
+        self,
+        runtime: _ContinuationRuntime,
+        event: DerivationEvent,
+        path: str,
+    ) -> DerivationFailure | None:
+        model_object, handler = self._find_handler(event)
+        if event.signal[0] != "Action":
+            return self._set_failure(
+                "invalid_continuation_action",
+                f"{path}.handler",
+                "continuation frames can only execute Action handlers",
+            )
+        if handler is None:
+            return self._set_failure(
+                "unhandled_signal",
+                f"{path}.handler",
+                "continuation has no matching nested Action handler",
+            )
+        runtime.frames.append(
+            _ResumeFrame(
+                model_object.name,
+                event,
+                "drive",
+                event.signal,
+                before=self.states[event.target],
+            )
+        )
+        return None
+
+    def _continue_runtime(
+        self, runtime: _ContinuationRuntime, path: str
+    ) -> None:
+        while runtime.frames and runtime.executing and self.failure is None:
             frame = runtime.frames[-1]
-            model_object = self.context.objects[runtime.object]
-            state = model_object.states[0]
+            model_object = self.context.objects[frame.object]
+            before = self.states[frame.object]
+            state = next(
+                item for item in model_object.states if item.name == before
+            )
             handler = next(
                 action for action in state.actions if action.signal == frame.handler
             )
-            checks = checks_for(frame)
             module = model_object.name[:-1]
+
             if not frame.entered:
                 depends = tuple(
                     expression
@@ -637,152 +685,97 @@ class _Execution:
                             expression, module, self.states, self.facts
                         )
                     except _UnsupportedExpression as exc:
-                        checks["depends_on"].append(
-                            DerivationCheck(text, "unsupported")
+                        frame.depends_on.append(DerivationCheck(text, "unsupported"))
+                        failure = self._set_failure(
+                            "unsupported_feature",
+                            f"{path}.depends_on[{index}]",
+                            "depends_on expression is not supported",
+                            (exc.feature,),
                         )
-                        return failed(
-                            frame,
-                            handler,
-                            self._set_failure(
-                                "unsupported_feature",
-                                f"{path}.depends_on[{index}]",
-                                "depends_on expression is not supported",
-                                (exc.feature,),
-                            ),
-                        )
-                    checks["depends_on"].append(
+                        self._abort_frame(runtime, failure.code, failure)
+                        return
+                    frame.depends_on.append(
                         DerivationCheck(text, "passed" if passed else "failed")
                     )
                     if not passed:
-                        return failed(
-                            frame,
-                            handler,
-                            self._set_failure(
-                                "depends_on_failed",
-                                f"{path}.depends_on[{index}]",
-                                "depends_on condition is false",
-                            ),
+                        failure = self._set_failure(
+                            "depends_on_failed",
+                            f"{path}.depends_on[{index}]",
+                            "depends_on condition is false",
                         )
+                        self._abort_frame(runtime, failure.code, failure)
+                        return
                 frame.entered = True
 
             controls = self._control_items(handler)
             if frame.control_index < len(controls):
                 control = controls[frame.control_index]
+                frame.control_index += 1
                 if isinstance(control, DerivationDirective):
-                    frame.control_index += 1
-                    frame_directives = directives_for(frame)
-                    frame_directives.append(control)
+                    frame.directives.append(control)
                     if control.kind == "panic":
-                        return failed(
-                            frame,
-                            handler,
-                            self._panic(
-                                f"{path}.directives[{len(frame_directives) - 1}]",
-                                control,
-                            ),
+                        failure = self._set_failure(
+                            "panic",
+                            f"{path}.directives[{len(frame.directives) - 1}]",
+                            control.message,
                         )
+                        self._abort_frame(runtime, failure.code, failure)
+                        return
                     continue
 
-                signal = control
-                child_event = _event(signal)
-                child_path = (
-                    f"{path}.yields[{len(yielded_units)}]"
-                    if signal.mode == "yield"
-                    else f"{path}.drives[{len(drives)}]"
-                )
-                if signal.mode == "yield":
+                child_event = _event(control)
+                if control.mode == "yield":
+                    child_path = f"{path}.yields[{len(frame.yields)}]"
                     preflight = self._preflight_yield(child_event, child_path)
                     if preflight is not None:
-                        return failed(frame, handler, preflight)
-                    frame.control_index += 1
-                    runtime.generation += 1
-                    token = DerivationYieldToken(
-                        runtime.object, runtime.generation
-                    )
-                    runtime.token = token
-                    # The suspension is stable before the target begins executing.
-                    runtime.executing = False
-                    runtime.waiting_yield_target = True
-                    yielded_units.append(self.run_unit(child_event, "yield", child_path))
-                    runtime.waiting_yield_target = False
-                    root_checks = checks_for(root_frame)
-                    return self._unit(
-                        kind=kind,
-                        event=event,
-                        before=before,
-                        handler=root_handler,
-                        candidate=None,
-                        depends_on=root_checks["depends_on"],
-                        drives=drives,
-                        ensures=root_checks["ensures"],
-                        establishes=root_checks["establishes"],
-                        invariants=root_checks["invariants"],
-                        state_after=None,
-                        emits=emits,
-                        status="yielded",
-                        failure=None,
-                        yields=yielded_units,
-                        yield_token_created=token,
-                        yield_token_consumed=consumed,
-                        directives=directives_for(root_frame),
-                    )
+                        self._abort_frame(runtime, preflight.code, preflight)
+                        return
 
-                frame.control_index += 1
-                if (
-                    child_event.target == runtime.object
-                    and child_event.signal[0] == "Action"
-                ):
-                    if child_event.signal == ("Action", "Enter"):
-                        return failed(
-                            frame,
-                            handler,
-                            self._set_failure(
-                                "continuation_reentry",
-                                f"{child_path}.handler",
-                                "a running continuation cannot synchronously call Action::Enter",
-                            ),
-                        )
-                    child_handler = next(
-                        (
-                            action
-                            for action in state.actions
-                            if action.signal == child_event.signal
-                        ),
-                        None,
-                    )
-                    if child_handler is None:
-                        return failed(
-                            frame,
-                            handler,
-                            self._set_failure(
-                                "unhandled_signal",
-                                f"{child_path}.handler",
-                                "continuation has no matching nested Action handler",
-                            ),
-                        )
-                    runtime.frames.append(_ResumeFrame(child_event.signal))
-                    continue
-                drives.append(self.run_unit(child_event, "drive", child_path))
-                if self.failure is not None:
                     runtime.executing = False
-                    return self._unit(
-                        kind=kind,
-                        event=event,
-                        before=before,
-                        handler=root_handler,
-                        candidate=None,
-                        depends_on=checks["depends_on"],
-                        drives=drives,
-                        ensures=checks["ensures"],
-                        establishes=checks["establishes"],
-                        invariants=checks["invariants"],
-                        state_after=None,
-                        emits=emits,
-                        status="stopped",
-                        failure=None,
-                        yield_token_consumed=consumed,
-                        directives=directives_for(root_frame),
+                    runtime.suspended = True
+                    runtime.waiting_yield_target = True
+                    yielded = self.run_unit(child_event, "yield", child_path)
+                    frame.yields.append(yielded)
+                    runtime.waiting_yield_target = False
+
+                    if self.failure is not None:
+                        if runtime.resume_requested:
+                            runtime.resume_requested = False
+                            runtime.suspended = False
+                            self._abort_frame(runtime, "stopped", None)
+                        return
+                    if not runtime.resume_requested:
+                        return
+                    runtime.resume_requested = False
+                    runtime.suspended = False
+                    runtime.executing = True
+                    continue
+
+                child_path = f"{path}.drives[{len(frame.drives)}]"
+                if self.context.objects[child_event.target].continuation:
+                    if (
+                        child_event.target == runtime.root
+                        and child_event.signal == ("Action", "Enter")
+                    ):
+                        failure = self._set_failure(
+                            "continuation_reentry",
+                            f"{child_path}.handler",
+                            "a running continuation cannot synchronously call Action::Enter",
+                        )
+                        self._abort_frame(runtime, failure.code, failure)
+                        return
+                    failure = self._push_continuation_frame(
+                        runtime, child_event, child_path
                     )
+                    if failure is not None:
+                        self._abort_frame(runtime, failure.code, failure)
+                        return
+                    continue
+
+                frame.drives.append(self.run_unit(child_event, "drive", child_path))
+                if self.failure is not None:
+                    self._abort_frame(runtime, "stopped", None)
+                    return
                 continue
 
             ensures = tuple(
@@ -798,30 +791,26 @@ class _Execution:
                         expression, module, self.states, self.facts
                     )
                 except _UnsupportedExpression as exc:
-                    checks["ensures"].append(DerivationCheck(text, "unsupported"))
-                    return failed(
-                        frame,
-                        handler,
-                        self._set_failure(
-                            "unsupported_feature",
-                            f"{path}.ensures[{index}]",
-                            "ensures expression is not supported",
-                            (exc.feature,),
-                        ),
+                    frame.ensures.append(DerivationCheck(text, "unsupported"))
+                    failure = self._set_failure(
+                        "unsupported_feature",
+                        f"{path}.ensures[{index}]",
+                        "ensures expression is not supported",
+                        (exc.feature,),
                     )
-                checks["ensures"].append(
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
+                frame.ensures.append(
                     DerivationCheck(text, "passed" if passed else "failed")
                 )
                 if not passed:
-                    return failed(
-                        frame,
-                        handler,
-                        self._set_failure(
-                            "ensures_failed",
-                            f"{path}.ensures[{index}]",
-                            "ensures condition is false",
-                        ),
+                    failure = self._set_failure(
+                        "ensures_failed",
+                        f"{path}.ensures[{index}]",
+                        "ensures condition is false",
                     )
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
 
             staged_facts: set[DerivationFact] = set()
             establishes = tuple(
@@ -835,20 +824,18 @@ class _Execution:
                 try:
                     fact = self.context.normalize_fact(expression, module)
                 except _UnsupportedExpression as exc:
-                    checks["establishes"].append(
+                    frame.establishes.append(
                         DerivationCheck(text, "unsupported")
                     )
-                    return failed(
-                        frame,
-                        handler,
-                        self._set_failure(
-                            "unsupported_feature",
-                            f"{path}.establishes[{index}]",
-                            "establishes only accepts normalizable positive predicate calls",
-                            (exc.feature,),
-                        ),
+                    failure = self._set_failure(
+                        "unsupported_feature",
+                        f"{path}.establishes[{index}]",
+                        "establishes only accepts normalizable positive predicate calls",
+                        (exc.feature,),
                     )
-                checks["establishes"].append(
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
+                frame.establishes.append(
                     DerivationCheck(self.context.fact_text(fact), "established")
                 )
                 staged_facts.add(fact)
@@ -864,98 +851,150 @@ class _Execution:
                         expression, module, self.states, candidate_facts
                     )
                 except _UnsupportedExpression as exc:
-                    checks["invariants"].append(
-                        DerivationCheck(text, "unsupported")
+                    frame.invariants.append(DerivationCheck(text, "unsupported"))
+                    failure = self._set_failure(
+                        "unsupported_feature",
+                        f"{path}.invariants[{index}]",
+                        "current-state invariant expression is not supported",
+                        (exc.feature,),
                     )
-                    return failed(
-                        frame,
-                        handler,
-                        self._set_failure(
-                            "unsupported_feature",
-                            f"{path}.invariants[{index}]",
-                            "current-state invariant expression is not supported",
-                            (exc.feature,),
-                        ),
-                    )
-                checks["invariants"].append(
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
+                frame.invariants.append(
                     DerivationCheck(text, "passed" if passed else "failed")
                 )
                 if not passed:
-                    return failed(
-                        frame,
-                        handler,
-                        self._set_failure(
-                            "invariant_failed",
-                            f"{path}.invariants[{index}]",
-                            "current-state invariant is false",
-                        ),
+                    failure = self._set_failure(
+                        "invariant_failed",
+                        f"{path}.invariants[{index}]",
+                        "current-state invariant is false",
                     )
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
             self.facts.update(staged_facts)
 
-            completed_frame = runtime.frames.pop()
-            completed_event = DerivationEvent(
-                runtime.object,
-                runtime.object,
-                completed_frame.handler,
-                "drive",
-            )
-            completed_emits: list[DerivationUnit] = []
+            completed = runtime.frames.pop()
             for block in handler.blocks:
                 if block.kind != "emits":
                     continue
                 for signal in block.signals:
-                    emitted = self.run_unit(
-                        _event(signal),
-                        "emit",
-                        f"{path}.emits[{len(completed_emits)}]",
+                    completed.emits.append(
+                        self.run_unit(
+                            _event(signal),
+                            "emit",
+                            f"{path}.emits[{len(completed.emits)}]",
+                        )
                     )
-                    completed_emits.append(emitted)
                     if self.failure is not None:
                         break
+
+            completed_unit = self._frame_unit(completed, "passed")
             if runtime.frames:
-                drives.append(
-                    self._unit(
-                        kind="drive",
-                        event=completed_event,
-                        before=before,
-                        handler=completed_frame.handler,
-                        candidate=None,
-                        depends_on=checks["depends_on"],
-                        drives=[],
-                        ensures=checks["ensures"],
-                        establishes=checks["establishes"],
-                        invariants=checks["invariants"],
-                        state_after=before,
-                        emits=completed_emits,
-                        status="passed",
-                        failure=None,
-                        directives=directives_for(frame),
-                    )
-                )
+                runtime.frames[-1].drives.append(completed_unit)
+                if self.failure is not None:
+                    self._abort_frame(runtime, "stopped", None)
+                    return
                 continue
+            self._finish_runtime(runtime, completed_unit)
+            return
 
-            runtime.completed = True
-            runtime.executing = False
-            return self._unit(
-                kind=kind,
-                event=event,
-                before=before,
-                handler=root_handler,
-                candidate=None,
-                depends_on=checks["depends_on"],
-                drives=drives,
-                ensures=checks["ensures"],
-                establishes=checks["establishes"],
-                invariants=checks["invariants"],
-                state_after=before,
-                emits=completed_emits,
-                status="passed",
-                failure=None,
-                yield_token_consumed=consumed,
-                directives=directives_for(root_frame),
+    def _run_continuation(
+        self, event: DerivationEvent, kind: str, path: str
+    ) -> DerivationUnit:
+        before = self.states[event.target]
+        if event.signal != ("Action", "Enter"):
+            return self._continuation_failure_unit(
+                event,
+                kind,
+                f"{path}.handler",
+                "invalid_continuation_action",
+                "only Action::Enter can externally start or resume a continuation",
             )
+        runtime = self.continuations.get(event.target)
+        if runtime is not None and (
+            runtime.executing or runtime.resume_requested
+        ):
+            return self._continuation_failure_unit(
+                event,
+                kind,
+                f"{path}.handler",
+                "continuation_reentry",
+                "continuation is already executing",
+            )
+        if (
+            runtime is not None
+            and runtime.waiting_yield_target
+            and kind != "emit"
+        ):
+            return self._continuation_failure_unit(
+                event,
+                kind,
+                f"{path}.handler",
+                "continuation_reentry",
+                "yield target cannot synchronously re-enter the suspended continuation",
+            )
+        if runtime is not None and (runtime.completed or not runtime.frames):
+            return self._continuation_failure_unit(
+                event,
+                kind,
+                f"{path}.handler",
+                "no_resumable_continuation",
+                "continuation has exited and has no resumable frame",
+            )
+        if runtime is None:
+            model_object, handler = self._find_handler(event)
+            if handler is None:
+                return self._continuation_failure_unit(
+                    event,
+                    kind,
+                    f"{path}.handler",
+                    "unhandled_signal",
+                    "continuation has no Action::Enter handler",
+                )
+            runtime = _ContinuationRuntime(event.target)
+            runtime.frames.append(
+                _ResumeFrame(
+                    model_object.name,
+                    event,
+                    kind,
+                    event.signal,
+                    before=before,
+                )
+            )
+            self.continuations[event.target] = runtime
+        else:
+            if not runtime.suspended:
+                return self._continuation_failure_unit(
+                    event,
+                    kind,
+                    f"{path}.handler",
+                    "continuation_reentry",
+                    "continuation has no stable suspended breakpoint",
+                )
+            if runtime.owner_active:
+                runtime.suspended = False
+                runtime.resume_requested = True
+                return self._resume_ack(event, kind)
+            root_frame = runtime.frames[0]
+            root_frame.event = event
+            root_frame.kind = kind
+            root_frame.before = before
 
-        raise RuntimeError("continuation execution exhausted without a result")
+        runtime.owner_active = True
+        runtime.executing = True
+        runtime.suspended = False
+        runtime.result_unit = None
+        try:
+            self._continue_runtime(runtime, path)
+            if runtime.result_unit is not None:
+                return runtime.result_unit
+            if runtime.suspended:
+                unit = self._suspended_unit(runtime)
+                self._reset_runtime_segment(runtime)
+                return unit
+            raise RuntimeError("continuation execution exhausted without a result")
+        finally:
+            runtime.owner_active = False
 
     def run_unit(self, event: DerivationEvent, kind: str, path: str) -> DerivationUnit:
         if self.context.objects[event.target].continuation:
@@ -1283,9 +1322,11 @@ def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
 
     outcome = "passed"
     if execution.failure is None and any(
-        runtime.token is not None for runtime in execution.continuations.values()
+        runtime.suspended for runtime in execution.continuations.values()
     ):
         outcome = "yielded"
+    if execution.failure is not None and execution.failure.code == "panic":
+        execution._clear_continuations_for_panic()
     return DerivationResult(
         RESULT_SCHEMA_VERSION,
         outcome if execution.failure is None else execution.failure.code,

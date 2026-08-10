@@ -24,8 +24,6 @@ from model_ir import (
     ModelIRValidationError,
     ModelModule,
     ModelObject,
-    ModelParameter,
-    ModelPredicate,
     ModelSignal,
     ModelState,
     ModelTransition,
@@ -49,16 +47,6 @@ def _signal(
 
 def _block(kind: str, *signals: ModelSignal) -> ModelHandlerBlock:
     return ModelHandlerBlock(kind, signals=signals)
-
-
-def _call(name: str, *arguments: str) -> ModelExpression:
-    return ModelExpression(
-        "call",
-        children=(
-            ModelExpression("identifier", name),
-            *(ModelExpression("identifier", argument) for argument in arguments),
-        ),
-    )
 
 
 def _transition(
@@ -158,29 +146,8 @@ def _task_flow_module() -> ModelModule:
                                             ModelSignal(
                                                 boot_flow_path,
                                                 arch_head_path,
-                                                ("Transition", "Enable"),
+                                                ("Action", "Enter"),
                                                 "drive",
-                                            ),
-                                        ),
-                                    ),
-                                    ModelHandlerBlock(
-                                        "yields",
-                                        signals=(
-                                            ModelSignal(
-                                                boot_flow_path,
-                                                cpu0_scheduler_path,
-                                                ("Action", "Schedule"),
-                                                "yield",
-                                            ),
-                                        ),
-                                    ),
-                                    ModelHandlerBlock(
-                                        "ensures",
-                                        expressions=(
-                                            _call(
-                                                "scheduler_identity_schedule_committed",
-                                                "Cpu0Scheduler",
-                                                "BootInitFlow",
                                             ),
                                         ),
                                     ),
@@ -205,21 +172,14 @@ def _phase_type_module() -> ModelModule:
             ModelType(
                 ("phases", "phase", "PhaseType"),
                 (),
-                initial_state=("State", "Ready"),
+                continuation=True,
+                initial_state=("State", "Online"),
                 states=(
-                    _state("Online"),
                     ModelState(
-                        ("State", "Ready"),
+                        ("State", "Online"),
                         (),
-                        (
-                            ModelTransition(
-                                ("Transition", "Enable"),
-                                None,
-                                (),
-                                abstract=True,
-                            ),
-                        ),
                         (),
+                        (ModelAction(("Action", "Enter"), (), abstract=True),),
                     ),
                 ),
             ),
@@ -233,42 +193,49 @@ def _phase_object_module(
     drive_targets: tuple[tuple[str, ...], ...] = (),
     *,
     parent: str | None = None,
+    extra_blocks: tuple[ModelHandlerBlock, ...] = (),
 ) -> ModelModule:
     object_path = path + (object_name,)
-    blocks = ()
+    blocks: tuple[ModelHandlerBlock, ...] = ()
     if drive_targets:
         blocks = (
-            _block(
+            ModelHandlerBlock(
                 "drives",
-                *(
-                    _signal(object_path, target, "Enable", "drive")
+                signals=tuple(
+                    ModelSignal(
+                        object_path, target, ("Action", "Enter"), "drive"
+                    )
                     for target in drive_targets
                 ),
             ),
         )
+    blocks += extra_blocks
     return ModelModule(
         name=path,
         objects=(
             ModelObject(
                 object_path,
                 ModelTypeExpression(("PhaseType",)),
-                ("State", "Ready"),
+                ("State", "Online"),
                 None if parent is None else ModelExpression("identifier", parent),
                 None,
                 (),
                 (
-                    _state("Online"),
-                    _state(
-                        "Ready",
-                        ModelTransition(
-                            ("Transition", "Enable"),
-                            ("State", "Online"),
-                            blocks,
-                            override=True,
+                    ModelState(
+                        ("State", "Online"),
+                        (),
+                        (),
+                        (
+                            ModelAction(
+                                ("Action", "Enter"),
+                                blocks,
+                                override=True,
+                            ),
                         ),
                     ),
                 ),
                 (),
+                True,
             ),
         ),
     )
@@ -288,30 +255,12 @@ def _scheduler_module() -> ModelModule:
     online = ("State", "Online")
     enable = ("Transition", "Enable")
     schedule = ("Action", "Schedule")
-    identity_fact = _call(
-        "scheduler_identity_schedule_committed",
-        "Cpu0Scheduler",
-        "BootInitFlow",
-    )
     return ModelModule(
         name=("objects", "scheduler"),
-        predicates=(
-            ModelPredicate(
-                scheduler_identity_predicate_path,
-                (),
-                (
-                    ModelParameter("scheduler", ModelTypeExpression(("Scheduler",))),
-                    ModelParameter("flow", ModelTypeExpression(("TaskFlow",))),
-                ),
-                ModelTypeExpression(("bool",)),
-                None,
-            ),
-        ),
         types=(
             ModelType(
                 scheduler_type_path,
                 (),
-                base_type=ModelTypeExpression(("PhaseType",)),
                 initial_state=ready,
                 states=(
                     ModelState(
@@ -323,7 +272,7 @@ def _scheduler_module() -> ModelModule:
                     ModelState(
                         ready,
                         (),
-                        (ModelTransition(enable, None, (), abstract=True),),
+                        (ModelTransition(enable, online, ()),),
                         (),
                     ),
                 ),
@@ -346,9 +295,6 @@ def _scheduler_module() -> ModelModule:
                             ModelAction(
                                 schedule,
                                 (
-                                    ModelHandlerBlock(
-                                        "establishes", expressions=(identity_fact,)
-                                    ),
                                     ModelHandlerBlock(
                                         "emits",
                                         signals=(
@@ -373,7 +319,6 @@ def _scheduler_module() -> ModelModule:
                                 enable,
                                 online,
                                 (),
-                                override=True,
                             ),
                         ),
                         (),
@@ -407,12 +352,6 @@ boot_handoff_path = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
 boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
-scheduler_identity_predicate_path = (
-    "objects",
-    "scheduler",
-    "scheduler_identity_schedule_committed",
-)
-
 EXPECTED_MODEL = ModelIR(
     schema_version=6,
     entry=ModelEntry(
@@ -526,18 +465,70 @@ EXPECTED_MODEL = ModelIR(
             parent="BootInitFlow",
         ),
         _phase_object_module(
-            ("phases", "start_kernel", "boot_handoff"), "BootHandoff"
+            ("phases", "start_kernel", "boot_handoff"),
+            "BootHandoff",
+            extra_blocks=(
+                ModelHandlerBlock(
+                    "yields",
+                    signals=(
+                        ModelSignal(
+                            boot_handoff_path,
+                            cpu0_scheduler_path,
+                            ("Action", "Schedule"),
+                            "yield",
+                        ),
+                    ),
+                ),
+            ),
         ),
         _phase_object_module(
-            ("phases", "start_kernel", "boot_idle"), "BootIdle"
+            ("phases", "start_kernel", "boot_idle"),
+            "BootIdle",
+            extra_blocks=(
+                ModelHandlerBlock(
+                    "yields",
+                    signals=(
+                        ModelSignal(
+                            boot_idle_path,
+                            cpu0_scheduler_path,
+                            ("Action", "Schedule"),
+                            "yield",
+                        ),
+                    ),
+                ),
+                ModelHandlerBlock(
+                    "panic",
+                    expressions=(
+                        ModelExpression("string", "boot idle repeated!"),
+                    ),
+                ),
+            ),
         ),
         _phase_object_module(
             ("phases", "start_kernel", "boot_setup"),
             "BootSetup",
-            (cpu0_scheduler_path,),
+            extra_blocks=(
+                ModelHandlerBlock(
+                    "drives",
+                    signals=(
+                        ModelSignal(
+                            boot_setup_path,
+                            cpu0_scheduler_path,
+                            ("Transition", "Enable"),
+                            "drive",
+                        ),
+                    ),
+                ),
+            ),
         ),
         _phase_object_module(
-            ("phases", "start_kernel", "early_boot"), "EarlyBoot"
+            ("phases", "start_kernel", "early_boot"),
+            "EarlyBoot",
+            extra_blocks=(
+                ModelHandlerBlock(
+                    "print", expressions=(ModelExpression("string", "here"),)
+                ),
+            ),
         ),
         _object_module(
             ("systems", "opensbi"),
@@ -659,21 +650,21 @@ class ParserAndCompilerTests(unittest.TestCase):
             if module.name == ("phases", "arch_head")
         )
 
-        abstract_enable = next(
-            state.transitions[0]
+        abstract_enter = next(
+            state.actions[0]
             for state in phase_type.states
-            if state.name == ("State", "Ready")
+            if state.name == ("State", "Online")
         )
-        concrete_enable = next(
-            state.transitions[0]
+        concrete_enter = next(
+            state.actions[0]
             for state in arch_head.states
-            if state.name == ("State", "Ready")
+            if state.name == ("State", "Online")
         )
-        self.assertTrue(abstract_enable.abstract)
-        self.assertIsNone(abstract_enable.target_state)
-        self.assertTrue(concrete_enable.override)
-        self.assertFalse(concrete_enable.abstract)
-        self.assertEqual(concrete_enable.target_state, ("State", "Online"))
+        self.assertTrue(phase_type.continuation)
+        self.assertTrue(abstract_enter.abstract)
+        self.assertTrue(arch_head.continuation)
+        self.assertTrue(concrete_enter.override)
+        self.assertFalse(concrete_enter.abstract)
 
     def test_comments_whitespace_and_long_origin(self) -> None:
         document = parse_spec(

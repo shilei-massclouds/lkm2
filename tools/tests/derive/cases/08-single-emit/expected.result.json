@@ -23,7 +23,7 @@
       ]
     }
   ],
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "passed",
   "units": [
     {
@@ -76,8 +76,6 @@
             "Idle"
           ],
           "status": "passed",
-          "yield_token_consumed": null,
-          "yield_token_created": null,
           "yields": []
         }
       ],
@@ -113,8 +111,6 @@
         "Idle"
       ],
       "status": "passed",
-      "yield_token_consumed": null,
-      "yield_token_created": null,
       "yields": []
     }
   ]

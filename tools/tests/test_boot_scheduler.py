@@ -9,26 +9,22 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 SOURCE_DIRECTORY = REPOSITORY / "tools" / "src"
 sys.path.insert(0, str(SOURCE_DIRECTORY))
 
-from derive import DerivationFact, default_derivation_sequence, derive
+from derive import default_derivation_sequence, derive
 from modelc import compile_spec
 
 
 BOOT_FLOW = ("flows", "task_flow", "BootInitFlow")
 CPU0_SCHEDULER = ("objects", "scheduler", "Cpu0Scheduler")
-IDENTITY_PREDICATE = (
-    "objects",
-    "scheduler",
-    "scheduler_identity_schedule_committed",
-)
 BOOT_SETUP = ("phases", "start_kernel", "boot_setup", "BootSetup")
 BOOT_HANDOFF = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
+BOOT_IDLE = ("phases", "start_kernel", "boot_idle", "BootIdle")
 PHASE_TARGETS = {
     ("phases", "arch_head", "ArchHead"),
     ("phases", "start_kernel", "StartKernel"),
     ("phases", "start_kernel", "early_boot", "EarlyBoot"),
     BOOT_SETUP,
     BOOT_HANDOFF,
-    ("phases", "start_kernel", "boot_idle", "BootIdle"),
+    BOOT_IDLE,
 }
 
 
@@ -66,57 +62,51 @@ class BootSchedulerModelTests(unittest.TestCase):
         }
 
         self.assertEqual(scheduler_type.initial_state, ("State", "Ready"))
-        self.assertTrue(type_handlers[("Transition", "Enable")].abstract)
+        self.assertFalse(type_handlers[("Transition", "Enable")].abstract)
         self.assertTrue(type_handlers[("Action", "Schedule")].abstract)
-        self.assertTrue(object_handlers[("Transition", "Enable")].override)
+        self.assertFalse(object_handlers[("Transition", "Enable")].override)
         self.assertTrue(object_handlers[("Action", "Schedule")].override)
         self.assertFalse(object_handlers[("Transition", "Enable")].abstract)
         self.assertFalse(object_handlers[("Action", "Schedule")].abstract)
         self.assertIsNone(cpu0_scheduler.parent)
 
-    def test_boot_flow_owns_the_yield_and_handoff_does_not(self) -> None:
+    def test_boot_phases_yield_to_the_scheduler(self) -> None:
         boot_flow = next(item for item in self.model.objects if item.name == BOOT_FLOW)
         boot_handoff = next(
             item for item in self.model.objects if item.name == BOOT_HANDOFF
         )
-        enter = boot_flow.states[0].actions[0]
-        handoff_enable = next(
-            transition
-            for state in boot_handoff.states
-            for transition in state.transitions
-            if transition.signal == ("Transition", "Enable")
+        boot_idle = next(
+            item for item in self.model.objects if item.name == BOOT_IDLE
         )
 
-        yielded = tuple(
-            signal
-            for block in enter.blocks
-            if block.kind == "yields"
-            for signal in block.signals
+        self.assertNotIn(
+            "yields",
+            {block.kind for block in boot_flow.states[0].actions[0].blocks},
         )
-        self.assertEqual(len(yielded), 1)
-        self.assertEqual(yielded[0].source, BOOT_FLOW)
-        self.assertEqual(yielded[0].target, CPU0_SCHEDULER)
-        self.assertEqual(yielded[0].signal, ("Action", "Schedule"))
-        self.assertNotIn("yields", {block.kind for block in handoff_enable.blocks})
+        for phase in (boot_handoff, boot_idle):
+            enter = phase.states[0].actions[0]
+            yielded = tuple(
+                signal
+                for block in enter.blocks
+                if block.kind == "yields"
+                for signal in block.signals
+            )
+            self.assertEqual(len(yielded), 1)
+            self.assertEqual(yielded[0].source, phase.name)
+            self.assertEqual(yielded[0].target, CPU0_SCHEDULER)
+            self.assertEqual(yielded[0].signal, ("Action", "Schedule"))
 
-    def test_identity_schedule_resumes_once_and_reaches_quiescence(self) -> None:
+    def test_identity_schedule_resumes_each_leaf_and_reaches_boot_idle_panic(self) -> None:
         result = derive(self.model, default_derivation_sequence(self.model))
         units = tuple(_all_units(result.units))
         states = {item.object: item.state for item in result.final_state}
 
-        self.assertEqual(result.status, "passed")
-        self.assertIsNone(result.failure)
+        self.assertEqual(result.status, "panic")
+        self.assertEqual(result.failure.message, "boot idle repeated!")
         self.assertEqual(result.continuations, ())
         self.assertEqual(states[CPU0_SCHEDULER], ("State", "Online"))
-        self.assertEqual(
-            result.facts,
-            (
-                DerivationFact(
-                    IDENTITY_PREDICATE,
-                    ("Cpu0Scheduler", "BootInitFlow"),
-                ),
-            ),
-        )
+        self.assertTrue(all(states[target] == ("State", "Online") for target in PHASE_TARGETS))
+        self.assertEqual(result.facts, ())
 
         scheduler_enable = next(
             unit
@@ -128,45 +118,37 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(scheduler_enable.state_before, ("State", "Ready"))
         self.assertEqual(scheduler_enable.state_after, ("State", "Online"))
 
-        yields = tuple(unit for unit in units if unit.event.mode == "yield")
-        self.assertEqual(len(yields), 1)
-        schedule = yields[0]
-        self.assertEqual(schedule.event.source, BOOT_FLOW)
-        self.assertEqual(schedule.event.target, CPU0_SCHEDULER)
-        self.assertEqual(schedule.establishes[0].status, "established")
-        self.assertEqual(len(schedule.emits), 1)
-
-        resumed = schedule.emits[0]
-        self.assertEqual(resumed.event.source, CPU0_SCHEDULER)
-        self.assertEqual(resumed.event.target, BOOT_FLOW)
-        self.assertEqual(resumed.event.signal, ("Action", "Enter"))
-        self.assertEqual(resumed.event.mode, "emit")
-        self.assertEqual(resumed.ensures[0].status, "passed")
-        self.assertIsNotNone(resumed.yield_token_consumed)
-        self.assertEqual(resumed.drives, ())
-
-        suspended = next(
-            unit
-            for unit in units
-            if unit.event.target == BOOT_FLOW
-            and unit.event.signal == ("Action", "Enter")
-            and unit.status == "yielded"
-        )
-        self.assertEqual(suspended.yields, (schedule,))
+        schedules = tuple(unit for unit in units if unit.event.mode == "yield")
+        self.assertEqual(len(schedules), 2)
         self.assertEqual(
-            suspended.yield_token_created, resumed.yield_token_consumed
+            tuple(schedule.event.source for schedule in schedules),
+            (BOOT_HANDOFF, BOOT_IDLE),
         )
+        for schedule in schedules:
+            self.assertEqual(schedule.event.target, CPU0_SCHEDULER)
+            self.assertEqual(schedule.establishes, ())
+            self.assertEqual(len(schedule.emits), 1)
+            resumed = schedule.emits[0]
+            self.assertEqual(resumed.event.source, CPU0_SCHEDULER)
+            self.assertEqual(resumed.event.target, BOOT_FLOW)
+            self.assertEqual(resumed.event.signal, ("Action", "Enter"))
+            self.assertEqual(resumed.event.mode, "emit")
+            self.assertEqual(resumed.status, "passed")
+            self.assertEqual(resumed.drives, ())
 
-        phase_enables = tuple(
+        phase_enters = tuple(
             unit
             for unit in units
             if unit.event.target in PHASE_TARGETS
-            and unit.event.signal == ("Transition", "Enable")
+            and unit.event.signal == ("Action", "Enter")
         )
-        self.assertEqual(len(phase_enables), len(PHASE_TARGETS))
+        self.assertEqual(len(phase_enters), len(PHASE_TARGETS))
         self.assertEqual(
-            {unit.event.target for unit in phase_enables}, PHASE_TARGETS
+            {unit.event.target for unit in phase_enters}, PHASE_TARGETS
         )
+        boot_idle = next(unit for unit in units if unit.event.target == BOOT_IDLE)
+        self.assertEqual(boot_idle.status, "panic")
+        self.assertEqual(boot_idle.directives[-1].message, "boot idle repeated!")
 
 
 if __name__ == "__main__":

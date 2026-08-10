@@ -77,6 +77,14 @@ def _sequence(*events: tuple[str, str, str, str]) -> DerivationSequence:
     )
 
 
+def _all_units(units):
+    for unit in units:
+        yield unit
+        yield from _all_units(unit.drives)
+        yield from _all_units(unit.yields)
+        yield from _all_units(unit.emits)
+
+
 class _DiffingTestCase(unittest.TestCase):
     def assert_bytes_equal(
         self, actual: bytes, expected: bytes, actual_name: str, expected_name: str
@@ -840,7 +848,7 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(first.units[0].status, "yielded")
         self.assertEqual(first.units[0].yields[0].status, "passed")
         self.assertEqual(first.continuations[0].frames[0].control_index, 1)
-        self.assertEqual(first.continuations[0].generation, 1)
+        self.assertEqual(first.continuations[0].root[-1], "Boot")
         serialized = StringIO()
         dump_derivation_result(first, serialized)
         self.assertEqual(
@@ -852,12 +860,8 @@ class EngineTests(unittest.TestCase):
             tuple(unit.status for unit in complete.units),
             ("yielded", "yielded", "passed"),
         )
-        first_token = complete.units[0].yield_token_created
-        second_token = complete.units[1].yield_token_created
-        self.assertEqual(complete.units[1].yield_token_consumed, first_token)
-        self.assertEqual(complete.units[2].yield_token_consumed, second_token)
-        self.assertEqual(first_token.generation, 1)
-        self.assertEqual(second_token.generation, 2)
+        self.assertEqual(complete.units[0].yields[0].event.target[-1], "Worker")
+        self.assertEqual(complete.units[1].yields[0].event.target[-1], "Worker")
         self.assertEqual(complete.continuations, ())
 
     def test_nested_continuation_action_uses_one_resume_frame_chain(self) -> None:
@@ -900,6 +904,106 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(complete.units[1].drives[0].handler, ("Action", "Inner"))
         self.assertEqual(complete.continuations, ())
 
+    def test_task_flow_root_owns_heterogeneous_continuation_frames(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Scheduler: T {
+                state State::Base { actions { on Action::Schedule { drives {} } } }
+            }
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object Root: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { drives { Middle.Action::Enter; } }
+                } }
+            }
+            object Middle: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { drives { Leaf.Action::Enter; } }
+                } }
+            }
+            object Leaf: Flow {
+                state State::Online { actions {
+                    override on Action::Enter {
+                        print "before breakpoint";
+                        yields Scheduler.Action::Schedule;
+                        print "after breakpoint";
+                    }
+                } }
+            }
+            external Human { emits { Root.Action::Enter; } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        suspended = derive(model, default_derivation_sequence(model))
+        self.assertEqual(suspended.status, "yielded")
+        self.assertEqual(len(suspended.continuations), 1)
+        continuation = suspended.continuations[0]
+        self.assertEqual(continuation.root[-1], "Root")
+        self.assertEqual(
+            tuple(frame.object[-1] for frame in continuation.frames),
+            ("Root", "Middle", "Leaf"),
+        )
+        self.assertEqual(
+            tuple(frame.control_index for frame in continuation.frames),
+            (1, 1, 2),
+        )
+
+        directory2, resumed_model = _compile_text(
+            """
+            object Scheduler: T {
+                state State::Base { actions {
+                    on Action::Schedule { emits { Root.Action::Enter; } }
+                } }
+            }
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object Root: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { drives { Middle.Action::Enter; } }
+                } }
+            }
+            object Middle: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { drives { Leaf.Action::Enter; } }
+                } }
+            }
+            object Leaf: Flow {
+                state State::Online { actions {
+                    override on Action::Enter {
+                        print "before breakpoint";
+                        yields Scheduler.Action::Schedule;
+                        print "after breakpoint";
+                    }
+                } }
+            }
+            external Human { emits { Root.Action::Enter; } }
+            """
+        )
+        self.addCleanup(directory2.cleanup)
+        resumed = derive(resumed_model, default_derivation_sequence(resumed_model))
+        self.assertEqual(resumed.status, "passed")
+        self.assertEqual(resumed.continuations, ())
+        units = tuple(_all_units(resumed.units))
+        self.assertEqual(
+            tuple(
+                directive.message
+                for unit in units
+                for directive in unit.directives
+            ),
+            ("before breakpoint", "after breakpoint"),
+        )
+        self.assertEqual(
+            sum(unit.event.target[-1] == "Leaf" for unit in units),
+            1,
+        )
+
     def test_two_continuations_pause_independently_and_yield_transition_commits(self) -> None:
         directory, model = _compile_text(
             """
@@ -940,9 +1044,73 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(
             tuple(unit.status for unit in result.units), ("yielded", "yielded")
         )
-        snapshots = {item.object[-1]: item for item in result.continuations}
-        self.assertEqual(snapshots["First"].generation, 1)
-        self.assertEqual(snapshots["Second"].generation, 1)
+        snapshots = {item.root[-1]: item for item in result.continuations}
+        self.assertEqual(snapshots["First"].frames[0].control_index, 1)
+        self.assertEqual(snapshots["Second"].frames[0].control_index, 1)
+
+    def test_scheduler_can_start_another_root_without_consuming_first_breakpoint(self) -> None:
+        directory, model = _compile_text(
+            """
+            object Waiter: T {
+                state State::Base { actions {
+                    on Action::Wait { drives {} }
+                } }
+            }
+            object Scheduler: T {
+                state State::Base { actions {
+                    on Action::Switch { emits { Second.Action::Enter; } }
+                } }
+            }
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object First: Flow {
+                state State::Online { actions {
+                    override on Action::Enter {
+                        yields Scheduler.Action::Switch;
+                        print "first resumed";
+                    }
+                } }
+            }
+            object Second: Flow {
+                state State::Online { actions {
+                    override on Action::Enter { yields Waiter.Action::Wait; }
+                } }
+            }
+            external Human { emits {
+                First.Action::Enter;
+                First.Action::Enter;
+            } }
+            """
+        )
+        self.addCleanup(directory.cleanup)
+        selected = default_derivation_sequence(model)
+
+        both_paused = derive(model, DerivationSequence(2, selected.events[:1]))
+        self.assertEqual(both_paused.status, "yielded")
+        self.assertEqual(
+            {continuation.root[-1] for continuation in both_paused.continuations},
+            {"First", "Second"},
+        )
+
+        first_resumed = derive(model, selected)
+        self.assertEqual(first_resumed.status, "yielded")
+        self.assertEqual(
+            tuple(continuation.root[-1] for continuation in first_resumed.continuations),
+            ("Second",),
+        )
+        self.assertEqual(
+            tuple(unit.status for unit in first_resumed.units),
+            ("yielded", "passed"),
+        )
+        directives = tuple(
+            directive.message
+            for unit in _all_units(first_resumed.units)
+            for directive in unit.directives
+        )
+        self.assertEqual(directives, ("first resumed",))
 
     def test_reentry_and_exit_report_precise_continuation_failures(self) -> None:
         directory, model = _compile_text(
@@ -969,8 +1137,8 @@ class EngineTests(unittest.TestCase):
         result = derive(model, default_derivation_sequence(model))
         self.assertEqual(result.status, "continuation_reentry")
         self.assertEqual(result.units[0].status, "yielded")
-        self.assertEqual(result.continuations[0].generation, 1)
-        self.assertIsNotNone(result.continuations[0].yield_token)
+        self.assertEqual(result.continuations[0].root[-1], "Boot")
+        self.assertEqual(result.continuations[0].frames[0].control_index, 1)
 
         directory_emit, model_emit = _compile_text(
             """
@@ -997,10 +1165,8 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(resumed.status, "passed")
         self.assertEqual(resumed.continuations, ())
         resumed_unit = resumed.units[0].yields[0].emits[0]
-        self.assertEqual(
-            resumed_unit.yield_token_consumed,
-            resumed.units[0].yield_token_created,
-        )
+        self.assertEqual(resumed_unit.event.target[-1], "Boot")
+        self.assertEqual(resumed_unit.status, "passed")
 
         directory2, model2 = _compile_text(
             """
@@ -1091,7 +1257,7 @@ class DerivationJSONTests(unittest.TestCase):
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 4)
+        self.assertEqual(document["schema_version"], 5)
         self.assertNotIn("failure", document)
 
         startup_event = json.loads(output.getvalue())
@@ -1124,7 +1290,10 @@ class DerivationJSONTests(unittest.TestCase):
         missing = dict(document)
         del missing["facts"]
         invalid_documents.append(json.dumps(missing))
-        invalid_documents.append('{"schema_version":4,"status":"passed","status":"passed"}')
+        invalid_documents.append('{"schema_version":5,"status":"passed","status":"passed"}')
+        old_result = dict(document)
+        old_result["schema_version"] = 4
+        invalid_documents.append(json.dumps(old_result))
         for invalid in invalid_documents:
             with self.subTest(document=invalid):
                 with self.assertRaises(DerivationValidationError):
@@ -1183,7 +1352,7 @@ class CLITests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 1)
         for signal in (
             "Transition::Preset",
             "Transition::Setup",
@@ -1191,7 +1360,7 @@ class CLITests(unittest.TestCase):
         ):
             with self.subTest(signal=signal):
                 self.assertIn(signal, completed.stdout)
-        self.assertTrue(completed.stdout.endswith("Derivation passed!\n"))
+        self.assertTrue(completed.stdout.endswith("stopped: panic\n"))
         self.assertEqual(completed.stderr, "")
 
     def test_model_and_sequence_options_are_mutually_exclusive(self) -> None:

@@ -215,7 +215,7 @@ class DerivationDirectiveTests(unittest.TestCase):
         serialized = StringIO()
         dump_derivation_result(result, serialized)
         document = json.loads(serialized.getvalue())
-        self.assertEqual(document["schema_version"], 4)
+        self.assertEqual(document["schema_version"], 5)
         self.assertEqual(load_derivation_result(StringIO(serialized.getvalue())), result)
 
         missing_directives = json.loads(serialized.getvalue())
@@ -389,7 +389,6 @@ class DerivationDirectiveTests(unittest.TestCase):
             ),
         )
         self.assertEqual(tuple(unit.status for unit in result.units), ("yielded", "panic"))
-        self.assertEqual(result.units[1].yield_token_consumed.generation, 1)
         self.assertEqual(result.continuations, ())
 
 

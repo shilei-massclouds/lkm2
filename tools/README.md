@@ -119,8 +119,8 @@ IR schema 版本；完全命中并能严格加载缓存 IR 时不会改写文件
 
 推导序列 schema v2 的每个事件显式指定 `source`、`target`、`signal` 和 `mode`，
 但 sequence 只选择外部根信号；drives 与 emits 由引擎按因果关系自动调度。
-结果 JSON schema v3 记录嵌套推导单元、逐项条件、最终状态、predicate facts、
-continuation frame 快照及 yield token 的创建/消费关联；
+结果 JSON schema v5 记录嵌套推导单元、逐项条件、最终状态、predicate facts，
+以及按 TaskFlow root 归属的异构 continuation frame 快照；
 `dump_derivation_result()` 提供包含完整检查细节的规范 JSON，CLI 默认使用精简的
 人类因果 renderer。当前支持
 Transition 与 Action 信号、对象状态比较、布尔组合、depends_on、drives、ensures、
@@ -135,13 +135,15 @@ derive 请求。Transition handler 必须声明 `Transition::Preset`；Model IR 
 type 支持单继承；modelc 按 base type、derived type、object 展开字段、state、
 invariant 和 handler，并检查显式 `override`、抽象 handler、继承环与 continuation
 的唯一 `State::Online` 生命周期。`continuation: true` 只能由 type 声明且不可取消。
-continuation 的 `yields` 目标立即深度优先执行；暂停帧只由未来的
-`Action::Enter` 消费对应 generation token 后恢复。attrs、reference、may_change、deferred 及其他表达式会明确返回
+continuation 的 `yields` 目标立即深度优先执行；同一 TaskFlow root 的下级
+continuation 共用一套 frame 栈和一个断点，Scheduler 向 root 发送
+`Action::Enter` 后从实际栈顶恢复。attrs、reference、may_change、deferred 及其他表达式会明确返回
 `unsupported_feature`。当前 Computer 按顺序处理 `Preset`、`Setup` 和 `Enable`，
 依次提交到 `State::Prepared`、`State::Ready` 和 `State::Online`；Kernel 的
 Enable 提交后会向 BootInitFlow 投递 `Action::Enter`，首次从 Enter handler 入口执行；
 若 handler yields，后续 Enter 从稳定 frame 链恢复。
-默认 `make run` 输出完整推导，与结论空开一行，并以 `Derivation passed!` 和退出码 0 结束。
+默认 `make run` 输出完整推导，与结论空开一行；当前 BootIdle 恢复后触发
+`panic "boot idle repeated!"` 哨兵，CLI 输出 `stopped: panic` 并返回 1。
 
 公共库接口为：
 

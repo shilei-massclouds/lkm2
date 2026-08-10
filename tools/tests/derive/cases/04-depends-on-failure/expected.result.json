@@ -29,7 +29,7 @@
       ]
     }
   ],
-  "schema_version": 4,
+  "schema_version": 5,
   "status": "depends_on_failed",
   "units": [
     {
@@ -81,8 +81,6 @@
         "Idle"
       ],
       "status": "depends_on_failed",
-      "yield_token_consumed": null,
-      "yield_token_created": null,
       "yields": []
     }
   ]

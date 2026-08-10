@@ -1,4 +1,4 @@
-"""Stable human rendering for schema-v4 derivation results."""
+"""Stable human rendering for schema-v5 derivation results."""
 
 from __future__ import annotations
 
@@ -92,12 +92,7 @@ def _render_unit(
             if depth == 0:
                 lines.append("")
             lines.extend(_render_unit(child, depth, names))
-    elif unit.status == "yielded":
-        generation = unit.yield_token_created.generation
-        lines.append(
-            f"{detail_indent}continuation yielded: generation {generation}"
-        )
-    else:
+    elif unit.status != "yielded":
         lines.append(f"{detail_indent}commit state: not committed ✗")
     return lines
 
