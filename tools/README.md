@@ -142,8 +142,10 @@ continuation 共用一套 frame 栈和一个断点，Scheduler 向 root 发送
 依次提交到 `State::Prepared`、`State::Ready` 和 `State::Online`；Kernel 的
 Enable 提交后会向 BootInitFlow 投递 `Action::Enter`，首次从 Enter handler 入口执行；
 若 handler yields，后续 Enter 从稳定 frame 链恢复。
-默认 `make run` 输出完整推导，与结论空开一行；当前 BootIdle 恢复后触发
-`panic "boot idle repeated!"` 哨兵，CLI 输出 `stopped: panic` 并返回 1。
+默认 `make run` 输出完整推导，与结论空开一行；当前 Scheduler 在 `BootTask`
+与 `KernelInitTask` 间确定性交替，切入任务统一使用 `Transition::Resume`。推导在
+`KernelInitFlow` 完成后保留 `BootIdle` 的断点，CLI 输出 `Derivation yielded!`
+并返回 0；`BootIdle` 断点后的 panic 哨兵不会执行。
 
 公共库接口为：
 

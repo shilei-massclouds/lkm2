@@ -8,19 +8,37 @@
  */
 
 use model::flows::task_flow::BootInitFlow;
-use model::phases::phase::PhaseType;
+use model::flows::task_flow::KernelInitFlow;
+use model::objects::task::BootTask;
+use model::objects::task::KernelInitTask;
 
 type Scheduler {
     initial_state: State::Ready;
 
     state State::Ready {
         transitions {
-            on Transition::Enable -> State::Online {
+            on Transition::Enable -> State::BootTaskRunning {
             }
         }
     }
 
-    state State::Online {
+    state State::BootTaskRunning {
+        transitions {
+            on Transition::SwitchToKernelInitTask -> State::KernelInitTaskRunning {
+            }
+        }
+
+        actions {
+            on Action::Schedule;
+        }
+    }
+
+    state State::KernelInitTaskRunning {
+        transitions {
+            on Transition::SwitchToBootTask -> State::BootTaskRunning {
+            }
+        }
+
         actions {
             on Action::Schedule;
         }
@@ -28,9 +46,31 @@ type Scheduler {
 }
 
 object Cpu0Scheduler: Scheduler {
-    state State::Online {
+    state State::BootTaskRunning {
         actions {
             override on Action::Schedule {
+                drives {
+                    BootTask.Transition::Suspend;
+                    KernelInitTask.Transition::Resume;
+                    Cpu0Scheduler.Transition::SwitchToKernelInitTask;
+                }
+
+                emits {
+                    KernelInitFlow.Action::Enter;
+                }
+            }
+        }
+    }
+
+    state State::KernelInitTaskRunning {
+        actions {
+            override on Action::Schedule {
+                drives {
+                    KernelInitTask.Transition::Suspend;
+                    BootTask.Transition::Resume;
+                    Cpu0Scheduler.Transition::SwitchToBootTask;
+                }
+
                 emits {
                     BootInitFlow.Action::Enter;
                 }

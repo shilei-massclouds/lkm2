@@ -70,32 +70,77 @@ Kernel -> BootInitFlow: emits Action::Enter
         current state: State::Online
         BootSetup -> Cpu0Scheduler: drives Transition::Enable
           current state: State::Ready
+          commit state: State::BootTaskRunning
+        BootSetup -> KernelInitTask: drives Transition::Preset
+          current state: State::Base
+          commit state: State::Prepared
+        BootSetup -> KernelInitTask: drives Transition::Setup
+          current state: State::Prepared
+          commit state: State::Ready
+        BootSetup -> KernelInitTask: drives Transition::Enable
+          current state: State::Ready
           commit state: State::Online
         commit state: unchanged
       StartKernel -> BootHandoff: drives Action::Enter
         current state: State::Online
         BootHandoff -> Cpu0Scheduler: yields Action::Schedule
-          current state: State::Online
+          current state: State::BootTaskRunning
+          Cpu0Scheduler -> BootTask: drives Transition::Suspend
+            current state: State::OnCpu
+            commit state: State::Online
+          Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
+            current state: State::Online
+            commit state: State::OnCpu
+          Cpu0Scheduler -> Cpu0Scheduler: drives Transition::SwitchToKernelInitTask
+            current state: State::BootTaskRunning
+            commit state: State::KernelInitTaskRunning
           commit state: unchanged
-        Cpu0Scheduler -> BootInitFlow: emits Action::Enter
+        Cpu0Scheduler -> KernelInitFlow: emits Action::Enter
           current state: State::Online
-          commit state: unchanged
+          KernelInitFlow -> KernelInitPhase: drives Action::Enter
+            current state: State::Online
+            print: kernel init
+            commit state: unchanged
+          KernelInitFlow -> UserRunPhase: drives Action::Enter
+            current state: State::Online
+            UserRunPhase -> Cpu0Scheduler: yields Action::Schedule
+              current state: State::KernelInitTaskRunning
+              Cpu0Scheduler -> KernelInitTask: drives Transition::Suspend
+                current state: State::OnCpu
+                commit state: State::Online
+              Cpu0Scheduler -> BootTask: drives Transition::Resume
+                current state: State::Online
+                commit state: State::OnCpu
+              Cpu0Scheduler -> Cpu0Scheduler: drives Transition::SwitchToBootTask
+                current state: State::KernelInitTaskRunning
+                commit state: State::BootTaskRunning
+              commit state: unchanged
+            Cpu0Scheduler -> BootInitFlow: emits Action::Enter
+              current state: State::Online
+              commit state: unchanged
         commit state: unchanged
       StartKernel -> BootIdle: drives Action::Enter
         current state: State::Online
         BootIdle -> Cpu0Scheduler: yields Action::Schedule
-          current state: State::Online
+          current state: State::BootTaskRunning
+          Cpu0Scheduler -> BootTask: drives Transition::Suspend
+            current state: State::OnCpu
+            commit state: State::Online
+          Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
+            current state: State::Online
+            commit state: State::OnCpu
+          Cpu0Scheduler -> Cpu0Scheduler: drives Transition::SwitchToKernelInitTask
+            current state: State::BootTaskRunning
+            commit state: State::KernelInitTaskRunning
           commit state: unchanged
-        Cpu0Scheduler -> BootInitFlow: emits Action::Enter
+        Cpu0Scheduler -> KernelInitFlow: emits Action::Enter
           current state: State::Online
+          KernelInitFlow -> UserRunPhase: drives Action::Enter
+            current state: State::Online
+            commit state: unchanged
           commit state: unchanged
-        panic: boot idle repeated! ✗
-        commit state: not committed ✗
-      commit state: not committed ✗
-    commit state: not committed ✗
-  commit state: not committed ✗
 
-stopped: panic
+Derivation yielded!
 """
 
 
@@ -123,14 +168,14 @@ class MakeRunOutputTests(unittest.TestCase):
     def test_default_run_only_prints_derivation_output(self) -> None:
         completed = self._run()
 
-        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, EXPECTED_DERIVATION_OUTPUT)
-        self.assertIn("Error", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
     def test_verbose_run_prints_all_commands_and_derivation_output(self) -> None:
         completed = self._run("VERBOSE=1")
 
-        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 0)
         for command in (
             "make --no-print-directory -C tools run",
             "-m compileall -q src tests",
@@ -141,14 +186,14 @@ class MakeRunOutputTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIn(command, completed.stdout)
         self.assertTrue(completed.stdout.endswith(EXPECTED_DERIVATION_OUTPUT))
-        self.assertIn("Error", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
     def test_only_exact_verbose_one_enables_command_echo(self) -> None:
         completed = self._run("VERBOSE=1 0")
 
-        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, EXPECTED_DERIVATION_OUTPUT)
-        self.assertIn("Error", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
     def test_quiet_run_keeps_error_diagnostics_visible(self) -> None:
         completed = self._run("MODEL=missing-model.spec")

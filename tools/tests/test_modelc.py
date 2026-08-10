@@ -161,6 +161,49 @@ def _task_flow_module() -> ModelModule:
                 (),
                 True,
             ),
+            ModelObject(
+                kernel_init_flow_path,
+                ModelTypeExpression(("TaskFlow",)),
+                online,
+                ModelExpression("identifier", "KernelInitTask"),
+                None,
+                (),
+                (
+                    ModelState(
+                        online,
+                        (),
+                        (),
+                        (
+                            ModelAction(
+                                enter,
+                                (
+                                    ModelHandlerBlock(
+                                        "drives",
+                                        signals=(
+                                            ModelSignal(
+                                                kernel_init_flow_path,
+                                                kernel_init_phase_path,
+                                                enter,
+                                                "drive",
+                                            ),
+                                            ModelSignal(
+                                                kernel_init_flow_path,
+                                                user_run_phase_path,
+                                                enter,
+                                                "drive",
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                                False,
+                                True,
+                            ),
+                        ),
+                    ),
+                ),
+                (),
+                True,
+            ),
         ),
     )
 
@@ -252,9 +295,123 @@ def _arch_head_module() -> ModelModule:
 
 def _scheduler_module() -> ModelModule:
     ready = ("State", "Ready")
-    online = ("State", "Online")
+    boot_running = ("State", "BootTaskRunning")
+    kernel_init_running = ("State", "KernelInitTaskRunning")
     enable = ("Transition", "Enable")
+    switch_to_boot = ("Transition", "SwitchToBootTask")
+    switch_to_kernel_init = ("Transition", "SwitchToKernelInitTask")
     schedule = ("Action", "Schedule")
+
+    def scheduler_states(
+        source: tuple[str, ...] | None = None,
+    ) -> tuple[ModelState, ...]:
+        return (
+            ModelState(
+                boot_running,
+                (),
+                (ModelTransition(switch_to_kernel_init, kernel_init_running, ()),),
+                (
+                    ModelAction(schedule, (), abstract=True)
+                    if source is None
+                    else ModelAction(
+                        schedule,
+                        (
+                            ModelHandlerBlock(
+                                "drives",
+                                signals=(
+                                    ModelSignal(
+                                        source,
+                                        boot_task_path,
+                                        ("Transition", "Suspend"),
+                                        "drive",
+                                    ),
+                                    ModelSignal(
+                                        source,
+                                        kernel_init_task_path,
+                                        ("Transition", "Resume"),
+                                        "drive",
+                                    ),
+                                    ModelSignal(
+                                        source,
+                                        cpu0_scheduler_path,
+                                        switch_to_kernel_init,
+                                        "drive",
+                                    ),
+                                ),
+                            ),
+                            ModelHandlerBlock(
+                                "emits",
+                                signals=(
+                                    ModelSignal(
+                                        source,
+                                        kernel_init_flow_path,
+                                        ("Action", "Enter"),
+                                        "emit",
+                                    ),
+                                ),
+                            ),
+                        ),
+                        override=True,
+                    ),
+                ),
+            ),
+            ModelState(
+                kernel_init_running,
+                (),
+                (ModelTransition(switch_to_boot, boot_running, ()),),
+                (
+                    ModelAction(schedule, (), abstract=True)
+                    if source is None
+                    else ModelAction(
+                        schedule,
+                        (
+                            ModelHandlerBlock(
+                                "drives",
+                                signals=(
+                                    ModelSignal(
+                                        source,
+                                        kernel_init_task_path,
+                                        ("Transition", "Suspend"),
+                                        "drive",
+                                    ),
+                                    ModelSignal(
+                                        source,
+                                        boot_task_path,
+                                        ("Transition", "Resume"),
+                                        "drive",
+                                    ),
+                                    ModelSignal(
+                                        source,
+                                        cpu0_scheduler_path,
+                                        switch_to_boot,
+                                        "drive",
+                                    ),
+                                ),
+                            ),
+                            ModelHandlerBlock(
+                                "emits",
+                                signals=(
+                                    ModelSignal(
+                                        source,
+                                        boot_flow_path,
+                                        ("Action", "Enter"),
+                                        "emit",
+                                    ),
+                                ),
+                            ),
+                        ),
+                        override=True,
+                    ),
+                ),
+            ),
+            ModelState(
+                ready,
+                (),
+                (ModelTransition(enable, boot_running, ()),),
+                (),
+            ),
+        )
+
     return ModelModule(
         name=("objects", "scheduler"),
         types=(
@@ -262,20 +419,7 @@ def _scheduler_module() -> ModelModule:
                 scheduler_type_path,
                 (),
                 initial_state=ready,
-                states=(
-                    ModelState(
-                        online,
-                        (),
-                        (),
-                        (ModelAction(schedule, (), abstract=True),),
-                    ),
-                    ModelState(
-                        ready,
-                        (),
-                        (ModelTransition(enable, online, ()),),
-                        (),
-                    ),
-                ),
+                states=scheduler_states(),
             ),
         ),
         objects=(
@@ -286,46 +430,46 @@ def _scheduler_module() -> ModelModule:
                 None,
                 None,
                 (),
-                (
-                    ModelState(
-                        online,
-                        (),
-                        (),
-                        (
-                            ModelAction(
-                                schedule,
-                                (
-                                    ModelHandlerBlock(
-                                        "emits",
-                                        signals=(
-                                            ModelSignal(
-                                                cpu0_scheduler_path,
-                                                boot_flow_path,
-                                                ("Action", "Enter"),
-                                                "emit",
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                                override=True,
-                            ),
-                        ),
-                    ),
-                    ModelState(
-                        ready,
-                        (),
-                        (
-                            ModelTransition(
-                                enable,
-                                online,
-                                (),
-                            ),
-                        ),
-                        (),
-                    ),
-                ),
+                scheduler_states(cpu0_scheduler_path),
                 (),
             ),
+        ),
+    )
+
+
+def _task_module() -> ModelModule:
+    states = (
+        _state("Base", _transition("Preset", "Prepared")),
+        _state("OnCpu", _transition("Suspend", "Online")),
+        _state("Online", _transition("Resume", "OnCpu")),
+        _state("Prepared", _transition("Setup", "Ready")),
+        _state("Ready", _transition("Enable", "Online")),
+    )
+    return ModelModule(
+        name=("objects", "task"),
+        types=(
+            ModelType(
+                ("objects", "task", "Task"),
+                (),
+                initial_state=("State", "Base"),
+                states=states,
+            ),
+        ),
+        objects=tuple(
+            ModelObject(
+                path,
+                ModelTypeExpression(("Task",)),
+                ("State", initial_state),
+                ModelExpression("identifier", "Kernel"),
+                None,
+                (),
+                states,
+                (),
+            )
+            for path, initial_state in (
+                (boot_task_path, "OnCpu"),
+                (kernel_init_task_path, "Base"),
+            )
         ),
     )
 
@@ -344,7 +488,12 @@ opensbi_path = ("systems", "opensbi", "OpenSBI")
 kernel_path = ("systems", "kernel", "Kernel")
 rootfs_path = ("systems", "rootfs", "RootFs")
 boot_flow_path = ("flows", "task_flow", "BootInitFlow")
+kernel_init_flow_path = ("flows", "task_flow", "KernelInitFlow")
+boot_task_path = ("objects", "task", "BootTask")
+kernel_init_task_path = ("objects", "task", "KernelInitTask")
 arch_head_path = ("phases", "arch_head", "ArchHead")
+kernel_init_phase_path = ("phases", "kernel_init", "KernelInitPhase")
+user_run_phase_path = ("phases", "user_run", "UserRunPhase")
 start_kernel_path = ("phases", "start_kernel", "StartKernel")
 early_boot_path = ("phases", "start_kernel", "early_boot", "EarlyBoot")
 boot_setup_path = ("phases", "start_kernel", "boot_setup", "BootSetup")
@@ -444,19 +593,19 @@ EXPECTED_MODEL = ModelIR(
         _task_flow_module(),
         ModelModule(name=("objects",)),
         _scheduler_module(),
-        _object_module(
-            ("objects", "task"),
-            "Task",
-            "BootTask",
-            (
-                _state("OnCpu", _transition("Suspend", "Online")),
-                _state("Online", _transition("Dispatch", "OnCpu")),
-            ),
-            initial_state="OnCpu",
-            parent="Kernel",
-        ),
+        _task_module(),
         ModelModule(name=("phases",)),
         _arch_head_module(),
+        _phase_object_module(
+            ("phases", "kernel_init"),
+            "KernelInitPhase",
+            extra_blocks=(
+                ModelHandlerBlock(
+                    "print",
+                    expressions=(ModelExpression("string", "kernel init"),),
+                ),
+            ),
+        ),
         _phase_type_module(),
         _phase_object_module(
             ("phases", "start_kernel"),
@@ -517,6 +666,24 @@ EXPECTED_MODEL = ModelIR(
                             ("Transition", "Enable"),
                             "drive",
                         ),
+                        ModelSignal(
+                            boot_setup_path,
+                            kernel_init_task_path,
+                            ("Transition", "Preset"),
+                            "drive",
+                        ),
+                        ModelSignal(
+                            boot_setup_path,
+                            kernel_init_task_path,
+                            ("Transition", "Setup"),
+                            "drive",
+                        ),
+                        ModelSignal(
+                            boot_setup_path,
+                            kernel_init_task_path,
+                            ("Transition", "Enable"),
+                            "drive",
+                        ),
                     ),
                 ),
             ),
@@ -527,6 +694,23 @@ EXPECTED_MODEL = ModelIR(
             extra_blocks=(
                 ModelHandlerBlock(
                     "print", expressions=(ModelExpression("string", "here"),)
+                ),
+            ),
+        ),
+        _phase_object_module(
+            ("phases", "user_run"),
+            "UserRunPhase",
+            extra_blocks=(
+                ModelHandlerBlock(
+                    "yields",
+                    signals=(
+                        ModelSignal(
+                            user_run_phase_path,
+                            cpu0_scheduler_path,
+                            ("Action", "Schedule"),
+                            "yield",
+                        ),
+                    ),
                 ),
             ),
         ),
@@ -615,7 +799,7 @@ class ParserAndCompilerTests(unittest.TestCase):
         self.assertEqual(document.origin.span, SourceSpan(10, 1, 10, 28))
         self.assertEqual(compile_spec(path), EXPECTED_MODEL)
 
-    def test_real_task_types_and_boot_instances_are_separated(self) -> None:
+    def test_real_task_lifecycle_and_flow_ownership_are_explicit(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
         task_module = next(
             module
@@ -628,14 +812,95 @@ class ParserAndCompilerTests(unittest.TestCase):
             if module.name == ("flows", "task_flow")
         )
 
-        self.assertEqual(task_module.types[0].name[-1], "Task")
-        self.assertEqual(task_module.objects[0].name[-1], "BootTask")
-        self.assertEqual(flow_module.types[0].name[-1], "TaskFlow")
-        self.assertEqual(flow_module.objects[0].name[-1], "BootInitFlow")
+        task_type = task_module.types[0]
+        boot_task, kernel_init_task = task_module.objects
+        task_transitions = {
+            state.name: tuple(
+                (transition.signal, transition.target_state)
+                for transition in state.transitions
+            )
+            for state in task_type.states
+        }
+
+        self.assertEqual(task_type.name[-1], "Task")
+        self.assertEqual(task_type.initial_state, ("State", "Base"))
         self.assertEqual(
-            flow_module.objects[0].parent,
+            task_transitions,
+            {
+                ("State", "Base"): (
+                    (("Transition", "Preset"), ("State", "Prepared")),
+                ),
+                ("State", "OnCpu"): (
+                    (("Transition", "Suspend"), ("State", "Online")),
+                ),
+                ("State", "Online"): (
+                    (("Transition", "Resume"), ("State", "OnCpu")),
+                ),
+                ("State", "Prepared"): (
+                    (("Transition", "Setup"), ("State", "Ready")),
+                ),
+                ("State", "Ready"): (
+                    (("Transition", "Enable"), ("State", "Online")),
+                ),
+            },
+        )
+        self.assertEqual(boot_task.name[-1], "BootTask")
+        self.assertEqual(boot_task.initial_state, ("State", "OnCpu"))
+        self.assertEqual(kernel_init_task.name[-1], "KernelInitTask")
+        self.assertEqual(kernel_init_task.initial_state, ("State", "Base"))
+        self.assertNotIn(
+            ("Transition", "Dispatch"),
+            {
+                transition.signal
+                for state in task_type.states
+                for transition in state.transitions
+            },
+        )
+
+        self.assertEqual(flow_module.types[0].name[-1], "TaskFlow")
+        boot_flow, kernel_init_flow = flow_module.objects
+        self.assertEqual(boot_flow.name[-1], "BootInitFlow")
+        self.assertEqual(
+            boot_flow.parent,
             ModelExpression("identifier", "BootTask"),
         )
+        self.assertEqual(kernel_init_flow.name[-1], "KernelInitFlow")
+        self.assertEqual(
+            kernel_init_flow.parent,
+            ModelExpression("identifier", "KernelInitTask"),
+        )
+        self.assertTrue(
+            all(
+                flow.initial_state == ("State", "Online")
+                for flow in flow_module.objects
+            )
+        )
+
+    def test_kernel_init_phase_modules_are_registered_and_driven_in_order(self) -> None:
+        model = compile_spec(REPOSITORY / "model" / "main.spec")
+        modules = {module.name: module for module in model.modules}
+        kernel_init_phase = modules[("phases", "kernel_init")].objects[0]
+        user_run_phase = modules[("phases", "user_run")].objects[0]
+        kernel_init_flow = next(
+            item for item in model.objects if item.name == kernel_init_flow_path
+        )
+
+        self.assertEqual(kernel_init_phase.name, kernel_init_phase_path)
+        self.assertEqual(user_run_phase.name, user_run_phase_path)
+        driven = tuple(
+            signal.target
+            for block in kernel_init_flow.states[0].actions[0].blocks
+            if block.kind == "drives"
+            for signal in block.signals
+        )
+        self.assertEqual(driven, (kernel_init_phase_path, user_run_phase_path))
+        printed = kernel_init_phase.states[0].actions[0].blocks[0]
+        self.assertEqual(printed.kind, "print")
+        self.assertEqual(printed.expressions, (ModelExpression("string", "kernel init"),))
+        yielded = user_run_phase.states[0].actions[0].blocks[0]
+        self.assertEqual(yielded.kind, "yields")
+        self.assertEqual(yielded.signals[0].target, cpu0_scheduler_path)
+        self.assertEqual(yielded.signals[0].signal, ("Action", "Schedule"))
 
     def test_real_phase_type_and_arch_head_override_are_preserved(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
@@ -1415,12 +1680,14 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("objects", "task"),
                 ("phases",),
                 ("phases", "arch_head"),
+                ("phases", "kernel_init"),
                 ("phases", "phase"),
                 ("phases", "start_kernel"),
                 ("phases", "start_kernel", "boot_handoff"),
                 ("phases", "start_kernel", "boot_idle"),
                 ("phases", "start_kernel", "boot_setup"),
                 ("phases", "start_kernel", "early_boot"),
+                ("phases", "user_run"),
                 ("systems",),
                 ("systems", "computer"),
                 ("systems", "human"),

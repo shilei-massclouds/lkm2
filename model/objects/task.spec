@@ -2,11 +2,34 @@
 
 use model::systems::kernel::Kernel;
 
-type Task;
+type Task {
+    state State::Base {
+        transitions {
+            on Transition::Preset -> State::Prepared {
+            }
+        }
+    }
 
-object BootTask: Task {
-    initial_state: State::OnCpu;
-    parent: Kernel;
+    state State::Prepared {
+        transitions {
+            on Transition::Setup -> State::Ready {
+            }
+        }
+    }
+
+    state State::Ready {
+        transitions {
+            on Transition::Enable -> State::Online {
+            }
+        }
+    }
+
+    state State::Online {
+        transitions {
+            on Transition::Resume -> State::OnCpu {
+            }
+        }
+    }
 
     state State::OnCpu {
         transitions {
@@ -14,11 +37,13 @@ object BootTask: Task {
             }
         }
     }
+}
 
-    state State::Online {
-        transitions {
-            on Transition::Dispatch -> State::OnCpu {
-            }
-        }
-    }
+object BootTask: Task {
+    initial_state: State::OnCpu;
+    parent: Kernel;
+}
+
+object KernelInitTask: Task {
+    parent: Kernel;
 }

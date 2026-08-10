@@ -11,13 +11,15 @@ Scheduler 是 per-CPU 运行对象，不是整个内核共享的全局单例。�
 `Cpu0Scheduler` 的最小生命周期是：
 
 ```text
-Ready --BootSetup/Enable--> Online --Schedule--> Online
+Ready --BootSetup/Enable--> BootTaskRunning
+BootTaskRunning --Schedule--> KernelInitTaskRunning
+KernelInitTaskRunning --Schedule--> BootTaskRunning
 ```
 
-- `BootSetup` 必须先将它从 `Ready` 推进到 `Online`。
-- 只有 `Online` 状态接受 `Schedule`。
-- 当前 `Schedule` 采用 identity 策略，提交 Scheduler 与 `BootInitFlow` 的调度事实，再异步恢复同一个 flow。
-- 当前切片不定义 runqueue、run token、其它 CPU Scheduler 或任务选择策略。
+- `BootSetup` 必须先将它从 `Ready` 推进到 `BootTaskRunning`。
+- 两个运行态都接受 `Schedule`，并确定性交替选择 `BootTask` 与 `KernelInitTask`。
+- 每次切换依次暂停当前任务、以 `Transition::Resume` 恢复目标任务、提交 Scheduler 运行态，再向目标 `TaskFlow` root 投递 `Action::Enter`。
+- 当前切片不定义 TaskRef、current、selected-next、runqueue、run token、其它 CPU Scheduler 或通用任务选择策略。
 
 ## 后续 ownership
 

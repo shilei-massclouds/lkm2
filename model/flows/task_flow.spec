@@ -1,8 +1,10 @@
 /* TaskFlow - flow of task. */
 
 use model::objects::task::BootTask;
-use model::objects::scheduler::Cpu0Scheduler;
+use model::objects::task::KernelInitTask;
 use model::phases::arch_head::ArchHead;
+use model::phases::kernel_init::KernelInitPhase;
+use model::phases::user_run::UserRunPhase;
 
 type TaskFlow {
     continuation: true;
@@ -23,6 +25,21 @@ object BootInitFlow: TaskFlow {
             override on Action::Enter {
                 drives {
                     ArchHead.Action::Enter;
+                }
+            }
+        }
+    }
+}
+
+object KernelInitFlow: TaskFlow {
+    parent: KernelInitTask;
+
+    state State::Online {
+        actions {
+            override on Action::Enter {
+                drives {
+                    KernelInitPhase.Action::Enter;
+                    UserRunPhase.Action::Enter;
                 }
             }
         }
