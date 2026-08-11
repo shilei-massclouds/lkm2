@@ -68,25 +68,16 @@ StartKernel -> BootSetup: resumes Action::Enter
   BootSetup -> Cpu0Scheduler: drives Transition::Enable
     current state: State::Ready
     commit state: State::Online
-  BootSetup -> Cpu0Scheduler: drives Action::SetIdleTask(objects::scheduler::BootTaskRef)
-    current state: State::Online
-    commit state: unchanged
-  BootSetup -> Cpu0Scheduler: drives Action::SetCurrentTask(objects::scheduler::BootTaskRef)
-    current state: State::Online
-    commit state: unchanged
   BootSetup -> KernelInitTask: drives Transition::Preset
     current state: State::Base
     commit state: State::Prepared
   BootSetup -> KernelInitTask: drives Transition::Setup
     current state: State::Prepared
     commit state: State::Ready
-  BootSetup -> KernelInitTask: drives Transition::Enable(objects::scheduler::KernelInitTaskRef)
+  BootSetup -> KernelInitTask: drives Transition::Enable
     current state: State::Ready
-    KernelInitTask -> Cpu0Scheduler: drives Action::Enqueue(objects::scheduler::KernelInitTaskRef)
+    KernelInitTask -> Cpu0Scheduler: drives Action::Enqueue
       current state: State::Online
-      Cpu0Scheduler -> Cpu0RunQ: drives Action::Enqueue(objects::scheduler::KernelInitTaskRef)
-        current state: <none>
-        commit state: unchanged
       commit state: unchanged
     commit state: State::Online
   commit state: unchanged
@@ -95,7 +86,45 @@ StartKernel -> BootHandoff: resumes Action::Enter
   current state: State::Online
   BootHandoff -> Cpu0Scheduler: yields Action::Schedule
     current state: State::Online
-    panic: impl sched ✗
-    commit state: not committed ✗
+    Cpu0Scheduler -> BootTask: drives Transition::Suspend
+      current state: State::OnCpu
+      commit state: State::Online
+    selects next_task_ref = KernelInitTask
+    Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
+      current state: State::Online
+      KernelInitTask -> Cpu0Scheduler: drives Action::Dequeue
+        current state: State::Online
+        commit state: unchanged
+      commit state: State::OnCpu
+    commit state: unchanged
+  Cpu0Scheduler -> KernelInitFlow: resumes Action::Enter
+    current state: State::Online
+    commit state: unchanged
+  KernelInitFlow -> KernelInitPhase: resumes Action::Enter
+    current state: State::Online
+    print: kernel init
+    commit state: unchanged
+  KernelInitFlow -> UserRunPhase: resumes Action::Enter
+    current state: State::Online
+    UserRunPhase -> Cpu0Scheduler: yields Action::Schedule
+      current state: State::Online
+      Cpu0Scheduler -> KernelInitTask: drives Transition::Suspend
+        current state: State::OnCpu
+        KernelInitTask -> Cpu0Scheduler: drives Action::Enqueue
+          current state: State::Online
+          commit state: unchanged
+        commit state: State::Online
+      selects next_task_ref = KernelInitTask
+      Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
+        current state: State::Online
+        KernelInitTask -> Cpu0Scheduler: drives Action::Dequeue
+          current state: State::Online
+          commit state: unchanged
+        commit state: State::OnCpu
+      commit state: unchanged
+    Cpu0Scheduler -> KernelInitFlow: resumes Action::Enter
+      current state: State::Online
+      commit state: unchanged
+    commit state: unchanged
 
-stopped: panic
+Derivation yielded!

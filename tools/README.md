@@ -5,27 +5,27 @@
 当前工具链处理流程为：
 
 ```text
-model/main.spec → entry AST → recursive module graph → Model IR v7 → canonical JSON
+model/main.spec → entry AST → recursive module graph → Model IR v8 → canonical JSON
 entry external signals → tools/build/derive/main.sequence.json
-Model IR v7 + external-root sequence v3 → derive → result JSON v6 / human stdout
+Model IR v8 + external-root sequence v3 → derive → result JSON v7 / human stdout
 ```
 
 有状态对象可以省略 `initial_state`；modelc 会将其规范化为
 `State::Base`。因此这类对象必须声明 `state State::Base`。显式指定的初始状态保持
-不变，无状态对象仍没有初始状态。Model IR v7 的严格 JSON schema 中：
+不变，无状态对象仍没有初始状态。Model IR v8 的严格 JSON schema 中：
 `initial_state` 字段始终必需，有状态对象的默认值会明确写成
 `["State", "Base"]`，无状态对象写成 `null`。
 
 入口接受一条或多条简单的 `spec IDENT;`，然后是一条点分
 `origin <qualified-name>;`。每条入口 `spec` 都声明一个并列根模块；第一条是
-Model IR v7 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
+Model IR v8 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
 `phases`、`flows` 四个并列根模块组成。`spec` 与 Rust 的 `mod` 类似：入口根
 声明 `spec systems;` 装载同目录的 `systems.spec`，其中的
 `spec human;` 再装载 `systems/human.spec`。只有显式声明会进入模块图，
 不自动发现目录，也不使用 `<module>/main.spec`。
 
 模块文件必须完整符合 [`module_grammar.lark`](src/modelc/module_grammar.lark)
-定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v7 lowering
+定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v8 lowering
 保留 predicate、type、object、external、state、handler、deferred 和通用表达式树。
 绝对 `use` 路径使用 `model::`，相对路径使用 `self::` 或连续的
 `super::`；不带根关键字的裸路径也从 model root 开始。`crate::` 不再受支持。
@@ -119,8 +119,9 @@ IR schema 版本；完全命中并能严格加载缓存 IR 时不会改写文件
 
 推导序列 schema v3 的每个事件显式指定 `source`、`target`、`signal`、`mode` 和
 实参，但 sequence 只选择外部根信号；drives、emits 与 resumes 由引擎按因果关系
-自动调度。结果 JSON schema v6 记录嵌套推导单元、逐项条件、最终状态、运行时
-字段/Collection 值、predicate facts，以及 continuation frame 与参数绑定快照；
+自动调度。结果 JSON schema v7 顶层记录有序路径集合；每条路径保留嵌套推导单元、
+逐项条件、最终状态、运行时字段/Collection 值、predicate facts、continuation
+frame、参数绑定快照，以及 Scheduler 的 idle/current/runq 上下文；
 `dump_derivation_result()` 提供包含完整检查细节的规范 JSON，CLI 默认使用精简的
 人类因果 renderer。当前支持
 Transition 与 Action 信号、对象状态比较、布尔组合、depends_on、drives、ensures、
@@ -146,10 +147,21 @@ reference、may_change、deferred 及其它未实现表达式会明确返回
 `unsupported_feature`。当前 Computer 按顺序处理 `Preset`、`Setup` 和 `Enable`，
 依次提交到 `State::Prepared`、`State::Ready` 和 `State::Online`；Kernel 的
 Enable 提交后 resumes `BootInitFlow.Action::Enter`。
+`sched_core: true` 类型为实例隐式提供无参数 `Action::Enqueue` 和
+`Action::Dequeue`。这两个信号只能由 Task 对象发出，分别把 source Task 加入或
+移出实例私有的唯一 FIFO runq；重复入队和不存在的出队会产生明确失败码。
+`selects name;` 在 Scheduler Action 中按 runq 顺序展开每个候选路径，空队列时选择
+idle Task，且选择本身不出队。`CurrentTaskRef` 与 selects 绑定都是运行时 Task target。
+Scheduler handler 成功后才提交 current，随后恢复所选 Task 唯一的 parent TaskFlow。
+结果总体状态在任一路径失败时为 `failed`，否则在存在 suspended 路径时为
+`yielded`，其余为 `passed`；CLI 对多路径按稳定顺序分段输出，并在总体失败时返回 1。
+
 默认 `make run` 输出完整推导，与结论空开一行。BootSetup 将 Scheduler 推进到
-Online，把 curr/idle 设为 `BootTaskRef`，并将 `KernelInitTaskRef` 入队到
-`Cpu0RunQ`。首次 BootHandoff Schedule 执行占位 `panic "impl sched"`；CLI 输出
-`stopped: panic` 并返回 1。出队、选择下一任务和任务切换留待后续实现。
+Online 并启用 `KernelInitTask`；其 Enable、Resume、Suspend 生命周期分别驱动隐藏
+runq 的 Enqueue、Dequeue、Enqueue。BootTask 是 idle Task，并 override
+Resume/Suspend 以避免队列动作。默认路径最终 current 为 `KernelInitTask`、runq
+为空，BootTask 为 Online、KernelInitTask 为 OnCpu，BootHandoff 保留 yielded
+continuation；CLI 输出 `Derivation yielded!` 并返回 0。
 
 公共库接口为：
 
@@ -162,6 +174,6 @@ Online，把 curr/idle 设为 `BootTaskRef`，并将 `KernelInitTaskRef` 入队�
 - `derive.load_derivation_result()`
 - `derive.render_derivation_result()`
 
-AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v7
+AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v8
 loader 严格拒绝旧版本、未知字段、重复声明、无效状态引用、重复 handler 和未知
 信号目标，并规范排序模块和声明。

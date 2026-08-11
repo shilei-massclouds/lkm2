@@ -1,4 +1,4 @@
-"""Compilation pipeline from a model-root specification to Model IR v7."""
+"""Compilation pipeline from a model-root specification to Model IR v8."""
 
 from __future__ import annotations
 
@@ -206,12 +206,21 @@ def _resolve_target(
     return raw
 
 
+def _object_expression(name: tuple[str, ...]) -> ModelExpression:
+    result = ModelExpression("identifier", name[0])
+    for part in name[1:]:
+        result = ModelExpression("path", part, (result,))
+    return result
+
+
 def _signal(
     module: LoadedModule,
     node: Tree | Token,
     source: tuple[str, ...],
     mode: str,
     imports: dict[str, tuple[str, ...]],
+    bindings: frozenset[str] = frozenset(),
+    selector_names: frozenset[str] = frozenset(),
 ) -> ModelSignal:
     expression = _lower_expression(node)
     arguments: tuple[ModelExpression, ...] = ()
@@ -229,7 +238,23 @@ def _signal(
         or operations[-2:] != ["member", "path"]
     ):
         raise _semantic_error(module, node, expected)
-    target = _resolve_target(tuple(segments[:-2]), module.name, imports)
+    raw_target = tuple(segments[:-2])
+    if (
+        len(raw_target) == 1
+        and raw_target[0] in selector_names
+        and raw_target[0] not in bindings
+    ):
+        raise _semantic_error(
+            module,
+            node,
+            f"selects binding {raw_target[0]!r} is not in scope before its declaration",
+        )
+    if len(raw_target) == 1 and raw_target[0] in {*bindings, "CurrentTaskRef"}:
+        target = ModelExpression("identifier", raw_target[0])
+    else:
+        target = _object_expression(
+            _resolve_target(raw_target, module.name, imports)
+        )
     signal = canonicalize_signal_name((segments[-2], segments[-1]))
     return ModelSignal(source, target, signal, mode, arguments)
 
@@ -361,6 +386,12 @@ def _handler_blocks(
     imports: dict[str, tuple[str, ...]],
 ) -> tuple[ModelHandlerBlock, ...]:
     result: list[ModelHandlerBlock] = []
+    bindings: set[str] = set()
+    selector_names = frozenset(
+        str(child.children[0])
+        for child in owner.children
+        if isinstance(child, Tree) and child.data == "selects_statement"
+    )
     expression_kinds = {
         "depends_on_block": "depends_on",
         "may_change_block": "may_change",
@@ -376,7 +407,7 @@ def _handler_blocks(
         elif rule in {"drives_block", "emits_block"}:
             mode = "drive" if rule == "drives_block" else "emit"
             signals = tuple(
-                _signal(module, statement, source, mode, imports)
+                _signal(module, statement, source, mode, imports, frozenset(bindings), selector_names)
                 for statement in _signal_nodes(child)
             )
             result.append(ModelHandlerBlock(rule.removesuffix("_block"), signals=signals))
@@ -385,7 +416,7 @@ def _handler_blocks(
                 ModelHandlerBlock(
                     "yields",
                     signals=(
-                        _signal(module, child.children[0], source, "yield", imports),
+                        _signal(module, child.children[0], source, "yield", imports, frozenset(bindings), selector_names),
                     ),
                 )
             )
@@ -394,7 +425,7 @@ def _handler_blocks(
                 ModelHandlerBlock(
                     "resumes",
                     signals=(
-                        _signal(module, child.children[0], source, "resume", imports),
+                        _signal(module, child.children[0], source, "resume", imports, frozenset(bindings), selector_names),
                     ),
                 )
             )
@@ -423,6 +454,14 @@ def _handler_blocks(
                     f"{kind} requires exactly one string literal",
                 )
             result.append(ModelHandlerBlock(kind, expressions=(expression,)))
+        elif rule == "selects_statement":
+            binding = str(child.children[0])
+            if binding in bindings:
+                raise _semantic_error(
+                    module, child, f"duplicate selects binding {binding!r}"
+                )
+            result.append(ModelHandlerBlock("selects", selects=binding))
+            bindings.add(binding)
         elif rule == "deferred_declaration":
             result.append(ModelHandlerBlock("deferred", deferred=_deferred(module, child)))
     return tuple(result)
@@ -545,6 +584,7 @@ def _object(
     initial_node = _only(module, node, "initial_state_property", "initial_state")
     parent_node = _only(module, node, "parent_property", "parent")
     source_node = _only(module, node, "source_property", "source")
+    idle_task_node = _only(module, node, "idle_task_property", "idle_task")
     continuation_node = _only(module, node, "continuation_property", "continuation")
     if continuation_node is not None:
         raise _semantic_error(
@@ -593,6 +633,9 @@ def _object(
         attrs=None if not declared_fields else declared_fields,
         states=states,
         references=tuple(references),
+        idle_task=None
+        if idle_task_node is None
+        else _lower_expression(idle_task_node.children[0]),
     )
 
 
@@ -657,6 +700,21 @@ def _model_type(
                 "continuation can only be declared as true and cannot be cancelled",
             )
         continuation = True
+    sched_core_nodes = tuple(
+        item for item in items if item.data == "sched_core_property"
+    )
+    if len(sched_core_nodes) > 1:
+        raise _semantic_error(module, sched_core_nodes[1], "duplicate sched_core")
+    sched_core = False
+    if sched_core_nodes:
+        value = str(sched_core_nodes[0].children[0])
+        if value != "true":
+            raise _semantic_error(
+                module,
+                sched_core_nodes[0],
+                "sched_core can only be declared as true and cannot be cancelled",
+            )
+        sched_core = True
     base_node = next(
         (
             child
@@ -688,6 +746,7 @@ def _model_type(
             "initial_state",
         ),
         states=states,
+        sched_core=sched_core,
     )
 
 
@@ -852,6 +911,7 @@ def _rebind_states(
                 tuple(_rebind_signal(signal, source) for signal in block.signals),
                 block.deferred,
                 block.updates,
+                block.selects,
             )
             for block in values
         )
@@ -957,6 +1017,7 @@ def _expand_inheritance(
         if initial_state is None and states:
             initial_state = ("State", "Base")
         continuation = raw.continuation or (base is not None and base.continuation)
+        sched_core = raw.sched_core or (base is not None and base.sched_core)
         expanded = ModelType(
             raw.name,
             fields,
@@ -964,6 +1025,7 @@ def _expand_inheritance(
             continuation,
             initial_state,
             states,
+            sched_core,
         )
         state_names = {state.name for state in states}
         if initial_state is not None and initial_state not in state_names:
@@ -1084,16 +1146,46 @@ def _expand_inheritance(
                 states,
                 raw.references,
                 continuation,
+                raw.idle_task,
             )
 
     continuation_names = {
         name for name, model_object in expanded_objects.items() if model_object.continuation
     }
 
+    object_names = set(expanded_objects)
+
+    def resolve_object_expression(
+        expression: ModelExpression,
+        module_name: tuple[str, ...],
+    ) -> tuple[str, ...] | None:
+        access = _flatten_access(expression)
+        if access is None:
+            return None
+        segments, operations = access
+        if any(operation == "member" for operation in operations):
+            return None
+        candidate = _resolve_target(tuple(segments), module_name, imports[module_name])
+        if candidate in object_names:
+            return candidate
+        matches = tuple(
+            name for name in object_names if name[-len(segments) :] == tuple(segments)
+        )
+        return matches[0] if len(matches) == 1 else None
+
     def validate_continuation_target(
         module: LoadedModule, owner: Tree, signal: ModelSignal
     ) -> None:
-        is_continuation = signal.target in continuation_names
+        target_name = resolve_object_expression(signal.target, module.name)
+        if target_name is None:
+            if signal.mode == "resume":
+                raise _semantic_error(
+                    module,
+                    owner,
+                    "resumes requires a statically resolvable continuation target",
+                )
+            return
+        is_continuation = target_name in continuation_names
         if signal.mode == "resume" and (
             not is_continuation or signal.signal != ("Action", "Enter")
         ):
@@ -1108,7 +1200,7 @@ def _expand_inheritance(
             return
         if not (
             signal.signal[0] == "Action"
-            and signal.source == signal.target
+            and signal.source == target_name
             and signal.mode == "drive"
         ):
             raise _semantic_error(
@@ -1193,27 +1285,104 @@ def _expand_inheritance(
                 return False
         return False
 
-    object_names = set(expanded_objects)
+    task_types = tuple(name for name in raw_types if name[-1] == "Task")
+    task_flow_types = tuple(name for name in raw_types if name[-1] == "TaskFlow")
 
-    def resolve_object_expression(
-        expression: ModelExpression,
-        module_name: tuple[str, ...],
-    ) -> tuple[str, ...] | None:
-        access = _flatten_access(expression)
-        if access is None:
-            return None
-        segments, operations = access
-        if any(operation == "member" for operation in operations):
-            return None
-        candidate = _resolve_target(tuple(segments), module_name, imports[module_name])
-        if candidate in object_names:
-            return candidate
-        matches = tuple(
-            name for name in object_names if name[-len(segments) :] == tuple(segments)
+    def is_task_object(name: tuple[str, ...]) -> bool:
+        return len(task_types) == 1 and compatible(
+            object_type(name), (task_types[0], ())
         )
-        return matches[0] if len(matches) == 1 else None
 
-    task_ref_types = tuple(name for name in raw_types if name[-1] == "TaskRef")
+    def is_task_flow_object(name: tuple[str, ...]) -> bool:
+        return len(task_flow_types) == 1 and compatible(
+            object_type(name), (task_flow_types[0], ())
+        )
+
+    def is_sched_core_object(name: tuple[str, ...]) -> bool:
+        type_name = object_type(name)[0]
+        return type_name in expanded_types and expanded_types[type_name].sched_core
+
+    core_actions = {("Action", "Enqueue"), ("Action", "Dequeue")}
+    for name, model_type in raw_types.items():
+        effective = expanded_types[name]
+        if not effective.sched_core:
+            continue
+        if any(
+            action.signal in core_actions
+            for state in model_type.states
+            for action in state.actions
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "sched_core types must not declare or override Action::Enqueue or Action::Dequeue",
+            )
+
+    for name, model_object in expanded_objects.items():
+        owner = object_nodes[name]
+        sched_core = is_sched_core_object(name)
+        if sched_core and model_object.idle_task is None:
+            raise _semantic_error(
+                loaded[name[:-1]], owner, "sched_core object requires idle_task"
+            )
+        if not sched_core and model_object.idle_task is not None:
+            raise _semantic_error(
+                loaded[name[:-1]], owner, "idle_task is only allowed on sched_core objects"
+            )
+        if sched_core and any(
+            action.signal in core_actions
+            for state in next(
+                raw for module in lowered for raw in module.objects if raw.name == name
+            ).states
+            for action in state.actions
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                owner,
+                "sched_core objects must not declare or override Action::Enqueue or Action::Dequeue",
+            )
+        if not sched_core:
+            continue
+        assert model_object.idle_task is not None
+        idle = resolve_object_expression(model_object.idle_task, name[:-1])
+        if idle is None or not is_task_object(idle):
+            raise _semantic_error(
+                loaded[name[:-1]], owner, "idle_task must reference a Task object"
+            )
+        online = next(
+            (state for state in model_object.states if state.name == ("State", "Online")),
+            None,
+        )
+        if online is None:
+            raise _semantic_error(
+                loaded[name[:-1]], owner, "sched_core object requires State::Online"
+            )
+
+    concrete_tasks = tuple(
+        name for name in expanded_objects if is_task_object(name)
+    )
+    if concrete_tasks:
+        if len(task_types) != 1 or len(task_flow_types) != 1:
+            anchor_name = concrete_tasks[0]
+            raise _semantic_error(
+                loaded[anchor_name[:-1]],
+                object_nodes[anchor_name],
+                "Task scheduling requires exactly one Task type and one TaskFlow type",
+            )
+        for task in concrete_tasks:
+            flows = tuple(
+                name
+                for name, candidate in expanded_objects.items()
+                if is_task_flow_object(name)
+                and candidate.parent is not None
+                and resolve_object_expression(candidate.parent, name[:-1]) == task
+            )
+            if len(flows) != 1:
+                raise _semantic_error(
+                    loaded[task[:-1]],
+                    object_nodes[task],
+                    f"Task object {'::'.join(task)!r} requires exactly one parent TaskFlow; got {len(flows)}",
+                )
 
     def expression_type(
         expression: ModelExpression,
@@ -1229,13 +1398,14 @@ def _expand_inheritance(
             if identifier == "self" and source is not None:
                 return object_type(source)
             if identifier == "CurrentTaskRef":
-                if len(task_ref_types) != 1:
+                task_types = tuple(name for name in raw_types if name[-1] == "Task")
+                if len(task_types) != 1:
                     raise _semantic_error(
                         loaded[module_name],
                         loaded[module_name].tree,
-                        "CurrentTaskRef requires exactly one declared TaskRef type",
+                        "CurrentTaskRef requires exactly one declared Task type",
                     )
-                return (task_ref_types[0], ())
+                return (task_types[0], ())
         access = _flatten_access(expression)
         if (
             access is not None
@@ -1260,6 +1430,9 @@ def _expand_inheritance(
                     ModelTypeExpression(base_type[1][0][0]),
                 ),
             )
+        if is_sched_core_object(name):
+            signatures[(name, ("Action", "Enqueue"))] = ()
+            signatures[(name, ("Action", "Dequeue"))] = ()
         for state in model_object.states:
             for handler in (*state.transitions, *state.actions):
                 key = (name, handler.signal)
@@ -1289,7 +1462,30 @@ def _expand_inheritance(
         fields: dict[str, ModelField],
         owner: Tree,
     ) -> None:
-        signature = signatures.get((signal.target, signal.signal))
+        target_name = resolve_object_expression(signal.target, module_name)
+        if target_name is None:
+            if signal.arguments:
+                raise _semantic_error(
+                    loaded[module_name],
+                    owner,
+                    f"dynamic signal {'::'.join(signal.signal)!r} does not accept arguments",
+                )
+            target_type = expression_type(
+                signal.target, module_name, source, environment, fields
+            )
+            task_types = tuple(name for name in raw_types if name[-1] == "Task")
+            if (
+                target_type is None
+                or len(task_types) != 1
+                or not compatible(target_type, (task_types[0], ()))
+            ):
+                raise _semantic_error(
+                    loaded[module_name],
+                    owner,
+                    "dynamic signal target must have Task type",
+                )
+            return
+        signature = signatures.get((target_name, signal.signal))
         if signature is None:
             if signal.arguments:
                 raise _semantic_error(
@@ -1312,7 +1508,7 @@ def _expand_inheritance(
             actual = expression_type(
                 argument, module_name, source, environment, fields
             )
-            expected = resolve_type(parameter.type, signal.target[:-1])
+            expected = resolve_type(parameter.type, target_name[:-1])
             if actual is None:
                 raise _semantic_error(
                     loaded[module_name],
@@ -1345,8 +1541,70 @@ def _expand_inheritance(
         for state in model_object.states:
             for handler in (*state.transitions, *state.actions):
                 environment = parameter_types(handler.parameters, module_name)
+                selection_count = 0
                 for block in handler.blocks:
+                    if block.kind == "selects":
+                        selection_count += 1
+                        if (
+                            selection_count > 1
+                            or not isinstance(handler, ModelAction)
+                            or not is_sched_core_object(name)
+                        ):
+                            raise _semantic_error(
+                                loaded[module_name],
+                                owner,
+                                "selects is allowed at most once in a sched_core Action handler",
+                            )
+                        assert block.selects is not None
+                        if block.selects in environment:
+                            raise _semantic_error(
+                                loaded[module_name],
+                                owner,
+                                f"selects binding {block.selects!r} conflicts with an existing binding",
+                            )
+                        environment[block.selects] = (task_types[0], ())
+                        continue
                     for signal in block.signals:
+                        flattened_target = _flatten_access(signal.target)
+                        if (
+                            flattened_target is not None
+                            and len(flattened_target[0]) == 1
+                            and not flattened_target[1]
+                        ):
+                            dynamic = flattened_target[0][0]
+                            if dynamic == "CurrentTaskRef":
+                                if not is_sched_core_object(name):
+                                    raise _semantic_error(
+                                        loaded[module_name],
+                                        owner,
+                                        "CurrentTaskRef is only available in a sched_core handler",
+                                    )
+                            elif dynamic not in environment:
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    f"dynamic target binding {dynamic!r} is not in scope",
+                                )
+                        target_name = resolve_object_expression(
+                            signal.target, module_name
+                        )
+                        if (
+                            target_name is not None
+                            and is_sched_core_object(target_name)
+                            and signal.signal in core_actions
+                        ):
+                            if signal.arguments:
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    f"sched_core {'::'.join(signal.signal)} accepts no arguments",
+                                )
+                            if not is_task_object(name):
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "sched_core Enqueue/Dequeue signal source must be a Task object",
+                                )
                         validate_call(
                             signal, module_name, name, environment, fields, owner
                         )
@@ -1392,6 +1650,17 @@ def _expand_inheritance(
                 and str(item.children[0]) == external.name[-1]
             )
             for signal in external.signals:
+                target_name = resolve_object_expression(signal.target, module.name)
+                if (
+                    target_name is not None
+                    and is_sched_core_object(target_name)
+                    and signal.signal in core_actions
+                ):
+                    raise _semantic_error(
+                        owner_module,
+                        owner,
+                        "sched_core Enqueue/Dequeue signal source must be a Task object",
+                    )
                 validate_call(signal, module.name, None, {}, {}, owner)
 
     return tuple(

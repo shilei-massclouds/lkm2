@@ -23,6 +23,7 @@ type_base: ":" type_expression
 ?type_tail: ";" | "{" type_item* "}"
 ?type_item: field_declaration
           | continuation_property
+          | sched_core_property
           | initial_state_property
           | state_declaration
 field_declaration: mutable_marker? IDENTIFIER ":" type_expression field_default? ";"
@@ -35,13 +36,16 @@ object_declaration: "object" IDENTIFIER ":" type_expression "{" object_item* "}"
             | continuation_property
             | parent_property
             | source_property
+            | idle_task_property
             | attrs_declaration
             | state_declaration
             | reference_declaration
 initial_state_property: "initial_state" ":" expression ";"
 continuation_property: "continuation" ":" IDENTIFIER ";"
+sched_core_property: "sched_core" ":" IDENTIFIER ";"
 parent_property: "parent" ":" expression ";"
 source_property: "source" ":" expression ";"
+idle_task_property: "idle_task" ":" expression ";"
 attrs_declaration: "attrs" "{" field_declaration* "}"
 reference_declaration: "reference" IDENTIFIER "{" reference_assignment* "}"
 reference_assignment: assignable_expression "=" expression ";"
@@ -74,6 +78,7 @@ handler_body: "{" handler_item* "}"
              | establishes_block
              | emits_block
              | resumes_statement
+             | selects_statement
              | updates_block
              | deferred_declaration
 depends_on_block: "depends_on" expression_block
@@ -81,6 +86,7 @@ may_change_block: "may_change" expression_block
 drives_block: "drives" signal_body
 yields_statement: "yields" expression ";"
 resumes_statement: "resumes" expression ";"
+selects_statement: "selects" IDENTIFIER ";"
 print_statement: "print" STRING ";"
 panic_statement: "panic" STRING ";"
 ensures_block: "ensures" expression_block

@@ -1,4 +1,4 @@
-"""Strict JSON boundaries for sequence schema v3 and result schema v6."""
+"""Strict JSON boundaries for sequence schema v3 and result schema v7."""
 
 from __future__ import annotations
 
@@ -16,7 +16,10 @@ from .model import (
     DerivationFact,
     DerivationFailure,
     DerivationFrame,
+    DerivationPath,
     DerivationResult,
+    DerivationScheduler,
+    DerivationSelection,
     DerivationSequence,
     DerivationState,
     DerivationUnit,
@@ -266,6 +269,7 @@ def _unit(value: object, path: str) -> DerivationUnit:
                 "emits",
                 "yields",
                 "resumes",
+                "selections",
                 "status",
             }
         ),
@@ -306,11 +310,76 @@ def _unit(value: object, path: str) -> DerivationUnit:
         else _failure(data["failure"], f"{path}.failure"),
         yields=_array(data["yields"], f"{path}.yields", _unit),
         resumes=_array(data["resumes"], f"{path}.resumes", _unit),
+        selections=_array(data["selections"], f"{path}.selections", _selection),
+    )
+
+
+def _selection(value: object, path: str) -> DerivationSelection:
+    data = _object(
+        value,
+        frozenset({"binding", "task", "idle_fallback", "cycle_closed", "after_drives"}),
+        path,
+    )
+    if type(data["idle_fallback"]) is not bool:
+        raise DerivationValidationError(f"{path}.idle_fallback must be a boolean")
+    if type(data["cycle_closed"]) is not bool:
+        raise DerivationValidationError(f"{path}.cycle_closed must be a boolean")
+    return DerivationSelection(
+        _string(data["binding"], f"{path}.binding"),
+        _name(data["task"], f"{path}.task"),
+        data["idle_fallback"],
+        data["cycle_closed"],
+        _integer(data["after_drives"], f"{path}.after_drives"),
+    )
+
+
+def _scheduler(value: object, path: str) -> DerivationScheduler:
+    data = _object(
+        value,
+        frozenset({"scheduler", "idle_task", "current_task", "runq"}),
+        path,
+    )
+    return DerivationScheduler(
+        _name(data["scheduler"], f"{path}.scheduler"),
+        _name(data["idle_task"], f"{path}.idle_task"),
+        _name(data["current_task"], f"{path}.current_task"),
+        _array(data["runq"], f"{path}.runq", _name),
+    )
+
+
+def _path(value: object, path: str) -> DerivationPath:
+    data = _object(
+        value,
+        frozenset(
+            {
+                "status",
+                "units",
+                "final_state",
+                "facts",
+                "continuations",
+                "final_values",
+                "schedulers",
+            }
+        ),
+        path,
+        frozenset({"failure"}),
+    )
+    return DerivationPath(
+        status=_string(data["status"], f"{path}.status"),
+        units=_array(data["units"], f"{path}.units", _unit),
+        final_state=_array(data["final_state"], f"{path}.final_state", _state),
+        facts=_array(data["facts"], f"{path}.facts", _fact),
+        failure=None
+        if "failure" not in data
+        else _failure(data["failure"], f"{path}.failure"),
+        continuations=_array(data["continuations"], f"{path}.continuations", _continuation),
+        final_values=_array(data["final_values"], f"{path}.final_values", _value),
+        schedulers=_array(data["schedulers"], f"{path}.schedulers", _scheduler),
     )
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v6 result document."""
+    """Load and strictly validate one schema-v7 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -319,29 +388,15 @@ def load_derivation_result(stream: TextIO) -> DerivationResult:
             {
                 "schema_version",
                 "status",
-                "units",
-                "final_state",
-                "facts",
-                "continuations",
-                "final_values",
+                "paths",
             }
         ),
         "document",
-        frozenset({"failure"}),
     )
     return DerivationResult(
         schema_version=_integer(document["schema_version"], "schema_version"),
         status=_string(document["status"], "status"),
-        units=_array(document["units"], "units", _unit),
-        final_state=_array(document["final_state"], "final_state", _state),
-        facts=_array(document["facts"], "facts", _fact),
-        failure=None
-        if "failure" not in document
-        else _failure(document["failure"], "failure"),
-        continuations=_array(
-            document["continuations"], "continuations", _continuation
-        ),
-        final_values=_array(document["final_values"], "final_values", _value),
+        paths=_array(document["paths"], "paths", _path),
     )
 
 
@@ -417,6 +472,16 @@ def _unit_data(unit: DerivationUnit) -> dict[str, Any]:
         "emits": [_unit_data(item) for item in unit.emits],
         "yields": [_unit_data(item) for item in unit.yields],
         "resumes": [_unit_data(item) for item in unit.resumes],
+        "selections": [
+            {
+                "binding": item.binding,
+                "task": list(item.task),
+                "idle_fallback": item.idle_fallback,
+                "cycle_closed": item.cycle_closed,
+                "after_drives": item.after_drives,
+            }
+            for item in unit.selections
+        ],
         "status": unit.status,
     }
     if unit.failure is not None:
@@ -441,39 +506,55 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v6 derivation result followed by a newline."""
+    """Write one canonical schema-v7 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")
+    def path_data(path: DerivationPath) -> dict[str, Any]:
+        data: dict[str, Any] = {
+            "status": path.status,
+            "units": [_unit_data(unit) for unit in path.units],
+            "final_state": [
+                {
+                    "object": list(item.object),
+                    "state": None if item.state is None else list(item.state),
+                }
+                for item in path.final_state
+            ],
+            "facts": [
+                {"predicate": list(item.predicate), "arguments": list(item.arguments)}
+                for item in path.facts
+            ],
+            "continuations": [
+                _continuation_data(item) for item in path.continuations
+            ],
+            "final_values": [
+                {
+                    "object": list(item.object),
+                    "field": item.field,
+                    "values": [list(value) for value in item.values],
+                    "collection": item.collection,
+                }
+                for item in path.final_values
+            ],
+            "schedulers": [
+                {
+                    "scheduler": list(item.scheduler),
+                    "idle_task": list(item.idle_task),
+                    "current_task": list(item.current_task),
+                    "runq": [list(task) for task in item.runq],
+                }
+                for item in path.schedulers
+            ],
+        }
+        if path.failure is not None:
+            data["failure"] = _failure_data(path.failure)
+        return data
+
     data: dict[str, Any] = {
         "schema_version": result.schema_version,
         "status": result.status,
-        "units": [_unit_data(unit) for unit in result.units],
-        "final_state": [
-            {
-                "object": list(item.object),
-                "state": None if item.state is None else list(item.state),
-            }
-            for item in result.final_state
-        ],
-        "facts": [
-            {"predicate": list(item.predicate), "arguments": list(item.arguments)}
-            for item in result.facts
-        ],
-        "continuations": [
-            _continuation_data(item) for item in result.continuations
-        ],
-        "final_values": [
-            {
-                "object": list(item.object),
-                "field": item.field,
-                "values": [list(value) for value in item.values],
-                "collection": item.collection,
-            }
-            for item in result.final_values
-        ],
+        "paths": [path_data(path) for path in result.paths],
     }
-    if result.failure is not None:
-        data["failure"] = _failure_data(result.failure)
     json.dump(data, stream, ensure_ascii=False, indent=2, sort_keys=True)
     stream.write("\n")

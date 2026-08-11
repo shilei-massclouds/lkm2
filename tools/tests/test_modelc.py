@@ -45,6 +45,16 @@ def _signal(
     return ModelSignal(source, target, ("Transition", name), mode)
 
 
+def _target_name(expression: ModelExpression) -> tuple[str, ...]:
+    parts: list[str] = []
+    cursor = expression
+    while cursor.kind == "path":
+        parts.append(str(cursor.value))
+        cursor = cursor.children[0]
+    parts.append(str(cursor.value))
+    return tuple(reversed(parts))
+
+
 def _block(kind: str, *signals: ModelSignal) -> ModelHandlerBlock:
     return ModelHandlerBlock(kind, signals=signals)
 
@@ -502,7 +512,7 @@ boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
 EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.spec"))(
-    schema_version=7,
+    schema_version=8,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -888,7 +898,7 @@ class ParserAndCompilerTests(unittest.TestCase):
         self.assertEqual(kernel_init_phase.name, kernel_init_phase_path)
         self.assertEqual(user_run_phase.name, user_run_phase_path)
         driven = tuple(
-            signal.target
+            _target_name(signal.target)
             for block in kernel_init_flow.states[0].actions[0].blocks
             if block.kind == "resumes"
             for signal in block.signals
@@ -899,7 +909,7 @@ class ParserAndCompilerTests(unittest.TestCase):
         self.assertEqual(printed.expressions, (ModelExpression("string", "kernel init"),))
         yielded = user_run_phase.states[0].actions[0].blocks[0]
         self.assertEqual(yielded.kind, "yields")
-        self.assertEqual(yielded.signals[0].target, cpu0_scheduler_path)
+        self.assertEqual(_target_name(yielded.signals[0].target), cpu0_scheduler_path)
         self.assertEqual(yielded.signals[0].signal, ("Action", "Schedule"))
 
     def test_real_phase_type_and_arch_head_override_are_preserved(self) -> None:
@@ -1349,7 +1359,7 @@ class ParserAndCompilerTests(unittest.TestCase):
             model = compile_spec(entry_path)
 
         self.assertEqual(
-            model.externals[0].signals[0].target,
+            _target_name(model.externals[0].signals[0].target),
             ("root", "child", "Computer"),
         )
 
@@ -1670,7 +1680,10 @@ class ParserAndCompilerTests(unittest.TestCase):
         source = next(item for item in model.objects if item.name[-1] == "Source")
         blocks = source.states[0].actions[0].blocks
         self.assertEqual(
-            tuple((block.kind, block.signals[0].target[-1]) for block in blocks),
+            tuple(
+                (block.kind, _target_name(block.signals[0].target)[-1])
+                for block in blocks
+            ),
             (("drives", "Target"),) * 2 + (("emits", "Target"),) * 2,
         )
 
@@ -1860,7 +1873,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_invalid_documents_are_rejected(self) -> None:
         wrong_version = json.loads(EXPECTED_JSON)
-        wrong_version["schema_version"] = 3
+        wrong_version["schema_version"] = 7
         unknown_field = json.loads(EXPECTED_JSON)
         unknown_field["extra"] = 0
         duplicate_module = json.loads(EXPECTED_JSON)
@@ -1870,7 +1883,13 @@ class ModelIRJSONTests(unittest.TestCase):
         computer["types"].append(computer["types"][0])
         unknown_signal_target = json.loads(EXPECTED_JSON)
         human = _json_module(unknown_signal_target, "systems", "human")
-        human["externals"][0]["signals"][0]["target"] = ["missing", "Object"]
+        human["externals"][0]["signals"][0]["target"] = {
+            "kind": "path",
+            "value": "Object",
+            "children": [
+                {"kind": "identifier", "value": "missing", "children": []}
+            ],
+        }
         invalid_signal_prefix = json.loads(EXPECTED_JSON)
         human = _json_module(invalid_signal_prefix, "systems", "human")
         human["externals"][0]["signals"][0]["signal"] = ["Effect", "Preset"]
@@ -1882,9 +1901,9 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(duplicate_declaration),
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
-            EXPECTED_JSON.replace('"schema_version": 7', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 8', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":7,"schema_version":7}',
+            '{"schema_version":8,"schema_version":8}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -1893,7 +1912,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=7,
+            schema_version=8,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -1901,14 +1920,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=7,
+                schema_version=8,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=7,
+                schema_version=8,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

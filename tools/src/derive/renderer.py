@@ -1,11 +1,11 @@
-"""Stable human rendering for schema-v6 derivation results."""
+"""Stable human rendering for schema-v7 multi-path derivation results."""
 
 from __future__ import annotations
 
 import unicodedata
 from typing import TextIO
 
-from .model import DerivationResult, DerivationUnit
+from .model import DerivationPath, DerivationResult, DerivationUnit
 from model_ir import ModelExpression
 
 
@@ -18,9 +18,9 @@ def _all_units(units: tuple[DerivationUnit, ...]):
         yield from _all_units(unit.resumes)
 
 
-def _shortest_names(result: DerivationResult) -> dict[tuple[str, ...], str]:
-    names = {item.object for item in result.final_state}
-    for unit in _all_units(result.units):
+def _shortest_names(path: DerivationPath) -> dict[tuple[str, ...], str]:
+    names = {item.object for item in path.final_state}
+    for unit in _all_units(path.units):
         names.add(unit.event.source)
         names.add(unit.event.target)
     ordered = tuple(sorted(names))
@@ -105,8 +105,18 @@ def _render_unit(
         f"{event.mode}s {'::'.join(event.signal)}{arguments}"
     ]
     lines.append(f"{detail_indent}current state: {_special(unit.state_before)}")
-    for child in unit.drives:
-        lines.extend(_render_unit(child, depth + 1, names))
+    for drive_index in range(len(unit.drives) + 1):
+        for selection in unit.selections:
+            if selection.after_drives != drive_index:
+                continue
+            fallback = " (idle fallback)" if selection.idle_fallback else ""
+            closed = " [cycle closed]" if selection.cycle_closed else ""
+            lines.append(
+                f"{detail_indent}selects {selection.binding} = "
+                f"{names[selection.task]}{fallback}{closed}"
+            )
+        if drive_index < len(unit.drives):
+            lines.extend(_render_unit(unit.drives[drive_index], depth + 1, names))
     for child in unit.yields:
         lines.extend(_render_unit(child, depth + 1, names))
     for directive in unit.directives:
@@ -114,7 +124,7 @@ def _render_unit(
         lines.append(
             f"{detail_indent}{directive.kind}: {_single_line(directive.message)}{marker}"
         )
-    if unit.status == "passed":
+    if unit.status in {"passed", "cycle_closed"}:
         committed = (
             "unchanged"
             if event.signal[0] == "Action"
@@ -139,19 +149,25 @@ def render_derivation_result(result: DerivationResult, stream: TextIO) -> None:
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")
-    names = _shortest_names(result)
     lines: list[str] = []
-    if result.units:
-        for index, unit in enumerate(result.units):
-            if index:
-                lines.append("")
-            lines.extend(_render_unit(unit, 0, names))
-    elif result.failure is not None:
-        features = ", ".join(result.failure.features)
-        label = result.failure.message
-        if features:
-            label = f"{label}: {features}"
-        lines.append(f"{label} ✗")
+    multiple = len(result.paths) > 1
+    for path_index, path in enumerate(result.paths):
+        if path_index:
+            lines.append("")
+        if multiple:
+            lines.append(f"Path {path_index + 1} [{path.status}]")
+        names = _shortest_names(path)
+        if path.units:
+            for index, unit in enumerate(path.units):
+                if index:
+                    lines.append("")
+                lines.extend(_render_unit(unit, 0, names))
+        elif path.failure is not None:
+            features = ", ".join(path.failure.features)
+            label = path.failure.message
+            if features:
+                label = f"{label}: {features}"
+            lines.append(f"{label} ✗")
     if lines:
         lines.append("")
     lines.append(
@@ -159,7 +175,9 @@ def render_derivation_result(result: DerivationResult, stream: TextIO) -> None:
         if result.status == "passed"
         else "Derivation yielded!"
         if result.status == "yielded"
-        else f"stopped: {result.status}"
+        else f"stopped: {result.paths[0].status}"
+        if len(result.paths) == 1
+        else "Derivation failed!"
     )
     stream.write("\n".join(lines))
     stream.write("\n")

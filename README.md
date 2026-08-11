@@ -23,6 +23,8 @@ make clean
 
 当前这些目标委托给 `tools/Makefile`；后续增加其他组件时，根 Makefile 将继续负责组合各组件目标。组件特有的安装、运行和测试方式不在根 README 重复说明。
 
-当前默认推导会完成 CPU0 Scheduler 初始化，把 `KernelInitTaskRef` 放入
-`Cpu0RunQ`，随后在首次 `Action::Schedule` 的占位 `panic "impl sched"` 停止；
-因此 `tools/bin/derive`/`make run` 当前预期返回失败状态，详细因果输出见工具说明。
+当前默认推导会完成 CPU0 Scheduler 初始化，把 `KernelInitTask` 放入推导器维护的
+隐藏 runq，并完整执行 Suspend、任务选择、Resume、Dequeue 与 TaskFlow 恢复。
+最终 CPU0 current Task 为 `KernelInitTask`、runq 为空，BootHandoff 保留可恢复的
+yielded continuation；`tools/bin/derive`/`make run` 因而正常返回 0。详细语义与
+因果输出见工具说明。

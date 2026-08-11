@@ -1,63 +1,70 @@
 {
-  "continuations": [],
-  "facts": [],
-  "final_state": [
+  "paths": [
     {
-      "object": [
-        "root",
-        "Computer"
+      "continuations": [],
+      "facts": [],
+      "final_state": [
+        {
+          "object": [
+            "root",
+            "Computer"
+          ],
+          "state": [
+            "State",
+            "Idle"
+          ]
+        }
       ],
-      "state": [
-        "State",
-        "Idle"
+      "final_values": [],
+      "schedulers": [],
+      "status": "passed",
+      "units": [
+        {
+          "candidate_state": null,
+          "depends_on": [],
+          "directives": [],
+          "drives": [],
+          "emits": [],
+          "ensures": [],
+          "establishes": [],
+          "event": {
+            "arguments": [],
+            "mode": "drive",
+            "signal": [
+              "Action",
+              "Refresh"
+            ],
+            "source": [
+              "root",
+              "Human"
+            ],
+            "target": [
+              "root",
+              "Computer"
+            ]
+          },
+          "handler": [
+            "Action",
+            "Refresh"
+          ],
+          "invariants": [],
+          "kind": "root",
+          "resumes": [],
+          "selections": [],
+          "state_after": [
+            "State",
+            "Idle"
+          ],
+          "state_before": [
+            "State",
+            "Idle"
+          ],
+          "status": "passed",
+          "yields": []
+        }
       ]
     }
   ],
-  "final_values": [],
-  "schema_version": 6,
-  "status": "passed",
-  "units": [
-    {
-      "candidate_state": null,
-      "depends_on": [],
-      "directives": [],
-      "drives": [],
-      "emits": [],
-      "ensures": [],
-      "establishes": [],
-      "event": {
-        "arguments": [],
-        "mode": "drive",
-        "signal": [
-          "Action",
-          "Refresh"
-        ],
-        "source": [
-          "root",
-          "Human"
-        ],
-        "target": [
-          "root",
-          "Computer"
-        ]
-      },
-      "handler": [
-        "Action",
-        "Refresh"
-      ],
-      "invariants": [],
-      "kind": "root",
-      "resumes": [],
-      "state_after": [
-        "State",
-        "Idle"
-      ],
-      "state_before": [
-        "State",
-        "Idle"
-      ],
-      "status": "passed",
-      "yields": []
-    }
-  ]
+  "schema_version": 7,
+  "status": "passed"
 }

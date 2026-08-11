@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v7."""
+"""Frozen data model and semantic validation for Model IR schema v8."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -26,6 +26,7 @@ _BLOCK_KINDS = frozenset(
         "print",
         "panic",
         "deferred",
+        "selects",
     }
 )
 _SIGNAL_MODES = frozenset({"drive", "emit", "yield", "resume"})
@@ -90,6 +91,20 @@ def _validate_signal_name(value: tuple[str, ...], path: str) -> None:
         raise ModelIRValidationError(
             f"{path} must use canonical signal {'::'.join(canonical)}"
         )
+
+
+def _expression_access(
+    expression: ModelExpression,
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    if expression.kind == "identifier":
+        return (str(expression.value),), ()
+    if expression.kind not in {"member", "path"}:
+        return None
+    base = _expression_access(expression.children[0])
+    if base is None:
+        return None
+    names, operations = base
+    return names + (str(expression.value),), operations + (expression.kind,)
 
 
 @dataclass(frozen=True, slots=True)
@@ -241,6 +256,7 @@ class ModelType:
     continuation: bool = False
     initial_state: tuple[str, ...] | None = None
     states: tuple[ModelState, ...] = ()
+    sched_core: bool = False
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.name, "type.name")
@@ -252,6 +268,8 @@ class ModelType:
             )
         if type(self.continuation) is not bool:
             raise ModelIRValidationError("type.continuation must be a boolean")
+        if type(self.sched_core) is not bool:
+            raise ModelIRValidationError("type.sched_core must be a boolean")
         if self.fields is not None:
             _validate_tuple(self.fields, ModelField, "type.fields")
             names = [field.name for field in self.fields]
@@ -271,18 +289,25 @@ class ModelType:
 @dataclass(frozen=True, slots=True)
 class ModelSignal:
     source: tuple[str, ...]
-    target: tuple[str, ...]
+    target: ModelExpression
     signal: tuple[str, ...]
     mode: str
     arguments: tuple[ModelExpression, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.source, "signal.source")
-        _validate_qualified_name(self.target, "signal.target")
+        if type(self.target) is tuple:
+            _validate_qualified_name(self.target, "signal.target")
+            result = ModelExpression("identifier", self.target[0])
+            for part in self.target[1:]:
+                result = ModelExpression("path", part, (result,))
+            object.__setattr__(self, "target", result)
+        if not isinstance(self.target, ModelExpression):
+            raise ModelIRValidationError("signal.target must be a ModelExpression")
         _validate_signal_name(self.signal, "signal.signal")
-        if len(self.source) < 2 or len(self.target) < 2:
+        if len(self.source) < 2:
             raise ModelIRValidationError(
-                "signal source and target must be absolute declaration names"
+                "signal source must be an absolute declaration name"
             )
         if self.mode not in _SIGNAL_MODES:
             raise ModelIRValidationError(
@@ -333,6 +358,7 @@ class ModelHandlerBlock:
     signals: tuple[ModelSignal, ...] = ()
     deferred: ModelDeferred | None = None
     updates: tuple[ModelUpdate, ...] = ()
+    selects: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _BLOCK_KINDS:
@@ -340,8 +366,10 @@ class ModelHandlerBlock:
         _validate_tuple(self.expressions, ModelExpression, "handler_block.expressions")
         _validate_tuple(self.signals, ModelSignal, "handler_block.signals")
         _validate_tuple(self.updates, ModelUpdate, "handler_block.updates")
+        if self.selects is not None:
+            _validate_identifier(self.selects, "handler_block.selects")
         if self.kind in {"drives", "yields", "emits", "resumes"}:
-            if self.expressions or self.deferred is not None or self.updates:
+            if self.expressions or self.deferred is not None or self.updates or self.selects is not None:
                 raise ModelIRValidationError(f"{self.kind} block may only contain signals")
             expected_mode = {
                 "drives": "drive",
@@ -352,13 +380,18 @@ class ModelHandlerBlock:
             if any(signal.mode != expected_mode for signal in self.signals):
                 raise ModelIRValidationError(f"{self.kind} block has a mismatched signal mode")
         elif self.kind == "deferred":
-            if self.expressions or self.signals or self.deferred is None or self.updates:
+            if self.expressions or self.signals or self.deferred is None or self.updates or self.selects is not None:
                 raise ModelIRValidationError("deferred block must contain one deferred declaration")
         elif self.kind == "updates":
-            if self.expressions or self.signals or self.deferred is not None:
+            if self.expressions or self.signals or self.deferred is not None or self.selects is not None:
                 raise ModelIRValidationError("updates block may only contain updates")
+        elif self.kind == "selects":
+            if self.expressions or self.signals or self.deferred is not None or self.updates or self.selects is None:
+                raise ModelIRValidationError(
+                    "selects block must contain exactly one binding"
+                )
         elif self.kind in {"print", "panic"}:
-            if self.signals or self.deferred is not None or self.updates:
+            if self.signals or self.deferred is not None or self.updates or self.selects is not None:
                 raise ModelIRValidationError(
                     f"{self.kind} block may only contain one string expression"
                 )
@@ -366,7 +399,7 @@ class ModelHandlerBlock:
                 raise ModelIRValidationError(
                     f"{self.kind} block requires exactly one string expression"
                 )
-        elif self.signals or self.deferred is not None or self.updates:
+        elif self.signals or self.deferred is not None or self.updates or self.selects is not None:
             raise ModelIRValidationError(f"{self.kind} block may only contain expressions")
 
 
@@ -494,6 +527,7 @@ class ModelObject:
     states: tuple[ModelState, ...]
     references: tuple[ModelReference, ...]
     continuation: bool = False
+    idle_task: ModelExpression | None = None
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.name, "object.name")
@@ -501,6 +535,12 @@ class ModelObject:
             raise ModelIRValidationError("object.base_type must be a ModelTypeExpression")
         if type(self.continuation) is not bool:
             raise ModelIRValidationError("object.continuation must be a boolean")
+        if self.idle_task is not None and not isinstance(
+            self.idle_task, ModelExpression
+        ):
+            raise ModelIRValidationError(
+                "object.idle_task must be a ModelExpression or null"
+            )
         if self.initial_state is not None:
             _validate_special_name(self.initial_state, "State", "object.initial_state")
         for path, expression in (("object.parent", self.parent), ("object.source", self.source)):
@@ -613,6 +653,72 @@ class ModelIR:
             item.name: item for module in ordered for item in module.objects
         }
         objects = set(object_items)
+        type_items = {
+            item.name: item for module in ordered for item in module.types
+        }
+
+        def static_target(expression: ModelExpression) -> tuple[str, ...] | None:
+            access = _expression_access(expression)
+            if access is None or not access[0] or any(
+                operation != "path" for operation in access[1]
+            ):
+                return None
+            raw = access[0]
+            if raw in object_items:
+                return raw
+            matches = tuple(
+                name for name in object_items if name[-len(raw) :] == raw
+            )
+            return matches[0] if len(matches) == 1 else None
+
+        def resolve_type_name(
+            expression: ModelTypeExpression, module: tuple[str, ...]
+        ) -> tuple[str, ...] | None:
+            candidates = (expression.name, module + expression.name)
+            for candidate in candidates:
+                if candidate in type_items:
+                    return candidate
+            matches = tuple(
+                name
+                for name in type_items
+                if name[-len(expression.name) :] == expression.name
+            )
+            return matches[0] if len(matches) == 1 else None
+
+        def object_has_type(model_object: ModelObject, suffix: str) -> bool:
+            current = resolve_type_name(
+                model_object.base_type, model_object.name[:-1]
+            )
+            seen: set[tuple[str, ...]] = set()
+            while current is not None and current not in seen:
+                seen.add(current)
+                if current[-1] == suffix:
+                    return True
+                base = type_items[current].base_type
+                current = (
+                    None
+                    if base is None
+                    else resolve_type_name(base, current[:-1])
+                )
+            return False
+
+        def object_is_sched_core(model_object: ModelObject) -> bool:
+            current = resolve_type_name(
+                model_object.base_type, model_object.name[:-1]
+            )
+            seen: set[tuple[str, ...]] = set()
+            while current is not None and current not in seen:
+                seen.add(current)
+                if type_items[current].sched_core:
+                    return True
+                base = type_items[current].base_type
+                current = (
+                    None
+                    if base is None
+                    else resolve_type_name(base, current[:-1])
+                )
+            return False
+
         externals = {item.name for module in ordered for item in module.externals}
         if self.entry.origin not in externals:
             raise ModelIRValidationError(
@@ -643,6 +749,18 @@ class ModelIR:
                         "exactly initial_state State::Online, one State::Online, "
                         "and no transitions"
                     )
+                if model_type.sched_core and any(
+                    action.signal in {
+                        ("Action", "Enqueue"),
+                        ("Action", "Dequeue"),
+                    }
+                    for state in model_type.states
+                    for action in state.actions
+                ):
+                    raise ModelIRValidationError(
+                        f"sched_core type {'.'.join(model_type.name)!r} must not "
+                        "declare Action::Enqueue or Action::Dequeue"
+                    )
                 type_state_set = set(type_state_names)
                 for state in model_type.states:
                     for transition in state.transitions:
@@ -657,11 +775,21 @@ class ModelIR:
                             )
             for external in module.externals:
                 for signal in external.signals:
-                    if signal.target not in objects:
+                    target_name = static_target(signal.target)
+                    if target_name not in objects:
                         raise ModelIRValidationError(
-                            f"signal targets unknown object {'.'.join(signal.target)!r}"
+                            "external signal target must resolve to a declared object"
                         )
-                    target = object_items[signal.target]
+                    assert target_name is not None
+                    target = object_items[target_name]
+                    if (
+                        object_is_sched_core(target)
+                        and signal.signal
+                        in {("Action", "Enqueue"), ("Action", "Dequeue")}
+                    ):
+                        raise ModelIRValidationError(
+                            "external sources cannot call sched_core Enqueue/Dequeue"
+                        )
                     if signal.mode == "resume" and (
                         not target.continuation
                         or signal.signal != ("Action", "Enter")
@@ -684,6 +812,40 @@ class ModelIR:
                     )
                 state_names = tuple(state.name for state in model_object.states)
                 state_name_set = set(state_names)
+                sched_core = object_is_sched_core(model_object)
+                idle_name = (
+                    None
+                    if model_object.idle_task is None
+                    else static_target(model_object.idle_task)
+                )
+                if sched_core and idle_name is None:
+                    raise ModelIRValidationError(
+                        f"sched_core object {'.'.join(model_object.name)!r} requires idle_task"
+                    )
+                if not sched_core and model_object.idle_task is not None:
+                    raise ModelIRValidationError(
+                        f"non-sched_core object {'.'.join(model_object.name)!r} must not have idle_task"
+                    )
+                if idle_name is not None and (
+                    idle_name not in object_items
+                    or not object_has_type(object_items[idle_name], "Task")
+                ):
+                    raise ModelIRValidationError(
+                        f"idle_task on {'.'.join(model_object.name)!r} must reference a Task object"
+                    )
+                if sched_core and ("State", "Online") not in state_name_set:
+                    raise ModelIRValidationError(
+                        f"sched_core object {'.'.join(model_object.name)!r} requires State::Online"
+                    )
+                if sched_core and any(
+                    action.signal
+                    in {("Action", "Enqueue"), ("Action", "Dequeue")}
+                    for state in model_object.states
+                    for action in state.actions
+                ):
+                    raise ModelIRValidationError(
+                        f"sched_core object {'.'.join(model_object.name)!r} must not declare core queue actions"
+                    )
                 if state_names and model_object.initial_state is None:
                     raise ModelIRValidationError(
                         f"stateful object {'.'.join(model_object.name)!r} requires initial_state"
@@ -738,17 +900,73 @@ class ModelIR:
                                 f"transition in {'.'.join(model_object.name)!r} targets "
                                 f"unknown state {'::'.join(handler.target_state)!r}"
                             )
+                        selected_bindings: set[str] = set()
+                        selection_count = 0
                         for block in handler.blocks:
+                            if block.kind == "selects":
+                                selection_count += 1
+                                if (
+                                    selection_count > 1
+                                    or not sched_core
+                                    or not isinstance(handler, ModelAction)
+                                ):
+                                    raise ModelIRValidationError(
+                                        "selects is allowed at most once in a sched_core Action handler"
+                                    )
+                                assert block.selects is not None
+                                if block.selects in {
+                                    parameter.name
+                                    for parameter in handler.parameters
+                                }:
+                                    raise ModelIRValidationError(
+                                        "selects binding conflicts with a handler parameter"
+                                    )
+                                selected_bindings.add(block.selects)
+                                continue
                             for signal in block.signals:
                                 if signal.source != model_object.name:
                                     raise ModelIRValidationError(
                                         f"handler in {'.'.join(model_object.name)!r} contains a signal with another source"
                                     )
-                                if signal.target not in objects:
+                                target_name = static_target(signal.target)
+                                dynamic = (
+                                    signal.target.kind == "identifier"
+                                    and signal.target.value
+                                    in {"CurrentTaskRef", *selected_bindings}
+                                )
+                                if target_name is None and not dynamic:
                                     raise ModelIRValidationError(
-                                        f"signal targets unknown object {'.'.join(signal.target)!r}"
+                                        "dynamic signal target is not in scope"
                                     )
-                                target = object_items[signal.target]
+                                if dynamic:
+                                    if not sched_core or signal.arguments:
+                                        raise ModelIRValidationError(
+                                            "dynamic Task signal targets require a sched_core handler and no arguments"
+                                        )
+                                    continue
+                                assert target_name is not None
+                                if target_name not in objects:
+                                    raise ModelIRValidationError(
+                                        "signal targets unknown object"
+                                    )
+                                target = object_items[target_name]
+                                if (
+                                    object_is_sched_core(target)
+                                    and signal.signal
+                                    in {
+                                        ("Action", "Enqueue"),
+                                        ("Action", "Dequeue"),
+                                    }
+                                    and (
+                                        signal.arguments
+                                        or not object_has_type(
+                                            model_object, "Task"
+                                        )
+                                    )
+                                ):
+                                    raise ModelIRValidationError(
+                                        "sched_core Enqueue/Dequeue accepts no arguments and requires a Task source"
+                                    )
                                 if signal.mode == "resume" and (
                                     not target.continuation
                                     or signal.signal != ("Action", "Enter")
@@ -762,7 +980,7 @@ class ModelIR:
                                     and signal.signal == ("Action", "Enter")
                                 ) and not (
                                     signal.signal[0] == "Action"
-                                    and signal.source == signal.target
+                                    and signal.source == target_name
                                     and signal.mode == "drive"
                                 ):
                                     raise ModelIRValidationError(
@@ -777,6 +995,26 @@ class ModelIR:
                                         "yields is only allowed in a continuation "
                                         "Action handler"
                                     )
+        tasks = tuple(
+            item for item in object_items.values() if object_has_type(item, "Task")
+        )
+        task_flows = tuple(
+            item
+            for item in object_items.values()
+            if object_has_type(item, "TaskFlow")
+        )
+        if tasks or task_flows:
+            for task in tasks:
+                parents = tuple(
+                    flow
+                    for flow in task_flows
+                    if flow.parent is not None
+                    and static_target(flow.parent) == task.name
+                )
+                if len(parents) != 1:
+                    raise ModelIRValidationError(
+                        f"Task object {'.'.join(task.name)!r} requires exactly one parent TaskFlow; got {len(parents)}"
+                    )
         object.__setattr__(self, "modules", ordered)
 
     @property

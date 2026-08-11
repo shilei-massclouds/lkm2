@@ -78,7 +78,7 @@ class ModelDirectiveTests(unittest.TestCase):
             tuple(action.blocks[0].kind for action in actions), ("print", "panic")
         )
 
-    def test_directives_lower_to_strict_model_ir_v7_blocks(self) -> None:
+    def test_directives_lower_to_strict_model_ir_v8_blocks(self) -> None:
         directory, _, model = _compile_text(
             """
             object Computer: T {
@@ -91,7 +91,7 @@ class ModelDirectiveTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         blocks = model.objects[0].states[0].actions[0].blocks
-        self.assertEqual(model.schema_version, 7)
+        self.assertEqual(model.schema_version, 8)
         self.assertEqual(tuple(block.kind for block in blocks), ("print", "panic"))
         self.assertEqual(
             tuple(block.expressions[0].value for block in blocks), ("你好", "停止")
@@ -100,7 +100,7 @@ class ModelDirectiveTests(unittest.TestCase):
         output = StringIO()
         dump_model_ir(model, output)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 7)
+        self.assertEqual(document["schema_version"], 8)
         self.assertEqual(load_model_ir(StringIO(output.getvalue())), model)
 
         action = document["modules"][0]["objects"][0]["states"][0]["actions"][0]
@@ -216,16 +216,16 @@ class DerivationDirectiveTests(unittest.TestCase):
         serialized = StringIO()
         dump_derivation_result(result, serialized)
         document = json.loads(serialized.getvalue())
-        self.assertEqual(document["schema_version"], 6)
+        self.assertEqual(document["schema_version"], 7)
         self.assertEqual(load_derivation_result(StringIO(serialized.getvalue())), result)
 
         missing_directives = json.loads(serialized.getvalue())
-        del missing_directives["units"][0]["directives"]
+        del missing_directives["paths"][0]["units"][0]["directives"]
         with self.assertRaises(DerivationValidationError):
             load_derivation_result(StringIO(json.dumps(missing_directives)))
 
         invalid_directive = json.loads(serialized.getvalue())
-        invalid_directive["units"][0]["directives"][0]["kind"] = "unknown"
+        invalid_directive["paths"][0]["units"][0]["directives"][0]["kind"] = "unknown"
         with self.assertRaises(DerivationValidationError):
             load_derivation_result(StringIO(json.dumps(invalid_directive)))
 
@@ -255,7 +255,8 @@ class DerivationDirectiveTests(unittest.TestCase):
         result = derive(model, default_derivation_sequence(model))
         unit = result.units[0]
         states = {item.object[-1]: item.state for item in result.final_state}
-        self.assertEqual(result.status, "panic")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "panic")
         self.assertEqual(result.failure.message, "boom")
         self.assertEqual(result.failure.path, "units[0].directives[0]")
         self.assertEqual(unit.status, "panic")
@@ -321,7 +322,8 @@ class DerivationDirectiveTests(unittest.TestCase):
         result = derive(model, default_derivation_sequence(model))
         unit = result.units[0]
         states = {item.object[-1]: item.state for item in result.final_state}
-        self.assertEqual(result.status, "panic")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "panic")
         self.assertEqual(len(unit.drives), 1)
         self.assertEqual(unit.drives[0].event.target[-1], "First")
         self.assertEqual(states["First"], ("State", "Done"))
@@ -383,7 +385,8 @@ class DerivationDirectiveTests(unittest.TestCase):
             for unit in _all_units(result.units)
             for directive in unit.directives
         )
-        self.assertEqual(result.status, "panic")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "panic")
         self.assertEqual(
             directives,
             (

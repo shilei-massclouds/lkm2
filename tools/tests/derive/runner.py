@@ -216,7 +216,8 @@ class EngineTests(unittest.TestCase):
         model = compile_spec(case / "main.spec")
         result = derive(model, default_derivation_sequence(model))
         states = {item.object[-1]: item.state for item in result.final_state}
-        self.assertEqual(result.status, "unhandled_signal")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "unhandled_signal")
         self.assertEqual(states["First"], ("State", "Done"))
         self.assertEqual(states["Second"], ("State", "Idle"))
         self.assertEqual(states["Parent"], ("State", "Idle"))
@@ -422,7 +423,8 @@ class EngineTests(unittest.TestCase):
         result = derive(model, default_derivation_sequence(model))
         states = {item.object[-1]: item.state for item in result.final_state}
         unit = result.units[0]
-        self.assertEqual(result.status, "invariant_failed")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "invariant_failed")
         self.assertEqual(result.failure.path, "units[0].invariants[0]")
         self.assertEqual(result.facts, ())
         self.assertEqual(unit.emits, ())
@@ -455,7 +457,8 @@ class EngineTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
-        self.assertEqual(result.status, "unhandled_signal")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "unhandled_signal")
         self.assertEqual(result.failure.path, "units[0].handler")
         self.assertIsNone(result.units[0].handler)
         self.assertIsNone(result.units[0].candidate_state)
@@ -586,7 +589,8 @@ class EngineTests(unittest.TestCase):
         root = result.units[0]
         facts = {item.predicate[-1] for item in result.facts}
         states = {item.object[-1]: item.state for item in result.final_state}
-        self.assertEqual(result.status, "invariant_failed")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "invariant_failed")
         self.assertEqual(root.status, "passed")
         self.assertEqual(len(root.emits), 2)
         self.assertEqual(root.emits[0].status, "passed")
@@ -619,7 +623,8 @@ class EngineTests(unittest.TestCase):
         case = CASES_DIRECTORY / "13-invariant-rollback"
         model = compile_spec(case / "main.spec")
         result = derive(model, default_derivation_sequence(model))
-        self.assertEqual(result.status, "invariant_failed")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "invariant_failed")
         self.assertEqual(result.final_state[0].state, ("State", "Idle"))
         self.assertEqual(result.facts, ())
         self.assertEqual(result.failure.path, "units[0].invariants[0]")
@@ -641,7 +646,8 @@ class EngineTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
-        self.assertEqual(result.status, "unsupported_feature")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "unsupported_feature")
         self.assertEqual(result.failure.path, "units[0].depends_on[0]")
         self.assertEqual(result.units[0].depends_on[0].status, "unsupported")
 
@@ -673,7 +679,8 @@ class EngineTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
-        self.assertEqual(result.status, "unsupported_feature")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "unsupported_feature")
         self.assertEqual(result.units, ())
         self.assertEqual(
             result.failure.features,
@@ -699,7 +706,8 @@ class EngineTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
-        self.assertEqual(result.status, "ensures_failed")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "ensures_failed")
         self.assertEqual(result.units[0].establishes, ())
         self.assertEqual(result.facts, ())
 
@@ -729,7 +737,8 @@ class EngineTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
         states = {item.object[-1]: item.state for item in result.final_state}
-        self.assertEqual(result.status, "depends_on_failed")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "depends_on_failed")
         self.assertEqual(result.units[0].drives, ())
         self.assertEqual(states["Child"], ("State", "Idle"))
 
@@ -776,7 +785,8 @@ class EngineTests(unittest.TestCase):
         model = compile_spec(CASES_DIRECTORY / "02-simple-transition" / "main.spec")
         selected = _sequence(("root.Computer", "root.Computer", "Go", "drive"))
         result = derive(model, selected)
-        self.assertEqual(result.status, "undeclared_external_signal")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "undeclared_external_signal")
         self.assertEqual(result.failure.path, "units[0]")
         rendered = StringIO()
         render_derivation_result(result, rendered)
@@ -1196,7 +1206,8 @@ class EngineTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
-        self.assertEqual(result.status, "no_resumable_continuation")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "no_resumable_continuation")
         self.assertEqual(
             tuple(unit.status for unit in result.units),
             ("passed", "no_resumable_continuation"),
@@ -1237,7 +1248,8 @@ class EngineTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         selected = default_derivation_sequence(model)
         failed_update = derive(model, DerivationSequence(3, selected.events[:1]))
-        self.assertEqual(failed_update.status, "invariant_failed")
+        self.assertEqual(failed_update.status, "failed")
+        self.assertEqual(failed_update.paths[0].status, "invariant_failed")
         current = next(
             item for item in failed_update.final_values if item.field == "current"
         )
@@ -1245,12 +1257,19 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(failed_update.facts, ())
 
         duplicates = derive(model, DerivationSequence(3, selected.events[1:]))
-        self.assertEqual(duplicates.status, "duplicate_collection_item")
+        self.assertEqual(duplicates.status, "failed")
+        self.assertEqual(duplicates.paths[0].status, "duplicate_collection_item")
         queue = next(item for item in duplicates.final_values if item.collection)
         self.assertEqual(tuple(value[-1] for value in queue.values), ("SecondRef",))
 
-    def test_current_task_ref_and_emits_before_resumes(self) -> None:
-        directory, model = _compile_text(
+    def test_current_task_ref_is_not_a_field_backed_signal_argument(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = Path(directory.name)
+        (root / "main.spec").write_text(
+            "spec root;\norigin root.Human;\n", encoding="utf-8"
+        )
+        (root / "root.spec").write_text(
             """
             type TaskRef;
             object BootRef: TaskRef {}
@@ -1284,17 +1303,11 @@ class EngineTests(unittest.TestCase):
                 } }
             }
             external Human { drives Controller.Action::Run; }
-            """
+            """,
+            encoding="utf-8",
         )
-        self.addCleanup(directory.cleanup)
-        result = derive(model, default_derivation_sequence(model))
-        self.assertEqual(result.status, "passed")
-        root = result.units[0]
-        self.assertEqual(root.drives[0].event.arguments[0].value, "BootRef")
-        self.assertEqual(root.emits[0].event.target[-1], "Worker")
-        self.assertEqual(root.resumes[0].event.target[-1], "Boot")
-        queue = next(item for item in result.final_values if item.collection)
-        self.assertEqual(queue.values[0][-1], "BootRef")
+        with self.assertRaisesRegex(CompilationError, "CurrentTaskRef requires"):
+            compile_spec(root / "main.spec")
 
     def test_scheduler_can_start_another_root_without_consuming_first_breakpoint(self) -> None:
         directory, model = _compile_text(
@@ -1383,7 +1396,8 @@ class EngineTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
-        self.assertEqual(result.status, "continuation_reentry")
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.paths[0].status, "continuation_reentry")
         self.assertEqual(result.units[0].status, "yielded")
         self.assertEqual(result.continuations[0].root[-1], "Boot")
         self.assertEqual(result.continuations[0].frames[0].control_index, 1)
@@ -1433,7 +1447,8 @@ class EngineTests(unittest.TestCase):
         )
         self.addCleanup(directory2.cleanup)
         exited = derive(model2, default_derivation_sequence(model2))
-        self.assertEqual(exited.status, "no_resumable_continuation")
+        self.assertEqual(exited.status, "failed")
+        self.assertEqual(exited.paths[0].status, "no_resumable_continuation")
         self.assertEqual(
             tuple(unit.status for unit in exited.units),
             ("passed", "no_resumable_continuation"),
@@ -1506,21 +1521,21 @@ class DerivationJSONTests(unittest.TestCase):
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 6)
+        self.assertEqual(document["schema_version"], 7)
         self.assertNotIn("failure", document)
 
         startup_event = json.loads(output.getvalue())
-        startup_event["units"][0]["event"]["signal"] = [
+        startup_event["paths"][0]["units"][0]["event"]["signal"] = [
             "Transition",
             "Startup",
         ]
-        startup_event["units"][0]["handler"] = ["Transition", "Preset"]
+        startup_event["paths"][0]["units"][0]["handler"] = ["Transition", "Preset"]
         startup_handler = json.loads(output.getvalue())
-        startup_handler["units"][0]["event"]["signal"] = [
+        startup_handler["paths"][0]["units"][0]["event"]["signal"] = [
             "Transition",
             "Preset",
         ]
-        startup_handler["units"][0]["handler"] = ["Transition", "Startup"]
+        startup_handler["paths"][0]["units"][0]["handler"] = ["Transition", "Startup"]
         for alias_document in (startup_event, startup_handler):
             with self.subTest(alias_document=alias_document):
                 with self.assertRaisesRegex(
@@ -1537,11 +1552,11 @@ class DerivationJSONTests(unittest.TestCase):
         unknown["trace"] = []
         invalid_documents.append(json.dumps(unknown))
         missing = dict(document)
-        del missing["facts"]
+        del missing["paths"]
         invalid_documents.append(json.dumps(missing))
-        invalid_documents.append('{"schema_version":6,"status":"passed","status":"passed"}')
+        invalid_documents.append('{"schema_version":7,"status":"passed","status":"passed"}')
         old_result = dict(document)
-        old_result["schema_version"] = 4
+        old_result["schema_version"] = 6
         invalid_documents.append(json.dumps(old_result))
         for invalid in invalid_documents:
             with self.subTest(document=invalid):
@@ -1601,7 +1616,7 @@ class CLITests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertEqual(completed.returncode, 1)
+        self.assertEqual(completed.returncode, 0)
         for signal in (
             "Transition::Preset",
             "Transition::Setup",
@@ -1609,7 +1624,7 @@ class CLITests(unittest.TestCase):
         ):
             with self.subTest(signal=signal):
                 self.assertIn(signal, completed.stdout)
-        self.assertTrue(completed.stdout.endswith("stopped: panic\n"))
+        self.assertTrue(completed.stdout.endswith("Derivation yielded!\n"))
         self.assertEqual(completed.stderr, "")
 
     def test_model_and_sequence_options_are_mutually_exclusive(self) -> None:

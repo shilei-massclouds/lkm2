@@ -8,6 +8,7 @@ import json
 from model_ir import (
     ModelAction,
     ModelExpression,
+    ModelHandlerBlock,
     ModelIR,
     ModelObject,
     ModelSignal,
@@ -23,7 +24,10 @@ from .model import (
     DerivationFact,
     DerivationFailure,
     DerivationFrame,
+    DerivationPath,
     DerivationResult,
+    DerivationScheduler,
+    DerivationSelection,
     DerivationSequence,
     DerivationState,
     DerivationUnit,
@@ -76,20 +80,24 @@ class _ContinuationRuntime:
     result_unit: DerivationUnit | None = None
 
 
+@dataclass(slots=True)
+class _SchedulerRuntime:
+    scheduler: tuple[str, ...]
+    idle_task: tuple[str, ...]
+    current_task: tuple[str, ...]
+    runq: list[tuple[str, ...]] = field(default_factory=list)
+
+
+class _SelectionNeeded(Exception):
+    def __init__(self, candidates: tuple[tuple[str, ...], ...]) -> None:
+        super().__init__("scheduler selection requires path expansion")
+        self.candidates = candidates
+
+
 class _UnsupportedExpression(Exception):
     def __init__(self, feature: str) -> None:
         super().__init__(feature)
         self.feature = feature
-
-
-def _event(signal: ModelSignal) -> DerivationEvent:
-    return DerivationEvent(
-        signal.source,
-        signal.target,
-        signal.signal,
-        signal.mode,
-        signal.arguments,
-    )
 
 
 def _unsupported_features(model: ModelIR) -> tuple[str, ...]:
@@ -168,12 +176,42 @@ class _Context:
     def __init__(self, model: ModelIR) -> None:
         self.model = model
         self.objects = {item.name: item for item in model.objects}
+        self.types = {
+            item.name: item for module in model.modules for item in module.types
+        }
         predicates = tuple(
             item for module in model.modules for item in module.predicates
         )
         self.predicates = {item.name: item for item in predicates}
         self.object_names = _shortest_names(tuple(self.objects))
         self.predicate_names = _shortest_names(tuple(self.predicates))
+        self.schedulers: dict[tuple[str, ...], _SchedulerRuntime] = {}
+
+    def _type_name(
+        self, raw: tuple[str, ...], module: tuple[str, ...]
+    ) -> tuple[str, ...] | None:
+        if raw in self.types:
+            return raw
+        if module + raw in self.types:
+            return module + raw
+        matches = tuple(name for name in self.types if name[-len(raw) :] == raw)
+        return matches[0] if len(matches) == 1 else None
+
+    def object_has_type(self, name: tuple[str, ...], suffix: str) -> bool:
+        model_object = self.objects[name]
+        current = self._type_name(model_object.base_type.name, name[:-1])
+        seen: set[tuple[str, ...]] = set()
+        while current is not None and current not in seen:
+            seen.add(current)
+            if current[-1] == suffix:
+                return True
+            base = self.types[current].base_type
+            current = (
+                None
+                if base is None
+                else self._type_name(base.name, current[:-1])
+            )
+        return False
 
     @staticmethod
     def object_expression(name: tuple[str, ...]) -> ModelExpression:
@@ -233,15 +271,14 @@ class _Context:
             if identifier == "self":
                 return source
             if identifier == "CurrentTaskRef":
-                schedulers = tuple(
-                    name
-                    for name, model_object in self.objects.items()
-                    if model_object.base_type.name[-1:] == ("Scheduler",)
-                    and (name, "curr") in values
+                schedulers = (
+                    (source,)
+                    if source in self.schedulers
+                    else tuple(self.schedulers)
                 )
                 if len(schedulers) != 1:
                     raise _UnsupportedExpression("CurrentTaskRef:ambiguous_scheduler")
-                return values[(schedulers[0], "curr")]
+                return self.schedulers[schedulers[0]].current_task
         flattened = _access(expression)
         if (
             flattened is not None
@@ -280,9 +317,14 @@ class _Context:
                     f"signal_argument:{_format_expression(argument)}"
                 )
             arguments.append(self.object_expression(value))
+        target = self.resolve_value(signal.target, module, source, bindings, values)
+        if target is None:
+            raise _UnsupportedExpression(
+                f"signal_target:{_format_expression(signal.target)}"
+            )
         return DerivationEvent(
             signal.source,
-            signal.target,
+            target,
             signal.signal,
             signal.mode,
             tuple(arguments),
@@ -453,7 +495,11 @@ class _Context:
 
 
 class _Execution:
-    def __init__(self, model: ModelIR) -> None:
+    def __init__(
+        self,
+        model: ModelIR,
+        selection_choices: tuple[tuple[str, ...], ...] = (),
+    ) -> None:
         self.context = _Context(model)
         self.states = _states(model)
         self.facts: set[DerivationFact] = set()
@@ -463,6 +509,10 @@ class _Execution:
             tuple[tuple[str, ...], str], tuple[str, ...]
         ] = {}
         self.collections: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
+        self.selection_choices = selection_choices
+        self.selection_cursor = 0
+        self.cycle_closed = False
+        self.seen_snapshots: set[tuple[object, ...]] = set()
         for model_object in model.objects:
             if model_object.base_type.name == ("Collection",):
                 self.collections[model_object.name] = []
@@ -482,6 +532,36 @@ class _Execution:
                         f"compiled field default {model_field.name!r} is unresolved"
                     )
                 self.values[(model_object.name, model_field.name)] = value
+        self.schedulers: dict[tuple[str, ...], _SchedulerRuntime] = {}
+        for model_object in model.objects:
+            if model_object.idle_task is None:
+                continue
+            idle = self.context.object_reference(
+                model_object.idle_task, model_object.name[:-1]
+            )
+            if idle is None:
+                raise RuntimeError("compiled scheduler idle_task is unresolved")
+            self.schedulers[model_object.name] = _SchedulerRuntime(
+                model_object.name, idle, idle
+            )
+        self.context.schedulers = self.schedulers
+        self.task_flows: dict[tuple[str, ...], tuple[str, ...]] = {}
+        for model_object in model.objects:
+            if (
+                not model_object.continuation
+                or model_object.parent is None
+                or not self.context.object_has_type(
+                    model_object.name, "TaskFlow"
+                )
+            ):
+                continue
+            parent = self.context.object_reference(
+                model_object.parent, model_object.name[:-1]
+            )
+            if parent is not None and parent in self.context.objects:
+                parent_object = self.context.objects[parent]
+                if self.context.object_has_type(parent_object.name, "Task"):
+                    self.task_flows[parent] = model_object.name
 
     def final_values(self) -> tuple[DerivationValue, ...]:
         fields = tuple(
@@ -493,6 +573,57 @@ class _Execution:
             for owner, values in sorted(self.collections.items())
         )
         return fields + collections
+
+    def scheduler_snapshots(self) -> tuple[DerivationScheduler, ...]:
+        return tuple(
+            DerivationScheduler(
+                runtime.scheduler,
+                runtime.idle_task,
+                runtime.current_task,
+                tuple(runtime.runq),
+            )
+            for runtime in self.schedulers.values()
+        )
+
+    def _runtime_snapshot(self, position: tuple[object, ...]) -> tuple[object, ...]:
+        continuations = tuple(
+            (
+                root,
+                runtime.executing,
+                runtime.suspended,
+                runtime.completed,
+                runtime.waiting_yield_target,
+                runtime.resume_requested,
+                tuple(
+                    (
+                        frame.object,
+                        frame.handler,
+                        frame.control_index,
+                        frame.entered,
+                        tuple(sorted(frame.bindings.items())),
+                    )
+                    for frame in runtime.frames
+                ),
+            )
+            for root, runtime in sorted(self.continuations.items())
+        )
+        return (
+            position,
+            tuple(sorted(self.states.items())),
+            tuple(sorted(self.facts, key=lambda item: (item.predicate, item.arguments))),
+            tuple(sorted(self.values.items())),
+            tuple((name, tuple(values)) for name, values in sorted(self.collections.items())),
+            tuple(
+                (
+                    name,
+                    runtime.idle_task,
+                    runtime.current_task,
+                    tuple(runtime.runq),
+                )
+                for name, runtime in sorted(self.schedulers.items())
+            ),
+            continuations,
+        )
 
     def _bind_handler(
         self,
@@ -581,6 +712,7 @@ class _Execution:
         yields: list[DerivationUnit] | None = None,
         directives: list[DerivationDirective] | None = None,
         resumes: list[DerivationUnit] | None = None,
+        selections: list[DerivationSelection] | None = None,
     ) -> DerivationUnit:
         return DerivationUnit(
             kind=kind,
@@ -600,6 +732,7 @@ class _Execution:
             yields=() if yields is None else tuple(yields),
             directives=() if directives is None else tuple(directives),
             resumes=() if resumes is None else tuple(resumes),
+            selections=() if selections is None else tuple(selections),
         )
 
     def _clear_continuations_for_panic(self) -> None:
@@ -1237,6 +1370,25 @@ class _Execution:
                 "only Action::Enter can externally start or resume a continuation",
             )
         runtime = self.continuations.get(event.target)
+        if (
+            runtime is not None
+            and runtime.executing
+            and runtime.owner_active
+            and event.mode == "resume"
+        ):
+            suspended_children = tuple(
+                candidate
+                for candidate in self.continuations.values()
+                if candidate is not runtime
+                and candidate.owner_active
+                and candidate.suspended
+                and candidate.waiting_yield_target
+            )
+            if suspended_children:
+                child = suspended_children[-1]
+                child.suspended = False
+                child.resume_requested = True
+                return self._resume_ack(event, kind)
         if runtime is not None and (
             runtime.executing or runtime.resume_requested
         ):
@@ -1415,7 +1567,113 @@ class _Execution:
             failure=None,
         )
 
+    def _run_scheduler_core(
+        self, event: DerivationEvent, kind: str, path: str
+    ) -> DerivationUnit:
+        before = self.states[event.target]
+        runtime = self.schedulers[event.target]
+        if (
+            before != ("State", "Online")
+            or event.signal not in {
+                ("Action", "Enqueue"),
+                ("Action", "Dequeue"),
+            }
+            or event.arguments
+        ):
+            failure = self._set_failure(
+                "unhandled_signal",
+                f"{path}.handler",
+                "sched_core queue actions are only handled without arguments in State::Online",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=None,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
+        task = event.source
+        if event.signal == ("Action", "Enqueue"):
+            if task in runtime.runq:
+                failure = self._set_failure(
+                    "duplicate_runq_task",
+                    f"{path}.handler",
+                    "Task is already present in the scheduler runq",
+                )
+                return self._unit(
+                    kind=kind,
+                    event=event,
+                    before=before,
+                    handler=event.signal,
+                    candidate=None,
+                    depends_on=[],
+                    drives=[],
+                    ensures=[],
+                    establishes=[],
+                    invariants=[],
+                    state_after=None,
+                    emits=[],
+                    status=failure.code,
+                    failure=failure,
+                )
+            runtime.runq.append(task)
+        else:
+            if task not in runtime.runq:
+                failure = self._set_failure(
+                    "task_not_queued",
+                    f"{path}.handler",
+                    "Task is not present in the scheduler runq",
+                )
+                return self._unit(
+                    kind=kind,
+                    event=event,
+                    before=before,
+                    handler=event.signal,
+                    candidate=None,
+                    depends_on=[],
+                    drives=[],
+                    ensures=[],
+                    establishes=[],
+                    invariants=[],
+                    state_after=None,
+                    emits=[],
+                    status=failure.code,
+                    failure=failure,
+                )
+            runtime.runq.remove(task)
+        return self._unit(
+            kind=kind,
+            event=event,
+            before=before,
+            handler=event.signal,
+            candidate=None,
+            depends_on=[],
+            drives=[],
+            ensures=[],
+            establishes=[],
+            invariants=[],
+            state_after=before,
+            emits=[],
+            status="passed",
+            failure=None,
+        )
+
     def run_unit(self, event: DerivationEvent, kind: str, path: str) -> DerivationUnit:
+        if (
+            event.target in self.schedulers
+            and event.signal
+            in {("Action", "Enqueue"), ("Action", "Dequeue")}
+        ):
+            return self._run_scheduler_core(event, kind, path)
         if event.target in self.collections:
             return self._run_collection(event, kind, path)
         if self.context.objects[event.target].continuation:
@@ -1443,6 +1701,8 @@ class _Execution:
         emits: list[DerivationUnit] = []
         resumes: list[DerivationUnit] = []
         directives: list[DerivationDirective] = []
+        selections: list[DerivationSelection] = []
+        selected_task: tuple[str, ...] | None = None
         if handler is None:
             signal_kind = event.signal[0].lower()
             failure = self._set_failure(
@@ -1539,6 +1799,7 @@ class _Execution:
                 failure=failure,
                 directives=directives,
                 resumes=resumes,
+                selections=selections,
             )
 
         for index, expression in enumerate(expressions["depends_on"]):
@@ -1575,20 +1836,20 @@ class _Execution:
                 )
                 return failed_unit(failure)
 
-        controls = tuple(
-            item
-            for block in blocks
-            if block.kind in {"drives", "print", "panic"}
-            for item in (
-                block.signals
-                if block.kind == "drives"
-                else (
+        controls: list[
+            ModelSignal | ModelHandlerBlock | DerivationDirective
+        ] = []
+        for block in blocks:
+            if block.kind == "drives":
+                controls.extend(block.signals)
+            elif block.kind == "selects":
+                controls.append(block)
+            elif block.kind in {"print", "panic"}:
+                controls.append(
                     DerivationDirective(
                         block.kind, str(block.expressions[0].value)
-                    ),
+                    )
                 )
-            )
-        )
         for control in controls:
             if isinstance(control, DerivationDirective):
                 directives.append(control)
@@ -1599,6 +1860,31 @@ class _Execution:
                             control,
                         )
                     )
+                continue
+            if isinstance(control, ModelHandlerBlock):
+                assert control.selects is not None
+                scheduler = self.schedulers[event.target]
+                candidates = (
+                    tuple(scheduler.runq)
+                    if scheduler.runq
+                    else (scheduler.idle_task,)
+                )
+                if self.selection_cursor >= len(self.selection_choices):
+                    raise _SelectionNeeded(candidates)
+                selected_task = self.selection_choices[self.selection_cursor]
+                self.selection_cursor += 1
+                if selected_task not in candidates:
+                    raise RuntimeError("scheduler replay selected a stale candidate")
+                bindings[control.selects] = selected_task
+                selections.append(
+                    DerivationSelection(
+                        control.selects,
+                        selected_task,
+                        not scheduler.runq,
+                        False,
+                        len(drives),
+                    )
+                )
                 continue
             try:
                 child_event = self._signal_event(
@@ -1638,6 +1924,7 @@ class _Execution:
                     failure=None,
                     directives=directives,
                     resumes=resumes,
+                    selections=selections,
                 )
 
         candidate_states = dict(self.states)
@@ -1778,6 +2065,8 @@ class _Execution:
             self.states[event.target] = candidate_state
         self.facts.update(staged_facts)
         self.values = candidate_values
+        if selected_task is not None:
+            self.schedulers[event.target].current_task = selected_task
         for index, signal in enumerate(emit_signals):
             child_event = self._signal_event(signal, model_object.name, bindings)
             emits.append(self.run_unit(child_event, "emit", f"{path}.emits[{index}]"))
@@ -1793,6 +2082,41 @@ class _Execution:
                 )
                 if self.failure is not None:
                     break
+        if self.failure is None and selected_task is not None:
+            snapshot = self._runtime_snapshot(
+                (
+                    "selected",
+                    event.source,
+                    event.target,
+                    event.signal,
+                    selected_task,
+                )
+            )
+            if snapshot in self.seen_snapshots:
+                self.cycle_closed = True
+                last = selections[-1]
+                selections[-1] = DerivationSelection(
+                    last.binding,
+                    last.task,
+                    last.idle_fallback,
+                    True,
+                    last.after_drives,
+                )
+            else:
+                self.seen_snapshots.add(snapshot)
+                flow = self.task_flows[selected_task]
+                resumes.append(
+                    self.run_unit(
+                        DerivationEvent(
+                            event.target,
+                            flow,
+                            ("Action", "Enter"),
+                            "resume",
+                        ),
+                        "resume",
+                        f"{path}.resumes[{len(resumes)}]",
+                    )
+                )
         return self._unit(
             kind=kind,
             event=event,
@@ -1806,67 +2130,99 @@ class _Execution:
             invariants=checks["invariants"],
             state_after=candidate_state if candidate_state is not None else before,
             emits=emits,
-            status="passed",
+            status="cycle_closed" if self.cycle_closed else "passed",
             failure=None,
             directives=directives,
             resumes=resumes,
+            selections=selections,
         )
 
 
 def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
-    """Execute selected external roots and automatically schedule their causal units."""
+    """Expand scheduler choices into isolated deterministic derivation paths."""
 
     if not isinstance(model, ModelIR):
         raise TypeError("model must be a ModelIR")
     if not isinstance(sequence, DerivationSequence):
         raise TypeError("sequence must be a DerivationSequence")
 
-    execution = _Execution(model)
-    unsupported = _unsupported_features(model)
-    if unsupported:
-        failure = execution._set_failure(
-            "unsupported_feature",
-            "model",
-            "model uses semantics that derive cannot execute",
-            unsupported,
-        )
-        return DerivationResult(
-            RESULT_SCHEMA_VERSION,
-            failure.code,
-            (),
-            _final_state(execution.states),
-            (),
-            failure,
-            execution.continuation_snapshots(),
-            execution.final_values(),
+    prefixes: list[tuple[tuple[str, ...], ...]] = [()]
+    paths: list[DerivationPath] = []
+    while prefixes:
+        choices = prefixes.pop()
+        execution = _Execution(model, choices)
+        unsupported = _unsupported_features(model)
+        units: list[DerivationUnit] = []
+        if unsupported:
+            execution._set_failure(
+                "unsupported_feature",
+                "model",
+                "model uses semantics that derive cannot execute",
+                unsupported,
+            )
+        else:
+            origin = next(
+                item for item in model.externals if item.name == model.entry.origin
+            )
+            declared = tuple(
+                DerivationEvent(
+                    signal.source,
+                    execution.context.resolve_value(
+                        signal.target,
+                        signal.source[:-1],
+                        signal.source,
+                        {},
+                        execution.values,
+                    ),
+                    signal.signal,
+                    signal.mode,
+                    signal.arguments,
+                )
+                for signal in origin.signals
+            )
+            try:
+                for index, selected in enumerate(sequence.events):
+                    unit_path = f"units[{index}]"
+                    if selected not in declared:
+                        units.append(execution.undeclared_root(selected, unit_path))
+                        break
+                    units.append(execution.run_unit(selected, "root", unit_path))
+                    if execution.failure is not None or execution.cycle_closed:
+                        break
+            except _SelectionNeeded as needed:
+                for candidate in reversed(needed.candidates):
+                    prefixes.append(choices + (candidate,))
+                continue
+
+        outcome = "passed"
+        if execution.cycle_closed:
+            outcome = "cycle_closed"
+        elif execution.failure is None and any(
+            runtime.suspended for runtime in execution.continuations.values()
+        ):
+            outcome = "yielded"
+        elif execution.failure is not None:
+            outcome = execution.failure.code
+        if execution.failure is not None and execution.failure.code == "panic":
+            execution._clear_continuations_for_panic()
+        paths.append(
+            DerivationPath(
+                outcome,
+                tuple(units),
+                _final_state(execution.states),
+                tuple(execution.facts),
+                execution.failure,
+                execution.continuation_snapshots(),
+                execution.final_values(),
+                execution.scheduler_snapshots(),
+            )
         )
 
-    origin = next(item for item in model.externals if item.name == model.entry.origin)
-    declared = tuple(_event(signal) for signal in origin.signals)
-    units: list[DerivationUnit] = []
-    for index, selected in enumerate(sequence.events):
-        path = f"units[{index}]"
-        if selected not in declared:
-            units.append(execution.undeclared_root(selected, path))
-            break
-        units.append(execution.run_unit(selected, "root", path))
-        if execution.failure is not None:
-            break
-
-    outcome = "passed"
-    if execution.failure is None and any(
-        runtime.suspended for runtime in execution.continuations.values()
-    ):
-        outcome = "yielded"
-    if execution.failure is not None and execution.failure.code == "panic":
-        execution._clear_continuations_for_panic()
-    return DerivationResult(
-        RESULT_SCHEMA_VERSION,
-        outcome if execution.failure is None else execution.failure.code,
-        tuple(units),
-        _final_state(execution.states),
-        tuple(execution.facts),
-        execution.failure,
-        execution.continuation_snapshots(),
-        execution.final_values(),
+    aggregate = (
+        "failed"
+        if any(path.failure is not None for path in paths)
+        else "yielded"
+        if any(path.status == "yielded" for path in paths)
+        else "passed"
     )
+    return DerivationResult(RESULT_SCHEMA_VERSION, aggregate, tuple(paths))

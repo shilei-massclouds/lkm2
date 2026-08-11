@@ -143,7 +143,7 @@ Kernel -> BootInitFlow: emits Action::Enter
 Derivation yielded!
 """
 
-# The default model intentionally stops at the Scheduler placeholder panic.
+# The default model completes scheduling and retains a yielded boot continuation.
 EXPECTED_DERIVATION_OUTPUT = (REPOSITORY / "tools/tests/expected.default.stdout").read_text(
     encoding="utf-8"
 )
@@ -173,14 +173,14 @@ class MakeRunOutputTests(unittest.TestCase):
     def test_default_run_only_prints_derivation_output(self) -> None:
         completed = self._run()
 
-        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, EXPECTED_DERIVATION_OUTPUT)
-        self.assertIn("Error 1", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
     def test_verbose_run_prints_all_commands_and_derivation_output(self) -> None:
         completed = self._run("VERBOSE=1")
 
-        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.returncode, 0)
         for command in (
             "make --no-print-directory -C tools run",
             "-m compileall -q src tests",
@@ -191,14 +191,14 @@ class MakeRunOutputTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIn(command, completed.stdout)
         self.assertTrue(completed.stdout.endswith(EXPECTED_DERIVATION_OUTPUT))
-        self.assertIn("Error 1", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
     def test_only_exact_verbose_one_enables_command_echo(self) -> None:
         completed = self._run("VERBOSE=1 0")
 
-        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, EXPECTED_DERIVATION_OUTPUT)
-        self.assertIn("Error 1", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
     def test_quiet_run_keeps_error_diagnostics_visible(self) -> None:
         completed = self._run("MODEL=missing-model.spec")

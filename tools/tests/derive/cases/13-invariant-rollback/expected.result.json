@@ -1,85 +1,92 @@
 {
-  "continuations": [],
-  "facts": [],
-  "failure": {
-    "code": "invariant_failed",
-    "features": [],
-    "message": "target-state invariant is false",
-    "path": "units[0].invariants[0]"
-  },
-  "final_state": [
+  "paths": [
     {
-      "object": [
-        "root",
-        "Computer"
-      ],
-      "state": [
-        "State",
-        "Idle"
-      ]
-    }
-  ],
-  "final_values": [],
-  "schema_version": 6,
-  "status": "invariant_failed",
-  "units": [
-    {
-      "candidate_state": [
-        "State",
-        "Ready"
-      ],
-      "depends_on": [],
-      "directives": [],
-      "drives": [],
-      "emits": [],
-      "ensures": [],
-      "establishes": [
-        {
-          "expression": "ready()",
-          "status": "established"
-        }
-      ],
-      "event": {
-        "arguments": [],
-        "mode": "drive",
-        "signal": [
-          "Transition",
-          "Go"
-        ],
-        "source": [
-          "root",
-          "Human"
-        ],
-        "target": [
-          "root",
-          "Computer"
-        ]
-      },
+      "continuations": [],
+      "facts": [],
       "failure": {
         "code": "invariant_failed",
         "features": [],
         "message": "target-state invariant is false",
         "path": "units[0].invariants[0]"
       },
-      "handler": [
-        "Transition",
-        "Go"
-      ],
-      "invariants": [
+      "final_state": [
         {
-          "expression": "accepted()",
-          "status": "failed"
+          "object": [
+            "root",
+            "Computer"
+          ],
+          "state": [
+            "State",
+            "Idle"
+          ]
         }
       ],
-      "kind": "root",
-      "resumes": [],
-      "state_after": null,
-      "state_before": [
-        "State",
-        "Idle"
-      ],
+      "final_values": [],
+      "schedulers": [],
       "status": "invariant_failed",
-      "yields": []
+      "units": [
+        {
+          "candidate_state": [
+            "State",
+            "Ready"
+          ],
+          "depends_on": [],
+          "directives": [],
+          "drives": [],
+          "emits": [],
+          "ensures": [],
+          "establishes": [
+            {
+              "expression": "ready()",
+              "status": "established"
+            }
+          ],
+          "event": {
+            "arguments": [],
+            "mode": "drive",
+            "signal": [
+              "Transition",
+              "Go"
+            ],
+            "source": [
+              "root",
+              "Human"
+            ],
+            "target": [
+              "root",
+              "Computer"
+            ]
+          },
+          "failure": {
+            "code": "invariant_failed",
+            "features": [],
+            "message": "target-state invariant is false",
+            "path": "units[0].invariants[0]"
+          },
+          "handler": [
+            "Transition",
+            "Go"
+          ],
+          "invariants": [
+            {
+              "expression": "accepted()",
+              "status": "failed"
+            }
+          ],
+          "kind": "root",
+          "resumes": [],
+          "selections": [],
+          "state_after": null,
+          "state_before": [
+            "State",
+            "Idle"
+          ],
+          "status": "invariant_failed",
+          "yields": []
+        }
+      ]
     }
-  ]
+  ],
+  "schema_version": 7,
+  "status": "failed"
 }

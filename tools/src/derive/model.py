@@ -1,4 +1,4 @@
-"""Data model for derivation root selection and schema-v6 results."""
+"""Data model for derivation root selection and schema-v7 path results."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from model_ir import ModelExpression, canonicalize_signal_name
 
 
 SEQUENCE_SCHEMA_VERSION = 3
-RESULT_SCHEMA_VERSION = 6
+RESULT_SCHEMA_VERSION = 7
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MODES = frozenset({"drive", "emit", "yield", "resume"})
 _UNIT_KINDS = frozenset({"root", "drive", "emit", "yield", "resume"})
@@ -28,9 +28,13 @@ _FAILURE_CODES = frozenset(
         "panic",
         "duplicate_collection_item",
         "invalid_current_task_ref",
+        "duplicate_runq_task",
+        "task_not_queued",
     }
 )
-_UNIT_STATUSES = frozenset({"passed", "yielded", "stopped", *_FAILURE_CODES})
+_UNIT_STATUSES = frozenset(
+    {"passed", "yielded", "stopped", "cycle_closed", *_FAILURE_CODES}
+)
 
 
 class DerivationValidationError(ValueError):
@@ -232,6 +236,32 @@ class DerivationDirective:
 
 
 @dataclass(frozen=True, slots=True)
+class DerivationSelection:
+    binding: str
+    task: tuple[str, ...]
+    idle_fallback: bool = False
+    cycle_closed: bool = False
+    after_drives: int = 0
+
+    def __post_init__(self) -> None:
+        if type(self.binding) is not str or _IDENTIFIER.fullmatch(self.binding) is None:
+            raise DerivationValidationError("selection.binding must be an identifier")
+        _name(self.task, "selection.task")
+        if type(self.idle_fallback) is not bool:
+            raise DerivationValidationError(
+                "selection.idle_fallback must be a boolean"
+            )
+        if type(self.cycle_closed) is not bool:
+            raise DerivationValidationError(
+                "selection.cycle_closed must be a boolean"
+            )
+        if type(self.after_drives) is not int or self.after_drives < 0:
+            raise DerivationValidationError(
+                "selection.after_drives must be a non-negative integer"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class DerivationUnit:
     kind: str
     event: DerivationEvent
@@ -250,6 +280,7 @@ class DerivationUnit:
     yields: tuple[DerivationUnit, ...] = ()
     directives: tuple[DerivationDirective, ...] = ()
     resumes: tuple[DerivationUnit, ...] = ()
+    selections: tuple[DerivationSelection, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _UNIT_KINDS:
@@ -293,6 +324,7 @@ class DerivationUnit:
         _tuple_of(self.yields, DerivationUnit, "unit.yields")
         _tuple_of(self.directives, DerivationDirective, "unit.directives")
         _tuple_of(self.resumes, DerivationUnit, "unit.resumes")
+        _tuple_of(self.selections, DerivationSelection, "unit.selections")
         if self.handler is not None and self.handler != self.event.signal:
             raise DerivationValidationError("unit.handler must match unit.event.signal")
         if self.handler is None and self.candidate_state is not None:
@@ -324,20 +356,20 @@ class DerivationUnit:
             raise DerivationValidationError(
                 "only a panic unit may contain a panic directive"
             )
-        if self.status == "passed":
+        if self.status in {"passed", "cycle_closed"}:
             if self.failure is not None:
-                raise DerivationValidationError("passed unit must not contain a failure")
+                raise DerivationValidationError("successful unit must not contain a failure")
             if self.handler is None:
                 raise DerivationValidationError(
-                    "passed unit must contain a handler"
+                    "successful unit must contain a handler"
                 )
             if self.handler[0] == "Transition" and self.state_after != self.candidate_state:
                 raise DerivationValidationError(
-                    "passed transition unit must complete its candidate state"
+                    "successful transition unit must complete its candidate state"
                 )
             if self.handler[0] == "Action" and self.state_after != self.state_before:
                 raise DerivationValidationError(
-                    "passed action unit must preserve its entering state"
+                    "successful action unit must preserve its entering state"
                 )
             if any(
                 check.status not in {"passed", "established"}
@@ -350,7 +382,7 @@ class DerivationUnit:
                 for check in checks
             ):
                 raise DerivationValidationError(
-                    "passed unit must not contain a failed or unsupported check"
+                    "successful unit must not contain a failed or unsupported check"
                 )
         elif self.status == "yielded":
             if self.failure is not None or self.state_after is not None:
@@ -455,8 +487,26 @@ class DerivationValue:
 
 
 @dataclass(frozen=True, slots=True)
-class DerivationResult:
-    schema_version: int
+class DerivationScheduler:
+    scheduler: tuple[str, ...]
+    idle_task: tuple[str, ...]
+    current_task: tuple[str, ...]
+    runq: tuple[tuple[str, ...], ...] = ()
+
+    def __post_init__(self) -> None:
+        _name(self.scheduler, "scheduler.scheduler")
+        _name(self.idle_task, "scheduler.idle_task")
+        _name(self.current_task, "scheduler.current_task")
+        if type(self.runq) is not tuple:
+            raise DerivationValidationError("scheduler.runq must be a tuple")
+        for index, task in enumerate(self.runq):
+            _name(task, f"scheduler.runq[{index}]")
+        if len(set(self.runq)) != len(self.runq):
+            raise DerivationValidationError("scheduler.runq contains a duplicate Task")
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationPath:
     status: str
     units: tuple[DerivationUnit, ...]
     final_state: tuple[DerivationState, ...]
@@ -464,19 +514,17 @@ class DerivationResult:
     failure: DerivationFailure | None = None
     continuations: tuple[DerivationContinuation, ...] = ()
     final_values: tuple[DerivationValue, ...] = ()
+    schedulers: tuple[DerivationScheduler, ...] = ()
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != RESULT_SCHEMA_VERSION:
-            raise DerivationValidationError(
-                f"result schema_version must be {RESULT_SCHEMA_VERSION}"
-            )
-        if self.status not in {"passed", "yielded", *_FAILURE_CODES}:
-            raise DerivationValidationError(f"invalid result status {self.status!r}")
+        if self.status not in {"passed", "yielded", "cycle_closed", *_FAILURE_CODES}:
+            raise DerivationValidationError(f"invalid path status {self.status!r}")
         _tuple_of(self.units, DerivationUnit, "units")
         _tuple_of(self.final_state, DerivationState, "final_state")
         _tuple_of(self.facts, DerivationFact, "facts")
         _tuple_of(self.continuations, DerivationContinuation, "continuations")
         _tuple_of(self.final_values, DerivationValue, "final_values")
+        _tuple_of(self.schedulers, DerivationScheduler, "schedulers")
         value_keys = [(item.object, item.field) for item in self.final_values]
         if len(set(value_keys)) != len(value_keys):
             raise DerivationValidationError("final_values contains a duplicate target")
@@ -511,12 +559,12 @@ class DerivationResult:
             "continuations",
             tuple(sorted(self.continuations, key=lambda item: item.root)),
         )
-        if self.status in {"passed", "yielded"} and self.failure is not None:
+        if self.status in {"passed", "yielded", "cycle_closed"} and self.failure is not None:
             raise DerivationValidationError(
                 "passed/yielded result must not contain a failure"
             )
         unit_failures = _unit_failures(self.units)
-        if self.status in {"passed", "yielded"} and unit_failures:
+        if self.status in {"passed", "yielded", "cycle_closed"} and unit_failures:
             raise DerivationValidationError(
                 "passed/yielded result contains a failed unit"
             )
@@ -528,7 +576,7 @@ class DerivationResult:
             raise DerivationValidationError(
                 "passed result must not retain continuation breakpoints"
             )
-        if self.status not in {"passed", "yielded"}:
+        if self.status not in {"passed", "yielded", "cycle_closed"}:
             if not isinstance(self.failure, DerivationFailure):
                 raise DerivationValidationError("failed result requires a failure")
             if self.failure.code != self.status:
@@ -543,3 +591,60 @@ class DerivationResult:
             raise DerivationValidationError(
                 "panic result must not retain continuation frames"
             )
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationResult:
+    schema_version: int
+    status: str
+    paths: tuple[DerivationPath, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.schema_version) is not int or self.schema_version != RESULT_SCHEMA_VERSION:
+            raise DerivationValidationError(
+                f"result schema_version must be {RESULT_SCHEMA_VERSION}"
+            )
+        if self.status not in {"passed", "yielded", "failed"}:
+            raise DerivationValidationError(f"invalid result status {self.status!r}")
+        _tuple_of(self.paths, DerivationPath, "paths")
+        if not self.paths:
+            raise DerivationValidationError("result.paths must not be empty")
+        expected = (
+            "failed"
+            if any(path.failure is not None for path in self.paths)
+            else "yielded"
+            if any(path.status == "yielded" for path in self.paths)
+            else "passed"
+        )
+        if self.status != expected:
+            raise DerivationValidationError(
+                f"result.status must aggregate to {expected!r}"
+            )
+
+    @property
+    def units(self) -> tuple[DerivationUnit, ...]:
+        return self.paths[0].units
+
+    @property
+    def final_state(self) -> tuple[DerivationState, ...]:
+        return self.paths[0].final_state
+
+    @property
+    def facts(self) -> tuple[DerivationFact, ...]:
+        return self.paths[0].facts
+
+    @property
+    def failure(self) -> DerivationFailure | None:
+        return self.paths[0].failure
+
+    @property
+    def continuations(self) -> tuple[DerivationContinuation, ...]:
+        return self.paths[0].continuations
+
+    @property
+    def final_values(self) -> tuple[DerivationValue, ...]:
+        return self.paths[0].final_values
+
+    @property
+    def schedulers(self) -> tuple[DerivationScheduler, ...]:
+        return self.paths[0].schedulers

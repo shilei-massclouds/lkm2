@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v7."""
+"""Strict JSON loading and canonical JSON output for Model IR v8."""
 
 from __future__ import annotations
 
@@ -143,6 +143,7 @@ def _type(value: object, path: str) -> ModelType:
                 "fields",
                 "base_type",
                 "continuation",
+                "sched_core",
                 "initial_state",
                 "states",
             }
@@ -163,6 +164,7 @@ def _type(value: object, path: str) -> ModelType:
         if initial_state is None
         else _qualified_name(initial_state, f"{path}.initial_state"),
         states=_array(data["states"], f"{path}.states", _state),
+        sched_core=data["sched_core"],
     )
 
 
@@ -172,7 +174,7 @@ def _signal(value: object, path: str) -> ModelSignal:
     )
     return ModelSignal(
         source=_qualified_name(data["source"], f"{path}.source"),
-        target=_qualified_name(data["target"], f"{path}.target"),
+        target=_expression(data["target"], f"{path}.target"),
         signal=_qualified_name(data["signal"], f"{path}.signal"),
         mode=_string(data["mode"], f"{path}.mode"),
         arguments=_array(data["arguments"], f"{path}.arguments", _expression),
@@ -206,7 +208,7 @@ def _deferred(value: object, path: str) -> ModelDeferred:
 def _handler_block(value: object, path: str) -> ModelHandlerBlock:
     data = _require_object(
         value,
-        frozenset({"kind", "expressions", "signals", "deferred", "updates"}),
+        frozenset({"kind", "expressions", "signals", "deferred", "updates", "selects"}),
         path,
     )
     deferred = data["deferred"]
@@ -216,6 +218,9 @@ def _handler_block(value: object, path: str) -> ModelHandlerBlock:
         signals=_array(data["signals"], f"{path}.signals", _signal),
         deferred=None if deferred is None else _deferred(deferred, f"{path}.deferred"),
         updates=_array(data["updates"], f"{path}.updates", _update),
+        selects=None
+        if data["selects"] is None
+        else _string(data["selects"], f"{path}.selects"),
     )
 
 
@@ -293,13 +298,14 @@ def _object(value: object, path: str) -> ModelObject:
     data = _require_object(
         value,
         frozenset(
-            {"name", "base_type", "initial_state", "parent", "source", "attrs", "states", "references", "continuation"}
+            {"name", "base_type", "initial_state", "parent", "source", "attrs", "states", "references", "continuation", "idle_task"}
         ),
         path,
     )
     initial_state = data["initial_state"]
     parent = data["parent"]
     source = data["source"]
+    idle_task = data["idle_task"]
     return ModelObject(
         name=_qualified_name(data["name"], f"{path}.name"),
         base_type=_type_expression(data["base_type"], f"{path}.base_type"),
@@ -310,6 +316,9 @@ def _object(value: object, path: str) -> ModelObject:
         states=_array(data["states"], f"{path}.states", _state),
         references=_array(data["references"], f"{path}.references", _reference),
         continuation=data["continuation"],
+        idle_task=None
+        if idle_task is None
+        else _expression(idle_task, f"{path}.idle_task"),
     )
 
 
@@ -339,7 +348,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v7 JSON document."""
+    """Load and strictly validate one Model IR schema-v8 JSON document."""
 
     try:
         raw = json.load(
@@ -395,7 +404,7 @@ def _field_data(field: ModelField) -> dict[str, Any]:
 def _signal_data(signal: ModelSignal) -> dict[str, Any]:
     return {
         "source": list(signal.source),
-        "target": list(signal.target),
+        "target": _expr_data(signal.target),
         "signal": list(signal.signal),
         "mode": signal.mode,
         "arguments": [_expr_data(item) for item in signal.arguments],
@@ -423,6 +432,7 @@ def _block_data(block: ModelHandlerBlock) -> dict[str, Any]:
             {"target": _expr_data(item.target), "value": _expr_data(item.value)}
             for item in block.updates
         ],
+        "selects": block.selects,
     }
 
 
@@ -486,6 +496,7 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
                 if item.base_type is None
                 else _type_expr_data(item.base_type),
                 "continuation": item.continuation,
+                "sched_core": item.sched_core,
                 "initial_state": None
                 if item.initial_state is None
                 else list(item.initial_state),
@@ -513,6 +524,9 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
                     for reference in item.references
                 ],
                 "continuation": item.continuation,
+                "idle_task": None
+                if item.idle_task is None
+                else _expr_data(item.idle_task),
             }
             for item in module.objects
         ],

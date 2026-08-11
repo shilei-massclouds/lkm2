@@ -1,5 +1,5 @@
 /*
- * Scheduler - per-CPU scheduling interface and the current BootCPU instance.
+ * Scheduler - per-CPU scheduling policy and the current BootCPU instance.
  *
  * Cpu0Scheduler is the addressable scheduler for the current CPU0-only model
  * slice, not a global Scheduler singleton. Once CpuGroup and CPU objects are
@@ -7,23 +7,11 @@
  * CpuGroup.cpus[0], and every other CPU must own a distinct Scheduler.
  */
 
-type TaskRef;
-
-object BootTaskRef: TaskRef {
-}
-
-object KernelInitTaskRef: TaskRef {
-}
-
-object Cpu0RunQ: Collection<TaskRef> {
-}
+use model::objects::task::BootTask;
 
 type Scheduler {
+    sched_core: true;
     initial_state: State::Ready;
-
-    mutable curr: TaskRef = BootTaskRef;
-    mutable idle: TaskRef = BootTaskRef;
-    runq: Collection<TaskRef> = Cpu0RunQ;
 
     state State::Ready {
         transitions {
@@ -34,28 +22,15 @@ type Scheduler {
 
     state State::Online {
         actions {
-            on Action::SetIdleTask(task_ref: TaskRef) {
-                updates {
-                    self.idle = task_ref;
-                }
-            }
-
-            on Action::SetCurrentTask(task_ref: TaskRef) {
-                updates {
-                    self.curr = task_ref;
-                }
-            }
-
             on Action::Schedule {
-                panic "impl sched";
-            }
-
-            on Action::Enqueue(task_ref: TaskRef) {
-                drives Cpu0RunQ.Action::Enqueue(task_ref);
+                drives CurrentTaskRef.Transition::Suspend;
+                selects next_task_ref;
+                drives next_task_ref.Transition::Resume;
             }
         }
     }
 }
 
 object Cpu0Scheduler: Scheduler {
+    idle_task: BootTask;
 }

@@ -1,103 +1,145 @@
 {
-  "continuations": [],
-  "facts": [],
-  "final_state": [
+  "paths": [
     {
-      "object": [
-        "root",
-        "First"
-      ],
-      "state": [
-        "State",
-        "Done"
-      ]
-    },
-    {
-      "object": [
-        "root",
-        "Parent"
-      ],
-      "state": [
-        "State",
-        "Done"
-      ]
-    },
-    {
-      "object": [
-        "root",
-        "Second"
-      ],
-      "state": [
-        "State",
-        "Done"
-      ]
-    }
-  ],
-  "final_values": [],
-  "schema_version": 6,
-  "status": "passed",
-  "units": [
-    {
-      "candidate_state": [
-        "State",
-        "Done"
-      ],
-      "depends_on": [],
-      "directives": [],
-      "drives": [
+      "continuations": [],
+      "facts": [],
+      "final_state": [
         {
-          "candidate_state": [
+          "object": [
+            "root",
+            "First"
+          ],
+          "state": [
             "State",
             "Done"
-          ],
-          "depends_on": [],
-          "directives": [],
-          "drives": [],
-          "emits": [],
-          "ensures": [],
-          "establishes": [],
-          "event": {
-            "arguments": [],
-            "mode": "drive",
-            "signal": [
-              "Transition",
-              "Work"
-            ],
-            "source": [
-              "root",
-              "Parent"
-            ],
-            "target": [
-              "root",
-              "First"
-            ]
-          },
-          "handler": [
-            "Transition",
-            "Work"
-          ],
-          "invariants": [],
-          "kind": "drive",
-          "resumes": [],
-          "state_after": [
-            "State",
-            "Done"
-          ],
-          "state_before": [
-            "State",
-            "Idle"
-          ],
-          "status": "passed",
-          "yields": []
+          ]
         },
         {
+          "object": [
+            "root",
+            "Parent"
+          ],
+          "state": [
+            "State",
+            "Done"
+          ]
+        },
+        {
+          "object": [
+            "root",
+            "Second"
+          ],
+          "state": [
+            "State",
+            "Done"
+          ]
+        }
+      ],
+      "final_values": [],
+      "schedulers": [],
+      "status": "passed",
+      "units": [
+        {
           "candidate_state": [
             "State",
             "Done"
           ],
           "depends_on": [],
           "directives": [],
-          "drives": [],
+          "drives": [
+            {
+              "candidate_state": [
+                "State",
+                "Done"
+              ],
+              "depends_on": [],
+              "directives": [],
+              "drives": [],
+              "emits": [],
+              "ensures": [],
+              "establishes": [],
+              "event": {
+                "arguments": [],
+                "mode": "drive",
+                "signal": [
+                  "Transition",
+                  "Work"
+                ],
+                "source": [
+                  "root",
+                  "Parent"
+                ],
+                "target": [
+                  "root",
+                  "First"
+                ]
+              },
+              "handler": [
+                "Transition",
+                "Work"
+              ],
+              "invariants": [],
+              "kind": "drive",
+              "resumes": [],
+              "selections": [],
+              "state_after": [
+                "State",
+                "Done"
+              ],
+              "state_before": [
+                "State",
+                "Idle"
+              ],
+              "status": "passed",
+              "yields": []
+            },
+            {
+              "candidate_state": [
+                "State",
+                "Done"
+              ],
+              "depends_on": [],
+              "directives": [],
+              "drives": [],
+              "emits": [],
+              "ensures": [],
+              "establishes": [],
+              "event": {
+                "arguments": [],
+                "mode": "drive",
+                "signal": [
+                  "Transition",
+                  "Work"
+                ],
+                "source": [
+                  "root",
+                  "Parent"
+                ],
+                "target": [
+                  "root",
+                  "Second"
+                ]
+              },
+              "handler": [
+                "Transition",
+                "Work"
+              ],
+              "invariants": [],
+              "kind": "drive",
+              "resumes": [],
+              "selections": [],
+              "state_after": [
+                "State",
+                "Done"
+              ],
+              "state_before": [
+                "State",
+                "Idle"
+              ],
+              "status": "passed",
+              "yields": []
+            }
+          ],
           "emits": [],
           "ensures": [],
           "establishes": [],
@@ -106,24 +148,25 @@
             "mode": "drive",
             "signal": [
               "Transition",
-              "Work"
+              "Start"
             ],
             "source": [
               "root",
-              "Parent"
+              "Human"
             ],
             "target": [
               "root",
-              "Second"
+              "Parent"
             ]
           },
           "handler": [
             "Transition",
-            "Work"
+            "Start"
           ],
           "invariants": [],
-          "kind": "drive",
+          "kind": "root",
           "resumes": [],
+          "selections": [],
           "state_after": [
             "State",
             "Done"
@@ -135,43 +178,9 @@
           "status": "passed",
           "yields": []
         }
-      ],
-      "emits": [],
-      "ensures": [],
-      "establishes": [],
-      "event": {
-        "arguments": [],
-        "mode": "drive",
-        "signal": [
-          "Transition",
-          "Start"
-        ],
-        "source": [
-          "root",
-          "Human"
-        ],
-        "target": [
-          "root",
-          "Parent"
-        ]
-      },
-      "handler": [
-        "Transition",
-        "Start"
-      ],
-      "invariants": [],
-      "kind": "root",
-      "resumes": [],
-      "state_after": [
-        "State",
-        "Done"
-      ],
-      "state_before": [
-        "State",
-        "Idle"
-      ],
-      "status": "passed",
-      "yields": []
+      ]
     }
-  ]
+  ],
+  "schema_version": 7,
+  "status": "passed"
 }

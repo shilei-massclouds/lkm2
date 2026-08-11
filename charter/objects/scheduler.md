@@ -12,19 +12,29 @@ Scheduler 是 per-CPU 运行对象，不是整个内核共享的全局单例。�
 
 ```text
 Ready --BootSetup/Enable--> Online
-Online --Schedule--> panic "impl sched"
+Online --Schedule--> Suspend(current) → selects next → Resume(next)
 ```
 
-- Scheduler 固定维护 `mutable curr: TaskRef`、`mutable idle: TaskRef` 和
-  `runq: Collection<TaskRef>`；CPU0 实例初始 curr/idle 都是 `BootTaskRef`，runq
-  指向 owned 的 `Cpu0RunQ`。
-- `SetIdleTask(task_ref)` 与 `SetCurrentTask(task_ref)` 分别只更新对应字段。
-- `Enqueue(task_ref)` 委托 `Cpu0RunQ.Action::Enqueue(task_ref)`；队列保持唯一 FIFO。
-- `BootSetup` 先将 Scheduler 推进到 Online，再显式设置 BootTaskRef，并让
-  `KernelInitTask.Enable(KernelInitTaskRef)` 把 KernelInitTaskRef 入队。BootTaskRef
-  是直接维护的 current/idle，不进入 RunQ。
-- `Schedule` 仍是占位 panic。本轮不定义出队、PickNext、curr 切换、idle fallback、
-  run token、其它 CPU Scheduler 或通用任务选择策略。
+- `Scheduler` 声明 `sched_core: true`，模型只定义 Schedule 策略与生命周期；
+  current Task、idle Task 和实例私有 runq 由推导器按路径维护，不再建模为字段、
+  `Collection` 或 `TaskRef` 对象。
+- `Cpu0Scheduler.idle_task` 固定引用 `BootTask`。初始 current 与 idle 都是
+  `BootTask`，runq 为空。
+- sched_core 隐式提供无参数 `Action::Enqueue`、`Action::Dequeue`。signal source
+  必须是 Task；runq 保存 Task 对象身份、保持唯一 FIFO，且 Scheduler 仅在
+  `State::Online` 处理这两个信号。
+- `selects next_task_ref;` 对当前 runq 的每个成员按 FIFO 建立隔离推导路径；空
+  runq 使用 idle Task。选择不自动出队，后续 Resume 通过 Task 生命周期触发
+  Dequeue。
+- `CurrentTaskRef` 是当前 Scheduler 路径上下文的动态 Task target；它不是字段或
+  可声明对象。Schedule 严格执行 Suspend(current)、selects、Resume(next)，全部
+  成功后才提交 current。
+- 每个 Task 必须有且仅有一个以它为 `parent` 的 TaskFlow。Schedule 提交并完成
+  普通 emits/resumes 后，推导器隐式恢复所选 TaskFlow 的 `Action::Enter`。
+- `Task.Enable` 和 `Task.Suspend` 触发 Enqueue，`Task.Resume` 触发 Dequeue；
+  `BootTask` 作为 idle Task override Resume/Suspend，不操作 runq。
+- `BootSetup` 只把 Scheduler 推进 Online，并完成 `KernelInitTask` 的 Preset、Setup
+  与 Enable。默认推导最终 current 为 `KernelInitTask`、runq 为空。
 
 ## 后续 ownership
 
