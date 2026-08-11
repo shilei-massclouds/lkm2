@@ -1,18 +1,18 @@
-"""Data model for derivation root selection and schema-v5 results."""
+"""Data model for derivation root selection and schema-v6 results."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import re
 
-from model_ir import canonicalize_signal_name
+from model_ir import ModelExpression, canonicalize_signal_name
 
 
-SEQUENCE_SCHEMA_VERSION = 2
-RESULT_SCHEMA_VERSION = 5
+SEQUENCE_SCHEMA_VERSION = 3
+RESULT_SCHEMA_VERSION = 6
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_MODES = frozenset({"drive", "emit", "yield"})
-_UNIT_KINDS = frozenset({"root", "drive", "emit", "yield"})
+_MODES = frozenset({"drive", "emit", "yield", "resume"})
+_UNIT_KINDS = frozenset({"root", "drive", "emit", "yield", "resume"})
 _CHECK_STATUSES = frozenset({"passed", "failed", "established", "unsupported"})
 _FAILURE_CODES = frozenset(
     {
@@ -26,6 +26,8 @@ _FAILURE_CODES = frozenset(
         "invalid_continuation_action",
         "continuation_reentry",
         "panic",
+        "duplicate_collection_item",
+        "invalid_current_task_ref",
     }
 )
 _UNIT_STATUSES = frozenset({"passed", "yielded", "stopped", *_FAILURE_CODES})
@@ -71,6 +73,7 @@ class DerivationEvent:
     target: tuple[str, ...]
     signal: tuple[str, ...]
     mode: str
+    arguments: tuple[ModelExpression, ...] = ()
 
     def __post_init__(self) -> None:
         _name(self.source, "event.source")
@@ -87,8 +90,10 @@ class DerivationEvent:
         object.__setattr__(self, "signal", canonicalize_signal_name(self.signal))
         if self.mode not in _MODES:
             raise DerivationValidationError(
-                f"event.mode must be 'drive', 'emit', or 'yield', got {self.mode!r}"
+                "event.mode must be 'drive', 'emit', 'yield', or 'resume', "
+                f"got {self.mode!r}"
             )
+        _tuple_of(self.arguments, ModelExpression, "event.arguments")
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +166,7 @@ class DerivationFrame:
     object: tuple[str, ...]
     handler: tuple[str, ...]
     control_index: int
+    bindings: tuple[DerivationBinding, ...] = ()
 
     def __post_init__(self) -> None:
         _name(self.object, "frame.object")
@@ -177,6 +183,18 @@ class DerivationFrame:
             raise DerivationValidationError(
                 "frame.control_index must be a non-negative integer"
             )
+        _tuple_of(self.bindings, DerivationBinding, "frame.bindings")
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationBinding:
+    name: str
+    value: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.name) is not str or _IDENTIFIER.fullmatch(self.name) is None:
+            raise DerivationValidationError("binding.name must be an identifier")
+        _name(self.value, "binding.value")
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,6 +249,7 @@ class DerivationUnit:
     failure: DerivationFailure | None
     yields: tuple[DerivationUnit, ...] = ()
     directives: tuple[DerivationDirective, ...] = ()
+    resumes: tuple[DerivationUnit, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _UNIT_KINDS:
@@ -239,7 +258,7 @@ class DerivationUnit:
             raise DerivationValidationError("unit.event must be a DerivationEvent")
         if self.kind != "root" and self.kind != self.event.mode:
             raise DerivationValidationError(
-                "drive/emit unit kind must match unit.event.mode"
+                "non-root unit kind must match unit.event.mode"
             )
         _state(self.state_before, "unit.state_before")
         if self.handler is not None:
@@ -273,6 +292,7 @@ class DerivationUnit:
         _tuple_of(self.emits, DerivationUnit, "unit.emits")
         _tuple_of(self.yields, DerivationUnit, "unit.yields")
         _tuple_of(self.directives, DerivationDirective, "unit.directives")
+        _tuple_of(self.resumes, DerivationUnit, "unit.resumes")
         if self.handler is not None and self.handler != self.event.signal:
             raise DerivationValidationError("unit.handler must match unit.event.signal")
         if self.handler is None and self.candidate_state is not None:
@@ -352,7 +372,7 @@ class DerivationUnit:
                 raise DerivationValidationError("stopped unit must not duplicate child failure")
             if self.state_after is not None:
                 raise DerivationValidationError("stopped unit must not contain a completed state")
-            if self.handler is None or not (self.drives or self.yields) or self.emits:
+            if self.handler is None or not (self.drives or self.yields) or self.emits or self.resumes:
                 raise DerivationValidationError(
                     "stopped unit requires a handler and a failed drive/yield chain"
                 )
@@ -365,8 +385,10 @@ class DerivationUnit:
                 )
             if self.state_after is not None:
                 raise DerivationValidationError("failed unit must not contain a completed state")
-            if self.emits:
-                raise DerivationValidationError("failed unit must not contain emitted units")
+            if self.emits or self.resumes:
+                raise DerivationValidationError(
+                    "failed unit must not contain emitted or resumed units"
+                )
 
 
 def _unit_failures(units: tuple[DerivationUnit, ...]) -> tuple[DerivationFailure, ...]:
@@ -377,6 +399,7 @@ def _unit_failures(units: tuple[DerivationUnit, ...]) -> tuple[DerivationFailure
         failures.extend(_unit_failures(unit.drives))
         failures.extend(_unit_failures(unit.emits))
         failures.extend(_unit_failures(unit.yields))
+        failures.extend(_unit_failures(unit.resumes))
     return tuple(failures)
 
 
@@ -401,6 +424,37 @@ class DerivationState:
 
 
 @dataclass(frozen=True, slots=True)
+class DerivationValue:
+    object: tuple[str, ...]
+    field: str | None
+    values: tuple[tuple[str, ...], ...]
+    collection: bool = False
+
+    def __post_init__(self) -> None:
+        _name(self.object, "final_value.object")
+        if self.field is not None and (
+            type(self.field) is not str or _IDENTIFIER.fullmatch(self.field) is None
+        ):
+            raise DerivationValidationError(
+                "final_value.field must be an identifier or null"
+            )
+        if type(self.values) is not tuple:
+            raise DerivationValidationError("final_value.values must be a tuple")
+        for index, value in enumerate(self.values):
+            _name(value, f"final_value.values[{index}]")
+        if type(self.collection) is not bool:
+            raise DerivationValidationError("final_value.collection must be a boolean")
+        if self.collection != (self.field is None):
+            raise DerivationValidationError(
+                "collection final values must have a null field and field values must not"
+            )
+        if not self.collection and len(self.values) != 1:
+            raise DerivationValidationError(
+                "ordinary field final values require exactly one object reference"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class DerivationResult:
     schema_version: int
     status: str
@@ -409,6 +463,7 @@ class DerivationResult:
     facts: tuple[DerivationFact, ...]
     failure: DerivationFailure | None = None
     continuations: tuple[DerivationContinuation, ...] = ()
+    final_values: tuple[DerivationValue, ...] = ()
 
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != RESULT_SCHEMA_VERSION:
@@ -421,6 +476,10 @@ class DerivationResult:
         _tuple_of(self.final_state, DerivationState, "final_state")
         _tuple_of(self.facts, DerivationFact, "facts")
         _tuple_of(self.continuations, DerivationContinuation, "continuations")
+        _tuple_of(self.final_values, DerivationValue, "final_values")
+        value_keys = [(item.object, item.field) for item in self.final_values]
+        if len(set(value_keys)) != len(value_keys):
+            raise DerivationValidationError("final_values contains a duplicate target")
         names = [item.object for item in self.final_state]
         if len(set(names)) != len(names):
             raise DerivationValidationError("final_state contains a duplicate object")
@@ -431,6 +490,16 @@ class DerivationResult:
         )
         object.__setattr__(
             self, "facts", tuple(sorted(self.facts, key=lambda item: (item.predicate, item.arguments)))
+        )
+        object.__setattr__(
+            self,
+            "final_values",
+            tuple(
+                sorted(
+                    self.final_values,
+                    key=lambda item: (item.object, "" if item.field is None else item.field),
+                )
+            ),
         )
         continuation_roots = [item.root for item in self.continuations]
         if len(set(continuation_roots)) != len(continuation_roots):

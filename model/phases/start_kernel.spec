@@ -17,12 +17,10 @@ object StartKernel: PhaseType {
     state State::Online {
         actions {
             override on Action::Enter {
-                drives {
-                    EarlyBoot.Action::Enter;
-                    BootSetup.Action::Enter;
-                    BootHandoff.Action::Enter;
-                    BootIdle.Action::Enter;
-                }
+                resumes EarlyBoot.Action::Enter;
+                resumes BootSetup.Action::Enter;
+                resumes BootHandoff.Action::Enter;
+                resumes BootIdle.Action::Enter;
             }
         }
     }

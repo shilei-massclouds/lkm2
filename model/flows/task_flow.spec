@@ -23,9 +23,7 @@ object BootInitFlow: TaskFlow {
     state State::Online {
         actions {
             override on Action::Enter {
-                drives {
-                    ArchHead.Action::Enter;
-                }
+                resumes ArchHead.Action::Enter;
             }
         }
     }
@@ -37,10 +35,8 @@ object KernelInitFlow: TaskFlow {
     state State::Online {
         actions {
             override on Action::Enter {
-                drives {
-                    KernelInitPhase.Action::Enter;
-                    UserRunPhase.Action::Enter;
-                }
+                resumes KernelInitPhase.Action::Enter;
+                resumes UserRunPhase.Action::Enter;
             }
         }
     }

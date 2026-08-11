@@ -1,0 +1,101 @@
+Human -> Computer: drives Transition::Preset
+  current state: State::Base
+  Computer -> QemuVirtPlatform: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
+  Computer -> OpenSBI: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
+  Computer -> Kernel: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
+  Computer -> RootFs: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
+  commit state: State::Prepared
+
+Human -> Computer: drives Transition::Setup
+  current state: State::Prepared
+  Computer -> QemuVirtPlatform: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
+  Computer -> OpenSBI: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
+  Computer -> Kernel: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
+  Computer -> RootFs: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
+  commit state: State::Ready
+
+Human -> Computer: emits Transition::Enable
+  current state: State::Ready
+  commit state: State::Online
+
+Computer -> QemuVirtPlatform: emits Transition::Enable
+  current state: State::Ready
+  commit state: State::Online
+
+QemuVirtPlatform -> OpenSBI: emits Transition::Enable
+  current state: State::Ready
+  commit state: State::Online
+
+OpenSBI -> Kernel: emits Transition::Enable
+  current state: State::Ready
+  commit state: State::Online
+
+Kernel -> BootInitFlow: resumes Action::Enter
+  current state: State::Online
+  commit state: unchanged
+
+BootInitFlow -> ArchHead: resumes Action::Enter
+  current state: State::Online
+  commit state: unchanged
+
+ArchHead -> StartKernel: resumes Action::Enter
+  current state: State::Online
+  commit state: unchanged
+
+StartKernel -> EarlyBoot: resumes Action::Enter
+  current state: State::Online
+  print: here
+  commit state: unchanged
+
+StartKernel -> BootSetup: resumes Action::Enter
+  current state: State::Online
+  BootSetup -> Cpu0Scheduler: drives Transition::Enable
+    current state: State::Ready
+    commit state: State::Online
+  BootSetup -> Cpu0Scheduler: drives Action::SetIdleTask(objects::scheduler::BootTaskRef)
+    current state: State::Online
+    commit state: unchanged
+  BootSetup -> Cpu0Scheduler: drives Action::SetCurrentTask(objects::scheduler::BootTaskRef)
+    current state: State::Online
+    commit state: unchanged
+  BootSetup -> KernelInitTask: drives Transition::Preset
+    current state: State::Base
+    commit state: State::Prepared
+  BootSetup -> KernelInitTask: drives Transition::Setup
+    current state: State::Prepared
+    commit state: State::Ready
+  BootSetup -> KernelInitTask: drives Transition::Enable(objects::scheduler::KernelInitTaskRef)
+    current state: State::Ready
+    KernelInitTask -> Cpu0Scheduler: drives Action::Enqueue(objects::scheduler::KernelInitTaskRef)
+      current state: State::Online
+      Cpu0Scheduler -> Cpu0RunQ: drives Action::Enqueue(objects::scheduler::KernelInitTaskRef)
+        current state: <none>
+        commit state: unchanged
+      commit state: unchanged
+    commit state: State::Online
+  commit state: unchanged
+
+StartKernel -> BootHandoff: resumes Action::Enter
+  current state: State::Online
+  BootHandoff -> Cpu0Scheduler: yields Action::Schedule
+    current state: State::Online
+    panic: impl sched ✗
+    commit state: not committed ✗
+
+stopped: panic

@@ -56,6 +56,7 @@ def _all_units(units):
         yield from _all_units(unit.drives)
         yield from _all_units(unit.yields)
         yield from _all_units(unit.emits)
+        yield from _all_units(unit.resumes)
 
 
 class ModelDirectiveTests(unittest.TestCase):
@@ -77,7 +78,7 @@ class ModelDirectiveTests(unittest.TestCase):
             tuple(action.blocks[0].kind for action in actions), ("print", "panic")
         )
 
-    def test_directives_lower_to_strict_model_ir_v6_blocks(self) -> None:
+    def test_directives_lower_to_strict_model_ir_v7_blocks(self) -> None:
         directory, _, model = _compile_text(
             """
             object Computer: T {
@@ -90,7 +91,7 @@ class ModelDirectiveTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         blocks = model.objects[0].states[0].actions[0].blocks
-        self.assertEqual(model.schema_version, 6)
+        self.assertEqual(model.schema_version, 7)
         self.assertEqual(tuple(block.kind for block in blocks), ("print", "panic"))
         self.assertEqual(
             tuple(block.expressions[0].value for block in blocks), ("你好", "停止")
@@ -99,7 +100,7 @@ class ModelDirectiveTests(unittest.TestCase):
         output = StringIO()
         dump_model_ir(model, output)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 6)
+        self.assertEqual(document["schema_version"], 7)
         self.assertEqual(load_model_ir(StringIO(output.getvalue())), model)
 
         action = document["modules"][0]["objects"][0]["states"][0]["actions"][0]
@@ -175,7 +176,7 @@ class DerivationDirectiveTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         sequence = default_derivation_sequence(model)
-        self.assertEqual(sequence.schema_version, 2)
+        self.assertEqual(sequence.schema_version, 3)
         result = derive(model, sequence)
         unit = result.units[0]
         self.assertEqual(result.status, "passed")
@@ -215,7 +216,7 @@ class DerivationDirectiveTests(unittest.TestCase):
         serialized = StringIO()
         dump_derivation_result(result, serialized)
         document = json.loads(serialized.getvalue())
-        self.assertEqual(document["schema_version"], 5)
+        self.assertEqual(document["schema_version"], 6)
         self.assertEqual(load_derivation_result(StringIO(serialized.getvalue())), result)
 
         missing_directives = json.loads(serialized.getvalue())
@@ -367,13 +368,16 @@ class DerivationDirectiveTests(unittest.TestCase):
                     }
                 } }
             }
-            external Human { emits { Boot.Action::Enter; Boot.Action::Enter; } }
+            external Human {
+                resumes Boot.Action::Enter;
+                resumes Boot.Action::Enter;
+            }
             """
         )
         self.addCleanup(directory.cleanup)
         selected = default_derivation_sequence(model)
         self.assertEqual(len(selected.events), 2)
-        result = derive(model, DerivationSequence(2, selected.events))
+        result = derive(model, DerivationSequence(3, selected.events))
         directives = tuple(
             directive
             for unit in _all_units(result.units)

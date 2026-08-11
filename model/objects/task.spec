@@ -1,6 +1,8 @@
 /* Schedulable task carrier and the boot task instance. */
 
 use model::systems::kernel::Kernel;
+use model::objects::scheduler::Cpu0Scheduler;
+use model::objects::scheduler::TaskRef;
 
 type Task {
     state State::Base {
@@ -19,7 +21,8 @@ type Task {
 
     state State::Ready {
         transitions {
-            on Transition::Enable -> State::Online {
+            on Transition::Enable(task_ref: TaskRef) -> State::Online {
+                drives Cpu0Scheduler.Action::Enqueue(task_ref);
             }
         }
     }

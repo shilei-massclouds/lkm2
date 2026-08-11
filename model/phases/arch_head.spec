@@ -10,9 +10,7 @@ object ArchHead: PhaseType {
     state State::Online {
         actions {
             override on Action::Enter {
-                drives {
-                    StartKernel.Action::Enter;
-                }
+                resumes StartKernel.Action::Enter;
             }
         }
     }

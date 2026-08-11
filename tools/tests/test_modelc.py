@@ -501,8 +501,8 @@ boot_handoff_path = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
 boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
-EXPECTED_MODEL = ModelIR(
-    schema_version=6,
+EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.spec"))(
+    schema_version=7,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -890,7 +890,7 @@ class ParserAndCompilerTests(unittest.TestCase):
         driven = tuple(
             signal.target
             for block in kernel_init_flow.states[0].actions[0].blocks
-            if block.kind == "drives"
+            if block.kind == "resumes"
             for signal in block.signals
         )
         self.assertEqual(driven, (kernel_init_phase_path, user_run_phase_path))
@@ -1605,6 +1605,166 @@ class ParserAndCompilerTests(unittest.TestCase):
         self.assertIn("origin module 'root.missing'", caught.exception.diagnostic.message)
 
 
+    def test_parameterized_signals_fields_updates_and_collection_lower(self) -> None:
+        files = {
+            "root.spec": """
+                type Ref;
+                object FirstRef: Ref {}
+                object Queue: Collection<Ref> {}
+                object Target: T {
+                    mutable current: Ref = FirstRef;
+                    state State::Base { actions {
+                        on Action::Accept(item: Ref) {
+                            updates { self.current = item; }
+                            drives Queue.Action::Enqueue(item);
+                        }
+                    } }
+                }
+                external Human { drives Target.Action::Accept(FirstRef); }
+            """,
+        }
+        with model_tree(files) as (_, path):
+            model = compile_spec(path)
+        target = next(item for item in model.objects if item.name[-1] == "Target")
+        action = target.states[0].actions[0]
+        self.assertEqual(action.parameters[0].name, "item")
+        self.assertEqual(action.parameters[0].type.name, ("Ref",))
+        self.assertEqual(target.attrs[0].name, "current")
+        self.assertTrue(target.attrs[0].mutable)
+        self.assertEqual(target.attrs[0].default.value, "FirstRef")
+        self.assertEqual(action.blocks[0].kind, "updates")
+        self.assertEqual(action.blocks[0].updates[0].value.value, "item")
+        self.assertEqual(action.blocks[1].signals[0].arguments[0].value, "item")
+        root_signal = model.externals[0].signals[0]
+        self.assertEqual(root_signal.arguments[0].value, "FirstRef")
+
+        stream = StringIO()
+        dump_model_ir(model, stream)
+        self.assertEqual(load_model_ir(StringIO(stream.getvalue())), model)
+
+    def test_single_line_and_block_signal_forms_are_equivalent(self) -> None:
+        body = """
+            object Target: T {
+                state State::Base { actions {
+                    on Action::One { drives {} }
+                    on Action::Two { drives {} }
+                } }
+            }
+            object Source: T {
+                state State::Base { actions {
+                    on Action::Run {
+                        drives Target.Action::One;
+                        drives { Target.Action::Two; }
+                        emits Target.Action::One;
+                        emits { Target.Action::Two; }
+                    }
+                } }
+            }
+            external Human {
+                drives Source.Action::Run;
+                emits Target.Action::One;
+            }
+        """
+        with model_tree({"root.spec": body}) as (_, path):
+            model = compile_spec(path)
+        source = next(item for item in model.objects if item.name[-1] == "Source")
+        blocks = source.states[0].actions[0].blocks
+        self.assertEqual(
+            tuple((block.kind, block.signals[0].target[-1]) for block in blocks),
+            (("drives", "Target"),) * 2 + (("emits", "Target"),) * 2,
+        )
+
+    def test_parameterized_calls_and_override_signatures_are_checked(self) -> None:
+        invalid = (
+            (
+                "expects 1 argument",
+                """
+                type Ref; object R: Ref {}
+                object Target: T { state State::Base { actions {
+                    on Action::Take(item: Ref) { drives {} }
+                } } }
+                external Human { drives Target.Action::Take; }
+                """,
+            ),
+            (
+                "incompatible object type",
+                """
+                type Ref; type Other; object O: Other {}
+                object Target: T { state State::Base { actions {
+                    on Action::Take(item: Ref) { drives {} }
+                } } }
+                external Human { drives Target.Action::Take(O); }
+                """,
+            ),
+            (
+                "no resolvable handler signature",
+                """
+                type Ref; object R: Ref {}
+                object Target: T { state State::Base {} }
+                external Human { drives Target.Action::Missing(R); }
+                """,
+            ),
+            (
+                "preserve its parameter signature",
+                """
+                type Ref; type Other;
+                type Base { state State::Base { actions {
+                    on Action::Take(item: Ref);
+                } } }
+                type Derived: Base { state State::Base { actions {
+                    override on Action::Take(item: Other) { drives {} }
+                } } }
+                object Target: Derived {}
+                external Human { drives Target.Action::Take; }
+                """,
+            ),
+        )
+        for message, body in invalid:
+            with self.subTest(message=message):
+                with model_tree({"root.spec": body}) as (_, path):
+                    with self.assertRaises(CompilationError) as caught:
+                        compile_spec(path)
+                self.assertIn(message, caught.exception.diagnostic.message)
+
+    def test_resumes_is_the_only_external_continuation_entry(self) -> None:
+        valid = """
+            type Flow {
+                continuation: true;
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Enter; } }
+            }
+            object Boot: Flow { state State::Online { actions {
+                override on Action::Enter { drives {} }
+            } } }
+            external Human { resumes Boot.Action::Enter; }
+        """
+        with model_tree({"root.spec": valid}) as (_, path):
+            model = compile_spec(path)
+        self.assertEqual(model.externals[0].signals[0].mode, "resume")
+
+        for statement in (
+            "emits Boot.Action::Enter;",
+            "drives Boot.Action::Enter;",
+        ):
+            with self.subTest(statement=statement):
+                body = valid.replace(
+                    "resumes Boot.Action::Enter;", statement
+                )
+                with model_tree({"root.spec": body}) as (_, path):
+                    with self.assertRaises(CompilationError):
+                        compile_spec(path)
+
+        non_continuation = """
+            object Target: T { state State::Base { actions {
+                on Action::Enter { drives {} }
+            } } }
+            external Human { resumes Target.Action::Enter; }
+        """
+        with model_tree({"root.spec": non_continuation}) as (_, path):
+            with self.assertRaisesRegex(CompilationError, "resumes"):
+                compile_spec(path)
+
+
 class ModelIRJSONTests(unittest.TestCase):
     def test_canonical_output_is_repeatable_and_round_trips(self) -> None:
         first = StringIO()
@@ -1722,9 +1882,9 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(duplicate_declaration),
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
-            EXPECTED_JSON.replace('"schema_version": 6', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 7', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":6,"schema_version":6}',
+            '{"schema_version":7,"schema_version":7}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -1733,7 +1893,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=6,
+            schema_version=7,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -1741,14 +1901,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=6,
+                schema_version=7,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=6,
+                schema_version=7,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

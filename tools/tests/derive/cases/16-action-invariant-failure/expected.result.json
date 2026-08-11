@@ -19,7 +19,8 @@
       ]
     }
   ],
-  "schema_version": 5,
+  "final_values": [],
+  "schema_version": 6,
   "status": "invariant_failed",
   "units": [
     {
@@ -31,6 +32,7 @@
       "ensures": [],
       "establishes": [],
       "event": {
+        "arguments": [],
         "mode": "drive",
         "signal": [
           "Action",
@@ -62,6 +64,7 @@
         }
       ],
       "kind": "root",
+      "resumes": [],
       "state_after": null,
       "state_before": [
         "State",

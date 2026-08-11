@@ -13,7 +13,8 @@
       ]
     }
   ],
-  "schema_version": 5,
+  "final_values": [],
+  "schema_version": 6,
   "status": "passed",
   "units": [
     {
@@ -28,6 +29,7 @@
       "ensures": [],
       "establishes": [],
       "event": {
+        "arguments": [],
         "mode": "drive",
         "signal": [
           "Transition",
@@ -48,6 +50,7 @@
       ],
       "invariants": [],
       "kind": "root",
+      "resumes": [],
       "state_after": [
         "State",
         "Ready"

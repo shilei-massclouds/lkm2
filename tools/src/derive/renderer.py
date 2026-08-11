@@ -1,4 +1,4 @@
-"""Stable human rendering for schema-v5 derivation results."""
+"""Stable human rendering for schema-v6 derivation results."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import unicodedata
 from typing import TextIO
 
 from .model import DerivationResult, DerivationUnit
+from model_ir import ModelExpression
 
 
 def _all_units(units: tuple[DerivationUnit, ...]):
@@ -14,6 +15,7 @@ def _all_units(units: tuple[DerivationUnit, ...]):
         yield from _all_units(unit.drives)
         yield from _all_units(unit.yields)
         yield from _all_units(unit.emits)
+        yield from _all_units(unit.resumes)
 
 
 def _shortest_names(result: DerivationResult) -> dict[tuple[str, ...], str]:
@@ -59,6 +61,32 @@ def _single_line(message: str) -> str:
     return "".join(result)
 
 
+def _expression(expression: ModelExpression) -> str:
+    if expression.kind in {"identifier", "integer"}:
+        return str(expression.value)
+    if expression.kind == "string":
+        return repr(expression.value)
+    if expression.kind in {"member", "path"}:
+        separator = "." if expression.kind == "member" else "::"
+        return f"{_expression(expression.children[0])}{separator}{expression.value}"
+    if expression.kind == "call":
+        return (
+            f"{_expression(expression.children[0])}("
+            + ", ".join(_expression(item) for item in expression.children[1:])
+            + ")"
+        )
+    if expression.kind == "index":
+        return f"{_expression(expression.children[0])}[{_expression(expression.children[1])}]"
+    if expression.kind == "unary":
+        return f"{expression.value}{_expression(expression.children[0])}"
+    if expression.kind == "binary":
+        return (
+            f"({_expression(expression.children[0])} {expression.value} "
+            f"{_expression(expression.children[1])})"
+        )
+    return f"<{expression.kind}>"
+
+
 def _render_unit(
     unit: DerivationUnit,
     depth: int,
@@ -67,9 +95,14 @@ def _render_unit(
     indent = "  " * depth
     detail_indent = "  " * (depth + 1)
     event = unit.event
+    arguments = (
+        "(" + ", ".join(_expression(item) for item in event.arguments) + ")"
+        if event.arguments
+        else ""
+    )
     lines = [
         f"{indent}{names[event.source]} -> {names[event.target]}: "
-        f"{event.mode}s {'::'.join(event.signal)}"
+        f"{event.mode}s {'::'.join(event.signal)}{arguments}"
     ]
     lines.append(f"{detail_indent}current state: {_special(unit.state_before)}")
     for child in unit.drives:
@@ -89,6 +122,10 @@ def _render_unit(
         )
         lines.append(f"{detail_indent}commit state: {committed}")
         for child in unit.emits:
+            if depth == 0:
+                lines.append("")
+            lines.extend(_render_unit(child, depth, names))
+        for child in unit.resumes:
             if depth == 0:
                 lines.append("")
             lines.extend(_render_unit(child, depth, names))

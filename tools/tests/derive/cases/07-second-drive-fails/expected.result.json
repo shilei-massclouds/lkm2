@@ -39,7 +39,8 @@
       ]
     }
   ],
-  "schema_version": 5,
+  "final_values": [],
+  "schema_version": 6,
   "status": "unhandled_signal",
   "units": [
     {
@@ -62,6 +63,7 @@
           "ensures": [],
           "establishes": [],
           "event": {
+            "arguments": [],
             "mode": "drive",
             "signal": [
               "Transition",
@@ -82,6 +84,7 @@
           ],
           "invariants": [],
           "kind": "drive",
+          "resumes": [],
           "state_after": [
             "State",
             "Done"
@@ -102,6 +105,7 @@
           "ensures": [],
           "establishes": [],
           "event": {
+            "arguments": [],
             "mode": "drive",
             "signal": [
               "Transition",
@@ -125,6 +129,7 @@
           "handler": null,
           "invariants": [],
           "kind": "drive",
+          "resumes": [],
           "state_after": null,
           "state_before": [
             "State",
@@ -138,6 +143,7 @@
       "ensures": [],
       "establishes": [],
       "event": {
+        "arguments": [],
         "mode": "drive",
         "signal": [
           "Transition",
@@ -158,6 +164,7 @@
       ],
       "invariants": [],
       "kind": "root",
+      "resumes": [],
       "state_after": null,
       "state_before": [
         "State",

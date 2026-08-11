@@ -25,10 +25,13 @@ type_base: ":" type_expression
           | continuation_property
           | initial_state_property
           | state_declaration
-field_declaration: IDENTIFIER ":" type_expression ";"
+field_declaration: mutable_marker? IDENTIFIER ":" type_expression field_default? ";"
+mutable_marker: "mutable"
+field_default: "=" expression
 
 object_declaration: "object" IDENTIFIER ":" type_expression "{" object_item* "}"
 ?object_item: initial_state_property
+            | field_declaration
             | continuation_property
             | parent_property
             | source_property
@@ -44,7 +47,7 @@ reference_declaration: "reference" IDENTIFIER "{" reference_assignment* "}"
 reference_assignment: assignable_expression "=" expression ";"
 
 external_declaration: "external" IDENTIFIER "{" external_item* "}"
-?external_item: drives_block | emits_block
+?external_item: drives_block | emits_block | resumes_statement
 
 state_declaration: "state" qualified_identifier "{" state_item* "}"
 ?state_item: invariant_block | transitions_block | actions_block
@@ -52,13 +55,14 @@ invariant_block: "invariant" expression_block
 transitions_block: "transitions" "{" transition_handler* "}"
 actions_block: "actions" "{" action_handler* "}"
 
-transition_handler: override_marker? "on" expression transition_handler_tail
+transition_handler: override_marker? "on" handler_signal transition_handler_tail
 ?transition_handler_tail: "->" expression handler_body -> concrete_transition_handler
                         | ";"                         -> abstract_transition_handler
-action_handler: override_marker? "on" expression action_handler_tail
+action_handler: override_marker? "on" handler_signal action_handler_tail
 ?action_handler_tail: handler_body -> concrete_action_handler
                     | ";"          -> abstract_action_handler
 override_marker: "override"
+handler_signal: qualified_identifier "(" parameters? ")" | qualified_identifier
 handler_body: "{" handler_item* "}"
 ?handler_item: depends_on_block
              | may_change_block
@@ -69,16 +73,22 @@ handler_body: "{" handler_item* "}"
              | ensures_block
              | establishes_block
              | emits_block
+             | resumes_statement
+             | updates_block
              | deferred_declaration
 depends_on_block: "depends_on" expression_block
 may_change_block: "may_change" expression_block
-drives_block: "drives" expression_block
+drives_block: "drives" signal_body
 yields_statement: "yields" expression ";"
+resumes_statement: "resumes" expression ";"
 print_statement: "print" STRING ";"
 panic_statement: "panic" STRING ";"
 ensures_block: "ensures" expression_block
 establishes_block: "establishes" expression_block
-emits_block: "emits" expression_block
+emits_block: "emits" signal_body
+?signal_body: expression_block | expression ";" -> single_signal_body
+updates_block: "updates" "{" update_statement* "}"
+update_statement: assignable_expression "=" expression ";"
 expression_block: "{" expression_statement* "}"
 
 deferred_declaration: "deferred" IDENTIFIER "." DECIMAL_INTEGER "{" deferred_item* "}"

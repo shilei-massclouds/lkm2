@@ -18,7 +18,13 @@ def default_derivation_sequence(model: ModelIR) -> DerivationSequence:
     return DerivationSequence(
         SEQUENCE_SCHEMA_VERSION,
         tuple(
-            DerivationEvent(signal.source, signal.target, signal.signal, signal.mode)
+            DerivationEvent(
+                signal.source,
+                signal.target,
+                signal.signal,
+                signal.mode,
+                signal.arguments,
+            )
             for signal in origin.signals
         ),
     )

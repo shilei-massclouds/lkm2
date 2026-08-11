@@ -1,4 +1,4 @@
-"""Compilation pipeline from a model-root specification to Model IR v6."""
+"""Compilation pipeline from a model-root specification to Model IR v7."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ from model_ir import (
     ModelTransition,
     ModelType,
     ModelTypeExpression,
+    ModelUpdate,
     canonicalize_signal_name,
 )
 
@@ -212,7 +213,12 @@ def _signal(
     mode: str,
     imports: dict[str, tuple[str, ...]],
 ) -> ModelSignal:
-    access = _flatten_access(_lower_expression(node))
+    expression = _lower_expression(node)
+    arguments: tuple[ModelExpression, ...] = ()
+    if expression.kind == "call":
+        arguments = expression.children[1:]
+        expression = expression.children[0]
+    access = _flatten_access(expression)
     expected = "signal must have the form Object.Transition::<Name> or Object.Action::<Name>"
     if access is None:
         raise _semantic_error(module, node, expected)
@@ -225,7 +231,7 @@ def _signal(
         raise _semantic_error(module, node, expected)
     target = _resolve_target(tuple(segments[:-2]), module.name, imports)
     signal = canonicalize_signal_name((segments[-2], segments[-1]))
-    return ModelSignal(source, target, signal, mode)
+    return ModelSignal(source, target, signal, mode, arguments)
 
 
 def _transition_handler_signal(
@@ -245,12 +251,85 @@ def _transition_handler_signal(
     return signal
 
 
+def _handler_signature(
+    module: LoadedModule, node: Tree, prefix: str
+) -> tuple[tuple[str, ...], tuple[ModelParameter, ...]]:
+    name_node = next(
+        child
+        for child in node.children
+        if isinstance(child, Tree) and child.data == "qualified_identifier"
+    )
+    name = _qualified_identifier(name_node)
+    if len(name) != 2 or name[0] != prefix:
+        raise _semantic_error(
+            module, node, f"accepted signal must have the form {prefix}::<Name>"
+        )
+    parameters_node = next(
+        (
+            child
+            for child in node.children
+            if isinstance(child, Tree) and child.data == "parameters"
+        ),
+        None,
+    )
+    parameters = () if parameters_node is None else tuple(
+        ModelParameter(str(child.children[0]), _type_expression(child.children[1]))
+        for child in parameters_node.children
+        if isinstance(child, Tree) and child.data == "parameter"
+    )
+    canonical = canonicalize_signal_name(name)
+    if canonical != name:
+        raise _semantic_error(
+            module,
+            node,
+            f"{'transition handler signal' if prefix == 'Transition' else 'action handler signal'} "
+            f"{'::'.join(name)} is non-canonical; use {'::'.join(canonical)}",
+        )
+    return name, parameters
+
+
 def _fields(node: Tree) -> tuple[ModelField, ...]:
     fields = []
     for child in node.children:
         if isinstance(child, Tree) and child.data == "field_declaration":
-            fields.append(ModelField(str(child.children[0]), _type_expression(child.children[1])))
+            mutable = any(
+                isinstance(item, Tree) and item.data == "mutable_marker"
+                for item in child.children
+            )
+            name = next(item for item in child.children if isinstance(item, Token))
+            type_node = next(
+                item
+                for item in child.children
+                if isinstance(item, Tree) and item.data == "type_expression"
+            )
+            default_node = next(
+                (
+                    item
+                    for item in child.children
+                    if isinstance(item, Tree) and item.data == "field_default"
+                ),
+                None,
+            )
+            fields.append(
+                ModelField(
+                    str(name),
+                    _type_expression(type_node),
+                    mutable,
+                    None
+                    if default_node is None
+                    else _lower_expression(default_node.children[0]),
+                )
+            )
     return tuple(fields)
+
+
+def _signal_nodes(node: Tree) -> tuple[Tree | Token, ...]:
+    body = next(child for child in node.children if isinstance(child, Tree))
+    if body.data == "expression_block":
+        return tuple(body.children)
+    if body.data == "single_signal_body":
+        return (body.children[0],)
+    raise RuntimeError(f"unexpected signal body {body.data}")
 
 
 def _deferred(module: LoadedModule, node: Tree) -> ModelDeferred:
@@ -296,10 +375,9 @@ def _handler_blocks(
             result.append(ModelHandlerBlock(expression_kinds[rule], _expression_block(child)))
         elif rule in {"drives_block", "emits_block"}:
             mode = "drive" if rule == "drives_block" else "emit"
-            expressions = next(grandchild for grandchild in child.children if isinstance(grandchild, Tree))
             signals = tuple(
                 _signal(module, statement, source, mode, imports)
-                for statement in expressions.children
+                for statement in _signal_nodes(child)
             )
             result.append(ModelHandlerBlock(rule.removesuffix("_block"), signals=signals))
         elif rule == "yields_statement":
@@ -308,6 +386,30 @@ def _handler_blocks(
                     "yields",
                     signals=(
                         _signal(module, child.children[0], source, "yield", imports),
+                    ),
+                )
+            )
+        elif rule == "resumes_statement":
+            result.append(
+                ModelHandlerBlock(
+                    "resumes",
+                    signals=(
+                        _signal(module, child.children[0], source, "resume", imports),
+                    ),
+                )
+            )
+        elif rule == "updates_block":
+            result.append(
+                ModelHandlerBlock(
+                    "updates",
+                    updates=tuple(
+                        ModelUpdate(
+                            _lower_expression(statement.children[0]),
+                            _lower_expression(statement.children[1]),
+                        )
+                        for statement in child.children
+                        if isinstance(statement, Tree)
+                        and statement.data == "update_statement"
                     ),
                 )
             )
@@ -370,9 +472,12 @@ def _state(
                 body = None if abstract else tail.children[1]
                 assert target_node is None or isinstance(target_node, Tree)
                 assert body is None or isinstance(body, Tree)
+                signal, parameters = _handler_signature(
+                    module, signal_node, "Transition"
+                )
                 transitions.append(
                     ModelTransition(
-                        signal=_transition_handler_signal(module, signal_node),
+                        signal=signal,
                         target_state=None
                         if target_node is None
                         else _special_name(module, target_node, "State", "target state"),
@@ -381,6 +486,7 @@ def _state(
                         else _handler_blocks(module, body, object_name, imports),
                         abstract=abstract,
                         override=override,
+                        parameters=parameters,
                     )
                 )
         elif child.data == "actions_block":
@@ -411,9 +517,7 @@ def _state(
                 abstract = tail.data == "abstract_action_handler"
                 body = None if abstract else tail.children[0]
                 assert body is None or isinstance(body, Tree)
-                signal = _special_name(
-                    module, signal_node, "Action", "accepted signal"
-                )
+                signal, parameters = _handler_signature(module, signal_node, "Action")
                 if body is not None and not body.children:
                     raise _semantic_error(
                         module,
@@ -428,6 +532,7 @@ def _state(
                         else _handler_blocks(module, body, object_name, imports),
                         abstract=abstract,
                         override=override,
+                        parameters=parameters,
                     )
                 )
     return ModelState(name, tuple(invariants), tuple(transitions), tuple(actions))
@@ -475,13 +580,17 @@ def _object(
             for assignment in _tree_children(reference, "reference_assignment")
         )
         references.append(ModelReference(str(reference.children[0]), assignments))
+    direct_fields = _fields(node)
+    declared_fields = direct_fields + (
+        () if not attrs_nodes else _fields(attrs_nodes[0])
+    )
     return ModelObject(
         name=name,
         base_type=_type_expression(node.children[1]),
         initial_state=initial_state,
         parent=None if parent_node is None else _lower_expression(parent_node.children[0]),
         source=None if source_node is None else _lower_expression(source_node.children[0]),
-        attrs=None if not attrs_nodes else _fields(attrs_nodes[0]),
+        attrs=None if not declared_fields else declared_fields,
         states=states,
         references=tuple(references),
     )
@@ -561,11 +670,8 @@ def _model_type(
         for item in items
         if item.data == "state_declaration"
     )
-    fields = tuple(
-        ModelField(str(item.children[0]), _type_expression(item.children[1]))
-        for item in items
-        if item.data == "field_declaration"
-    )
+    field_container = Tree("field_container", list(items))
+    fields = _fields(field_container)
     return ModelType(
         name=name,
         fields=None if not items and base_node is None else fields,
@@ -592,11 +698,19 @@ def _external(
     signals: list[ModelSignal] = []
     for block in node.children[1:]:
         assert isinstance(block, Tree)
-        mode = "drive" if block.data == "drives_block" else "emit"
-        expression_block = next(child for child in block.children if isinstance(child, Tree))
+        mode = {
+            "drives_block": "drive",
+            "emits_block": "emit",
+            "resumes_statement": "resume",
+        }[block.data]
+        signal_nodes = (
+            (block.children[0],)
+            if block.data == "resumes_statement"
+            else _signal_nodes(block)
+        )
         signals.extend(
             _signal(module, statement, name, mode, imports)
-            for statement in expression_block.children
+            for statement in signal_nodes
         )
     return ModelExternal(name, tuple(signals))
 
@@ -667,6 +781,14 @@ def _merge_handler_group(
                 "has no inherited handler",
             )
         if exists:
+            inherited_handler = result[positions[handler.signal]]
+            if inherited_handler.parameters != handler.parameters:
+                raise _semantic_error(
+                    module,
+                    owner,
+                    f"override {label} handler {'::'.join(handler.signal)!r} "
+                    "must preserve its parameter signature",
+                )
             result[positions[handler.signal]] = handler
         else:
             positions[handler.signal] = len(result)
@@ -714,7 +836,9 @@ def _merge_states(
 
 
 def _rebind_signal(signal: ModelSignal, source: tuple[str, ...]) -> ModelSignal:
-    return ModelSignal(source, signal.target, signal.signal, signal.mode)
+    return ModelSignal(
+        source, signal.target, signal.signal, signal.mode, signal.arguments
+    )
 
 
 def _rebind_states(
@@ -727,6 +851,7 @@ def _rebind_states(
                 block.expressions,
                 tuple(_rebind_signal(signal, source) for signal in block.signals),
                 block.deferred,
+                block.updates,
             )
             for block in values
         )
@@ -742,6 +867,7 @@ def _rebind_states(
                     blocks(handler.blocks),
                     handler.abstract,
                     handler.override,
+                    handler.parameters,
                 )
                 for handler in state.transitions
             ),
@@ -751,6 +877,7 @@ def _rebind_states(
                     blocks(handler.blocks),
                     handler.abstract,
                     handler.override,
+                    handler.parameters,
                 )
                 for handler in state.actions
             ),
@@ -868,6 +995,13 @@ def _expand_inheritance(
         module = loaded[source_module.name]
         for raw in source_module.objects:
             node = object_nodes[raw.name]
+            if raw.name[-1] == "CurrentTaskRef":
+                raise _semantic_error(
+                    module,
+                    node,
+                    "CurrentTaskRef is a reserved runtime selector and must not be "
+                    "declared as an object",
+                )
             base_name = resolve_base(raw.base_type, source_module.name)
             base = expanded_types.get(base_name)
             states = _merge_states(
@@ -959,9 +1093,18 @@ def _expand_inheritance(
     def validate_continuation_target(
         module: LoadedModule, owner: Tree, signal: ModelSignal
     ) -> None:
-        if signal.target not in continuation_names:
+        is_continuation = signal.target in continuation_names
+        if signal.mode == "resume" and (
+            not is_continuation or signal.signal != ("Action", "Enter")
+        ):
+            raise _semantic_error(
+                module,
+                owner,
+                "resumes must target Action::Enter on a continuation object",
+            )
+        if not is_continuation:
             return
-        if signal.signal == ("Action", "Enter"):
+        if signal.mode == "resume" and signal.signal == ("Action", "Enter"):
             return
         if not (
             signal.signal[0] == "Action"
@@ -971,7 +1114,8 @@ def _expand_inheritance(
             raise _semantic_error(
                 module,
                 owner,
-                "only Action::Enter may start or resume a continuation from outside; "
+                "only Action::Enter may enter a continuation, and continuation entry "
+                "from outside must use resumes Action::Enter; "
                 "other Actions must be synchronous calls from the same continuation",
             )
 
@@ -997,6 +1141,258 @@ def _expand_inheritance(
                             validate_continuation_target(
                                 loaded_module, owner, signal
                             )
+
+    TypeKey = tuple[tuple[str, ...], tuple[object, ...]]
+
+    def resolve_type(
+        expression: ModelTypeExpression, module_name: tuple[str, ...]
+    ) -> TypeKey:
+        if expression.name == ("Collection",):
+            if len(expression.arguments) != 1:
+                raise _semantic_error(
+                    loaded[module_name],
+                    loaded[module_name].tree,
+                    "Collection requires exactly one type argument",
+                )
+            return (
+                ("Collection",),
+                tuple(resolve_type(item, module_name) for item in expression.arguments),
+            )
+        name = resolve_base(expression, module_name)
+        if expression.arguments:
+            raise _semantic_error(
+                loaded[module_name],
+                loaded[module_name].tree,
+                f"non-generic type {'::'.join(expression.name)!r} does not accept arguments",
+            )
+        return (name, ())
+
+    def object_type(name: tuple[str, ...]) -> TypeKey:
+        model_object = expanded_objects[name]
+        return resolve_type(model_object.base_type, name[:-1])
+
+    def compatible(actual: TypeKey, expected: TypeKey) -> bool:
+        if actual == expected:
+            return True
+        actual_name, actual_arguments = actual
+        expected_name, _ = expected
+        if actual_arguments or actual_name == ("Collection",):
+            return False
+        cursor = actual_name
+        seen: set[tuple[str, ...]] = set()
+        while cursor in raw_types and cursor not in seen:
+            seen.add(cursor)
+            base_expression = raw_types[cursor].base_type
+            if base_expression is None:
+                return False
+            base = resolve_type(base_expression, cursor[:-1])
+            if base == expected:
+                return True
+            cursor, arguments = base
+            if arguments:
+                return False
+        return False
+
+    object_names = set(expanded_objects)
+
+    def resolve_object_expression(
+        expression: ModelExpression,
+        module_name: tuple[str, ...],
+    ) -> tuple[str, ...] | None:
+        access = _flatten_access(expression)
+        if access is None:
+            return None
+        segments, operations = access
+        if any(operation == "member" for operation in operations):
+            return None
+        candidate = _resolve_target(tuple(segments), module_name, imports[module_name])
+        if candidate in object_names:
+            return candidate
+        matches = tuple(
+            name for name in object_names if name[-len(segments) :] == tuple(segments)
+        )
+        return matches[0] if len(matches) == 1 else None
+
+    task_ref_types = tuple(name for name in raw_types if name[-1] == "TaskRef")
+
+    def expression_type(
+        expression: ModelExpression,
+        module_name: tuple[str, ...],
+        source: tuple[str, ...] | None,
+        parameters: dict[str, TypeKey],
+        fields: dict[str, ModelField],
+    ) -> TypeKey | None:
+        if expression.kind == "identifier":
+            identifier = str(expression.value)
+            if identifier in parameters:
+                return parameters[identifier]
+            if identifier == "self" and source is not None:
+                return object_type(source)
+            if identifier == "CurrentTaskRef":
+                if len(task_ref_types) != 1:
+                    raise _semantic_error(
+                        loaded[module_name],
+                        loaded[module_name].tree,
+                        "CurrentTaskRef requires exactly one declared TaskRef type",
+                    )
+                return (task_ref_types[0], ())
+        access = _flatten_access(expression)
+        if (
+            access is not None
+            and source is not None
+            and access[0][:1] == ["self"]
+            and access[1] == ["member"]
+        ):
+            field = fields.get(access[0][1])
+            return None if field is None else resolve_type(field.type, source[:-1])
+        object_name = resolve_object_expression(expression, module_name)
+        return None if object_name is None else object_type(object_name)
+
+    signatures: dict[
+        tuple[tuple[str, ...], tuple[str, ...]], tuple[ModelParameter, ...]
+    ] = {}
+    for name, model_object in expanded_objects.items():
+        base_type = object_type(name)
+        if base_type[0] == ("Collection",):
+            signatures[(name, ("Action", "Enqueue"))] = (
+                ModelParameter(
+                    "item",
+                    ModelTypeExpression(base_type[1][0][0]),
+                ),
+            )
+        for state in model_object.states:
+            for handler in (*state.transitions, *state.actions):
+                key = (name, handler.signal)
+                prior = signatures.get(key)
+                if prior is not None and prior != handler.parameters:
+                    raise _semantic_error(
+                        loaded[name[:-1]],
+                        object_nodes[name],
+                        f"handler {'::'.join(handler.signal)!r} has inconsistent "
+                        "parameter signatures across states",
+                    )
+                signatures[key] = handler.parameters
+
+    def parameter_types(
+        parameters: tuple[ModelParameter, ...], module_name: tuple[str, ...]
+    ) -> dict[str, TypeKey]:
+        return {
+            parameter.name: resolve_type(parameter.type, module_name)
+            for parameter in parameters
+        }
+
+    def validate_call(
+        signal: ModelSignal,
+        module_name: tuple[str, ...],
+        source: tuple[str, ...] | None,
+        environment: dict[str, TypeKey],
+        fields: dict[str, ModelField],
+        owner: Tree,
+    ) -> None:
+        signature = signatures.get((signal.target, signal.signal))
+        if signature is None:
+            if signal.arguments:
+                raise _semantic_error(
+                    loaded[module_name],
+                    owner,
+                    f"parameterized signal {'::'.join(signal.signal)!r} has no "
+                    "resolvable handler signature",
+                )
+            return
+        if len(signal.arguments) != len(signature):
+            raise _semantic_error(
+                loaded[module_name],
+                owner,
+                f"signal {'::'.join(signal.signal)!r} expects {len(signature)} "
+                f"argument(s), got {len(signal.arguments)}",
+            )
+        for index, (argument, parameter) in enumerate(
+            zip(signal.arguments, signature, strict=True)
+        ):
+            actual = expression_type(
+                argument, module_name, source, environment, fields
+            )
+            expected = resolve_type(parameter.type, signal.target[:-1])
+            if actual is None:
+                raise _semantic_error(
+                    loaded[module_name],
+                    owner,
+                    f"cannot infer type of signal argument {index + 1}",
+                )
+            if not compatible(actual, expected):
+                raise _semantic_error(
+                    loaded[module_name],
+                    owner,
+                    f"signal argument {index + 1} has incompatible object type",
+                )
+
+    for name, model_object in expanded_objects.items():
+        owner = object_nodes[name]
+        module_name = name[:-1]
+        fields = {field.name: field for field in model_object.attrs or ()}
+        for field in fields.values():
+            declared_type = resolve_type(field.type, module_name)
+            if field.default is not None:
+                actual = expression_type(
+                    field.default, module_name, name, {}, fields
+                )
+                if actual is None or not compatible(actual, declared_type):
+                    raise _semantic_error(
+                        loaded[module_name],
+                        owner,
+                        f"default value for field {field.name!r} has incompatible type",
+                    )
+        for state in model_object.states:
+            for handler in (*state.transitions, *state.actions):
+                environment = parameter_types(handler.parameters, module_name)
+                for block in handler.blocks:
+                    for signal in block.signals:
+                        validate_call(
+                            signal, module_name, name, environment, fields, owner
+                        )
+                    for update in block.updates:
+                        access = _flatten_access(update.target)
+                        if (
+                            access is None
+                            or access[0][:1] != ["self"]
+                            or access[1] != ["member"]
+                            or len(access[0]) != 2
+                        ):
+                            raise _semantic_error(
+                                loaded[module_name],
+                                owner,
+                                "updates target must have the form self.<mutable-field>",
+                            )
+                        field = fields.get(access[0][1])
+                        if field is None or not field.mutable:
+                            raise _semantic_error(
+                                loaded[module_name],
+                                owner,
+                                f"updates target {access[0][1]!r} is not a mutable field",
+                            )
+                        actual = expression_type(
+                            update.value, module_name, name, environment, fields
+                        )
+                        expected = resolve_type(field.type, module_name)
+                        if actual is None or not compatible(actual, expected):
+                            raise _semantic_error(
+                                loaded[module_name],
+                                owner,
+                                f"update for field {field.name!r} has incompatible type",
+                            )
+
+    for module in lowered:
+        owner_module = loaded[module.name]
+        for external in module.externals:
+            owner = next(
+                item
+                for item in owner_module.tree.children
+                if isinstance(item, Tree)
+                and item.data == "external_declaration"
+                and str(item.children[0]) == external.name[-1]
+            )
+            for signal in external.signals:
+                validate_call(signal, module.name, None, {}, {}, owner)
 
     return tuple(
         ModelModule(

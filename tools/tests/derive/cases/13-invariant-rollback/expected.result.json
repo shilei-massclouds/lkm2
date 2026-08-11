@@ -19,7 +19,8 @@
       ]
     }
   ],
-  "schema_version": 5,
+  "final_values": [],
+  "schema_version": 6,
   "status": "invariant_failed",
   "units": [
     {
@@ -39,6 +40,7 @@
         }
       ],
       "event": {
+        "arguments": [],
         "mode": "drive",
         "signal": [
           "Transition",
@@ -70,6 +72,7 @@
         }
       ],
       "kind": "root",
+      "resumes": [],
       "state_after": null,
       "state_before": [
         "State",

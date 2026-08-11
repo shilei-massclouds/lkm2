@@ -12,6 +12,7 @@ from .model import (
     RESULT_SCHEMA_VERSION,
     SEQUENCE_SCHEMA_VERSION,
     DerivationCheck,
+    DerivationBinding,
     DerivationContinuation,
     DerivationDirective,
     DerivationEvent,
@@ -22,6 +23,7 @@ from .model import (
     DerivationSequence,
     DerivationState,
     DerivationUnit,
+    DerivationValue,
     DerivationValidationError,
 )
 from .renderer import render_derivation_result
@@ -30,6 +32,7 @@ __all__ = [
     "RESULT_SCHEMA_VERSION",
     "SEQUENCE_SCHEMA_VERSION",
     "DerivationCheck",
+    "DerivationBinding",
     "DerivationContinuation",
     "DerivationDirective",
     "DerivationEvent",
@@ -40,6 +43,7 @@ __all__ = [
     "DerivationSequence",
     "DerivationState",
     "DerivationUnit",
+    "DerivationValue",
     "DerivationValidationError",
     "derive",
     "default_derivation_sequence",

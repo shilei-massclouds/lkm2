@@ -5,11 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 
-from model_ir import ModelAction, ModelExpression, ModelIR, ModelObject, ModelSignal
+from model_ir import (
+    ModelAction,
+    ModelExpression,
+    ModelIR,
+    ModelObject,
+    ModelSignal,
+)
 
 from .model import (
     RESULT_SCHEMA_VERSION,
     DerivationCheck,
+    DerivationBinding,
     DerivationContinuation,
     DerivationDirective,
     DerivationEvent,
@@ -20,6 +27,7 @@ from .model import (
     DerivationSequence,
     DerivationState,
     DerivationUnit,
+    DerivationValue,
 )
 
 
@@ -40,6 +48,8 @@ class _ResumeFrame:
     emits: list[DerivationUnit] = field(default_factory=list)
     yields: list[DerivationUnit] = field(default_factory=list)
     directives: list[DerivationDirective] = field(default_factory=list)
+    bindings: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    resumes: list[DerivationUnit] = field(default_factory=list)
 
     def reset_segment(self) -> None:
         self.depends_on.clear()
@@ -50,6 +60,7 @@ class _ResumeFrame:
         self.emits.clear()
         self.yields.clear()
         self.directives.clear()
+        self.resumes.clear()
 
 
 @dataclass(slots=True)
@@ -72,14 +83,18 @@ class _UnsupportedExpression(Exception):
 
 
 def _event(signal: ModelSignal) -> DerivationEvent:
-    return DerivationEvent(signal.source, signal.target, signal.signal, signal.mode)
+    return DerivationEvent(
+        signal.source,
+        signal.target,
+        signal.signal,
+        signal.mode,
+        signal.arguments,
+    )
 
 
 def _unsupported_features(model: ModelIR) -> tuple[str, ...]:
     features: set[str] = set()
     for model_object in model.objects:
-        if model_object.attrs:
-            features.add("attrs")
         if model_object.references:
             features.add("reference")
         for state in model_object.states:
@@ -160,6 +175,13 @@ class _Context:
         self.object_names = _shortest_names(tuple(self.objects))
         self.predicate_names = _shortest_names(tuple(self.predicates))
 
+    @staticmethod
+    def object_expression(name: tuple[str, ...]) -> ModelExpression:
+        result = ModelExpression("identifier", name[0])
+        for part in name[1:]:
+            result = ModelExpression("path", part, (result,))
+        return result
+
     def _resolve(
         self,
         raw: tuple[str, ...],
@@ -196,6 +218,76 @@ class _Context:
             return None
         return self._resolve(raw, self.objects, module)
 
+    def resolve_value(
+        self,
+        expression: ModelExpression,
+        module: tuple[str, ...],
+        source: tuple[str, ...] | None,
+        bindings: dict[str, tuple[str, ...]],
+        values: dict[tuple[tuple[str, ...], str], tuple[str, ...]],
+    ) -> tuple[str, ...] | None:
+        if expression.kind == "identifier":
+            identifier = str(expression.value)
+            if identifier in bindings:
+                return bindings[identifier]
+            if identifier == "self":
+                return source
+            if identifier == "CurrentTaskRef":
+                schedulers = tuple(
+                    name
+                    for name, model_object in self.objects.items()
+                    if model_object.base_type.name[-1:] == ("Scheduler",)
+                    and (name, "curr") in values
+                )
+                if len(schedulers) != 1:
+                    raise _UnsupportedExpression("CurrentTaskRef:ambiguous_scheduler")
+                return values[(schedulers[0], "curr")]
+        flattened = _access(expression)
+        if (
+            flattened is not None
+            and source is not None
+            and flattened[0][:1] == ("self",)
+            and flattened[1] == ("member",)
+            and len(flattened[0]) == 2
+        ):
+            return values.get((source, flattened[0][1]))
+        if (
+            flattened is not None
+            and flattened[1][-1:] == ("member",)
+            and all(operation == "path" for operation in flattened[1][:-1])
+            and len(flattened[0]) >= 2
+            and flattened[0][-1] != "state"
+        ):
+            owner_expression = self.object_expression(flattened[0][:-1])
+            owner = self.object_reference(owner_expression, module)
+            if owner is not None:
+                return values.get((owner, flattened[0][-1]))
+        return self.object_reference(expression, module)
+
+    def instantiate_signal(
+        self,
+        signal: ModelSignal,
+        module: tuple[str, ...],
+        source: tuple[str, ...] | None,
+        bindings: dict[str, tuple[str, ...]],
+        values: dict[tuple[tuple[str, ...], str], tuple[str, ...]],
+    ) -> DerivationEvent:
+        arguments: list[ModelExpression] = []
+        for argument in signal.arguments:
+            value = self.resolve_value(argument, module, source, bindings, values)
+            if value is None:
+                raise _UnsupportedExpression(
+                    f"signal_argument:{_format_expression(argument)}"
+                )
+            arguments.append(self.object_expression(value))
+        return DerivationEvent(
+            signal.source,
+            signal.target,
+            signal.signal,
+            signal.mode,
+            tuple(arguments),
+        )
+
     @staticmethod
     def state_reference(expression: ModelExpression) -> tuple[str, ...] | None:
         flattened = _access(expression)
@@ -207,8 +299,15 @@ class _Context:
         return None
 
     def normalize_term(
-        self, expression: ModelExpression, module: tuple[str, ...]
+        self,
+        expression: ModelExpression,
+        module: tuple[str, ...],
+        source: tuple[str, ...] | None = None,
+        bindings: dict[str, tuple[str, ...]] | None = None,
+        values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None,
     ) -> str:
+        bindings = {} if bindings is None else bindings
+        values = {} if values is None else values
         if expression.kind == "integer":
             return str(expression.value)
         if expression.kind == "string":
@@ -218,7 +317,9 @@ class _Context:
         state = self.state_reference(expression)
         if state is not None:
             return "::".join(state)
-        model_object = self.object_reference(expression, module)
+        model_object = self.resolve_value(
+            expression, module, source, bindings, values
+        )
         if model_object is not None:
             return self.object_names[model_object]
         flattened = _access(expression)
@@ -229,7 +330,12 @@ class _Context:
         raise _UnsupportedExpression(f"fact_argument:{expression.kind}")
 
     def normalize_fact(
-        self, expression: ModelExpression, module: tuple[str, ...]
+        self,
+        expression: ModelExpression,
+        module: tuple[str, ...],
+        source: tuple[str, ...] | None = None,
+        bindings: dict[str, tuple[str, ...]] | None = None,
+        values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None,
     ) -> DerivationFact:
         if expression.kind != "call":
             raise _UnsupportedExpression("establishes:non_predicate")
@@ -241,7 +347,8 @@ class _Context:
             raise _UnsupportedExpression("predicate_resolution")
         predicate = self.predicates[predicate_name]
         arguments = tuple(
-            self.normalize_term(argument, module) for argument in expression.children[1:]
+            self.normalize_term(argument, module, source, bindings, values)
+            for argument in expression.children[1:]
         )
         if len(arguments) != len(predicate.parameters):
             raise _UnsupportedExpression("predicate_arity")
@@ -252,17 +359,26 @@ class _Context:
         return f"{name}({', '.join(fact.arguments)})"
 
     def expression_text(
-        self, expression: ModelExpression, module: tuple[str, ...]
+        self,
+        expression: ModelExpression,
+        module: tuple[str, ...],
+        source: tuple[str, ...] | None = None,
+        bindings: dict[str, tuple[str, ...]] | None = None,
+        values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None,
     ) -> str:
+        bindings = {} if bindings is None else bindings
+        values = {} if values is None else values
         if expression.kind == "call":
             try:
-                return self.fact_text(self.normalize_fact(expression, module))
+                return self.fact_text(
+                    self.normalize_fact(expression, module, source, bindings, values)
+                )
             except _UnsupportedExpression:
                 pass
         if expression.kind == "binary" and expression.value in {"==", "!="}:
             left, right = expression.children
-            left_object = self.object_reference(left, module)
-            right_object = self.object_reference(right, module)
+            left_object = self.resolve_value(left, module, source, bindings, values)
+            right_object = self.resolve_value(right, module, source, bindings, values)
             left_state = self.state_reference(left)
             right_state = self.state_reference(right)
             if left_object is not None and right_state is not None:
@@ -277,12 +393,12 @@ class _Context:
                 )
         if expression.kind == "binary" and expression.value in {"&&", "||"}:
             return (
-                f"({self.expression_text(expression.children[0], module)} "
+                f"({self.expression_text(expression.children[0], module, source, bindings, values)} "
                 f"{expression.value} "
-                f"{self.expression_text(expression.children[1], module)})"
+                f"{self.expression_text(expression.children[1], module, source, bindings, values)})"
             )
         if expression.kind == "unary" and expression.value == "!":
-            return f"!{self.expression_text(expression.children[0], module)}"
+            return f"!{self.expression_text(expression.children[0], module, source, bindings, values)}"
         return _format_expression(expression)
 
     def evaluate(
@@ -291,21 +407,34 @@ class _Context:
         module: tuple[str, ...],
         states: dict[tuple[str, ...], tuple[str, ...] | None],
         facts: set[DerivationFact],
+        source: tuple[str, ...] | None = None,
+        bindings: dict[str, tuple[str, ...]] | None = None,
+        values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None,
     ) -> bool:
+        bindings = {} if bindings is None else bindings
+        values = {} if values is None else values
         if expression.kind == "identifier" and expression.value in {"true", "false"}:
             return expression.value == "true"
         if expression.kind == "call":
-            return self.normalize_fact(expression, module) in facts
+            return self.normalize_fact(
+                expression, module, source, bindings, values
+            ) in facts
         if expression.kind == "unary" and expression.value == "!":
-            return not self.evaluate(expression.children[0], module, states, facts)
+            return not self.evaluate(
+                expression.children[0], module, states, facts, source, bindings, values
+            )
         if expression.kind == "binary" and expression.value in {"&&", "||"}:
-            left = self.evaluate(expression.children[0], module, states, facts)
-            right = self.evaluate(expression.children[1], module, states, facts)
+            left = self.evaluate(
+                expression.children[0], module, states, facts, source, bindings, values
+            )
+            right = self.evaluate(
+                expression.children[1], module, states, facts, source, bindings, values
+            )
             return left and right if expression.value == "&&" else left or right
         if expression.kind == "binary" and expression.value in {"==", "!="}:
             left, right = expression.children
-            left_object = self.object_reference(left, module)
-            right_object = self.object_reference(right, module)
+            left_object = self.resolve_value(left, module, source, bindings, values)
+            right_object = self.resolve_value(right, module, source, bindings, values)
             left_state = self.state_reference(left)
             right_state = self.state_reference(right)
             if left_object is not None and right_state is not None:
@@ -313,6 +442,9 @@ class _Context:
                 return equal if expression.value == "==" else not equal
             if right_object is not None and left_state is not None:
                 equal = states[right_object] == left_state
+                return equal if expression.value == "==" else not equal
+            if left_object is not None and right_object is not None:
+                equal = left_object == right_object
                 return equal if expression.value == "==" else not equal
         feature = f"expression:{expression.kind}"
         if expression.kind in {"unary", "binary"}:
@@ -327,6 +459,74 @@ class _Execution:
         self.facts: set[DerivationFact] = set()
         self.failure: DerivationFailure | None = None
         self.continuations: dict[tuple[str, ...], _ContinuationRuntime] = {}
+        self.values: dict[
+            tuple[tuple[str, ...], str], tuple[str, ...]
+        ] = {}
+        self.collections: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
+        for model_object in model.objects:
+            if model_object.base_type.name == ("Collection",):
+                self.collections[model_object.name] = []
+        for model_object in model.objects:
+            for model_field in model_object.attrs or ():
+                if model_field.default is None:
+                    continue
+                value = self.context.resolve_value(
+                    model_field.default,
+                    model_object.name[:-1],
+                    model_object.name,
+                    {},
+                    self.values,
+                )
+                if value is None:
+                    raise RuntimeError(
+                        f"compiled field default {model_field.name!r} is unresolved"
+                    )
+                self.values[(model_object.name, model_field.name)] = value
+
+    def final_values(self) -> tuple[DerivationValue, ...]:
+        fields = tuple(
+            DerivationValue(owner, name, (value,), False)
+            for (owner, name), value in sorted(self.values.items())
+        )
+        collections = tuple(
+            DerivationValue(owner, None, tuple(values), True)
+            for owner, values in sorted(self.collections.items())
+        )
+        return fields + collections
+
+    def _bind_handler(
+        self,
+        event: DerivationEvent,
+        handler: object,
+    ) -> dict[str, tuple[str, ...]]:
+        parameters = handler.parameters
+        if len(parameters) != len(event.arguments):
+            return {}
+        result: dict[str, tuple[str, ...]] = {}
+        for parameter, argument in zip(parameters, event.arguments, strict=True):
+            value = self.context.resolve_value(
+                argument,
+                event.target[:-1],
+                event.target,
+                {},
+                self.values,
+            )
+            if value is None:
+                raise _UnsupportedExpression(
+                    f"handler_argument:{parameter.name}"
+                )
+            result[parameter.name] = value
+        return result
+
+    def _signal_event(
+        self,
+        signal: ModelSignal,
+        source: tuple[str, ...],
+        bindings: dict[str, tuple[str, ...]],
+    ) -> DerivationEvent:
+        return self.context.instantiate_signal(
+            signal, source[:-1], source, bindings, self.values
+        )
 
     def continuation_snapshots(self) -> tuple[DerivationContinuation, ...]:
         return tuple(
@@ -337,6 +537,10 @@ class _Execution:
                         frame.object,
                         frame.handler,
                         frame.control_index,
+                        tuple(
+                            DerivationBinding(name, value)
+                            for name, value in sorted(frame.bindings.items())
+                        ),
                     )
                     for frame in runtime.frames
                 ),
@@ -376,6 +580,7 @@ class _Execution:
         failure: DerivationFailure | None,
         yields: list[DerivationUnit] | None = None,
         directives: list[DerivationDirective] | None = None,
+        resumes: list[DerivationUnit] | None = None,
     ) -> DerivationUnit:
         return DerivationUnit(
             kind=kind,
@@ -394,6 +599,7 @@ class _Execution:
             failure=failure,
             yields=() if yields is None else tuple(yields),
             directives=() if directives is None else tuple(directives),
+            resumes=() if resumes is None else tuple(resumes),
         )
 
     def _clear_continuations_for_panic(self) -> None:
@@ -409,6 +615,34 @@ class _Execution:
         self, path: str, directive: DerivationDirective
     ) -> DerivationFailure:
         return self._set_failure("panic", path, directive.message)
+
+    def _candidate_values(
+        self,
+        model_object: ModelObject,
+        handler: object,
+        bindings: dict[str, tuple[str, ...]],
+    ) -> dict[tuple[tuple[str, ...], str], tuple[str, ...]]:
+        candidate = dict(self.values)
+        for block in handler.blocks:
+            if block.kind != "updates":
+                continue
+            for update in block.updates:
+                flattened = _access(update.target)
+                if flattened is None or len(flattened[0]) != 2:
+                    raise RuntimeError("compiled update target is invalid")
+                value = self.context.resolve_value(
+                    update.value,
+                    model_object.name[:-1],
+                    model_object.name,
+                    bindings,
+                    candidate,
+                )
+                if value is None:
+                    raise _UnsupportedExpression(
+                        f"update:{flattened[0][-1]}"
+                    )
+                candidate[(model_object.name, flattened[0][-1])] = value
+        return candidate
 
     def undeclared_root(self, event: DerivationEvent, path: str) -> DerivationUnit:
         failure = self._set_failure(
@@ -563,6 +797,7 @@ class _Execution:
             failure=failure,
             yields=frame.yields,
             directives=frame.directives,
+            resumes=frame.resumes,
         )
 
     def _finish_runtime(
@@ -652,6 +887,7 @@ class _Execution:
                 "drive",
                 event.signal,
                 before=self.states[event.target],
+                bindings=self._bind_handler(event, handler),
             )
         )
         return None
@@ -679,10 +915,22 @@ class _Execution:
                     for expression in block.expressions
                 )
                 for index, expression in enumerate(depends):
-                    text = self.context.expression_text(expression, module)
+                    text = self.context.expression_text(
+                        expression,
+                        module,
+                        model_object.name,
+                        frame.bindings,
+                        self.values,
+                    )
                     try:
                         passed = self.context.evaluate(
-                            expression, module, self.states, self.facts
+                            expression,
+                            module,
+                            self.states,
+                            self.facts,
+                            model_object.name,
+                            frame.bindings,
+                            self.values,
                         )
                     except _UnsupportedExpression as exc:
                         frame.depends_on.append(DerivationCheck(text, "unsupported"))
@@ -723,7 +971,9 @@ class _Execution:
                         return
                     continue
 
-                child_event = _event(control)
+                child_event = self._signal_event(
+                    control, model_object.name, frame.bindings
+                )
                 if control.mode == "yield":
                     child_path = f"{path}.yields[{len(frame.yields)}]"
                     preflight = self._preflight_yield(child_event, child_path)
@@ -778,6 +1028,22 @@ class _Execution:
                     return
                 continue
 
+            try:
+                candidate_values = self._candidate_values(
+                    model_object, handler, frame.bindings
+                )
+            except _UnsupportedExpression as exc:
+                failure = self._set_failure(
+                    "invalid_current_task_ref"
+                    if exc.feature.startswith("CurrentTaskRef")
+                    else "unsupported_feature",
+                    f"{path}.updates",
+                    "updates value cannot be resolved",
+                    (exc.feature,),
+                )
+                self._abort_frame(runtime, failure.code, failure)
+                return
+
             ensures = tuple(
                 expression
                 for block in handler.blocks
@@ -785,10 +1051,22 @@ class _Execution:
                 for expression in block.expressions
             )
             for index, expression in enumerate(ensures):
-                text = self.context.expression_text(expression, module)
+                text = self.context.expression_text(
+                    expression,
+                    module,
+                    model_object.name,
+                    frame.bindings,
+                    candidate_values,
+                )
                 try:
                     passed = self.context.evaluate(
-                        expression, module, self.states, self.facts
+                        expression,
+                        module,
+                        self.states,
+                        self.facts,
+                        model_object.name,
+                        frame.bindings,
+                        candidate_values,
                     )
                 except _UnsupportedExpression as exc:
                     frame.ensures.append(DerivationCheck(text, "unsupported"))
@@ -820,9 +1098,21 @@ class _Execution:
                 for expression in block.expressions
             )
             for index, expression in enumerate(establishes):
-                text = self.context.expression_text(expression, module)
+                text = self.context.expression_text(
+                    expression,
+                    module,
+                    model_object.name,
+                    frame.bindings,
+                    candidate_values,
+                )
                 try:
-                    fact = self.context.normalize_fact(expression, module)
+                    fact = self.context.normalize_fact(
+                        expression,
+                        module,
+                        model_object.name,
+                        frame.bindings,
+                        candidate_values,
+                    )
                 except _UnsupportedExpression as exc:
                     frame.establishes.append(
                         DerivationCheck(text, "unsupported")
@@ -845,10 +1135,22 @@ class _Execution:
                 expression for block in state.invariants for expression in block
             )
             for index, expression in enumerate(invariant_expressions):
-                text = self.context.expression_text(expression, module)
+                text = self.context.expression_text(
+                    expression,
+                    module,
+                    model_object.name,
+                    frame.bindings,
+                    candidate_values,
+                )
                 try:
                     passed = self.context.evaluate(
-                        expression, module, self.states, candidate_facts
+                        expression,
+                        module,
+                        self.states,
+                        candidate_facts,
+                        model_object.name,
+                        frame.bindings,
+                        candidate_values,
                     )
                 except _UnsupportedExpression as exc:
                     frame.invariants.append(DerivationCheck(text, "unsupported"))
@@ -872,21 +1174,45 @@ class _Execution:
                     self._abort_frame(runtime, failure.code, failure)
                     return
             self.facts.update(staged_facts)
+            self.values = candidate_values
 
             completed = runtime.frames.pop()
             for block in handler.blocks:
+                if self.failure is not None:
+                    break
                 if block.kind != "emits":
                     continue
                 for signal in block.signals:
                     completed.emits.append(
                         self.run_unit(
-                            _event(signal),
+                            self._signal_event(
+                                signal, model_object.name, completed.bindings
+                            ),
                             "emit",
                             f"{path}.emits[{len(completed.emits)}]",
                         )
                     )
                     if self.failure is not None:
                         break
+
+            if self.failure is None:
+                for block in handler.blocks:
+                    if self.failure is not None:
+                        break
+                    if block.kind != "resumes":
+                        continue
+                    for signal in block.signals:
+                        completed.resumes.append(
+                            self.run_unit(
+                                self._signal_event(
+                                    signal, model_object.name, completed.bindings
+                                ),
+                                "resume",
+                                f"{path}.resumes[{len(completed.resumes)}]",
+                            )
+                        )
+                        if self.failure is not None:
+                            break
 
             completed_unit = self._frame_unit(completed, "passed")
             if runtime.frames:
@@ -924,7 +1250,7 @@ class _Execution:
         if (
             runtime is not None
             and runtime.waiting_yield_target
-            and kind != "emit"
+            and event.mode != "resume"
         ):
             return self._continuation_failure_unit(
                 event,
@@ -959,6 +1285,7 @@ class _Execution:
                     kind,
                     event.signal,
                     before=before,
+                    bindings=self._bind_handler(event, handler),
                 )
             )
             self.continuations[event.target] = runtime
@@ -996,7 +1323,101 @@ class _Execution:
         finally:
             runtime.owner_active = False
 
+    def _run_collection(
+        self, event: DerivationEvent, kind: str, path: str
+    ) -> DerivationUnit:
+        before = self.states[event.target]
+        if event.signal != ("Action", "Enqueue") or len(event.arguments) != 1:
+            failure = self._set_failure(
+                "unhandled_signal",
+                f"{path}.handler",
+                "Collection only handles Action::Enqueue(item)",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=None,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
+        item = self.context.resolve_value(
+            event.arguments[0], event.target[:-1], event.target, {}, self.values
+        )
+        if item is None:
+            failure = self._set_failure(
+                "unsupported_feature",
+                f"{path}.event.arguments[0]",
+                "Collection enqueue argument cannot be resolved",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=event.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
+        contents = self.collections[event.target]
+        if item in contents:
+            failure = self._set_failure(
+                "duplicate_collection_item",
+                f"{path}.event.arguments[0]",
+                "Collection rejects duplicate elements",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=event.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
+        contents.append(item)
+        return self._unit(
+            kind=kind,
+            event=event,
+            before=before,
+            handler=event.signal,
+            candidate=None,
+            depends_on=[],
+            drives=[],
+            ensures=[],
+            establishes=[],
+            invariants=[],
+            state_after=before,
+            emits=[],
+            status="passed",
+            failure=None,
+        )
+
     def run_unit(self, event: DerivationEvent, kind: str, path: str) -> DerivationUnit:
+        if event.target in self.collections:
+            return self._run_collection(event, kind, path)
         if self.context.objects[event.target].continuation:
             return self._run_continuation(event, kind, path)
         model_object: ModelObject = self.context.objects[event.target]
@@ -1020,6 +1441,7 @@ class _Execution:
         }
         drives: list[DerivationUnit] = []
         emits: list[DerivationUnit] = []
+        resumes: list[DerivationUnit] = []
         directives: list[DerivationDirective] = []
         if handler is None:
             signal_kind = event.signal[0].lower()
@@ -1046,6 +1468,33 @@ class _Execution:
             )
 
         module = model_object.name[:-1]
+        try:
+            bindings = self._bind_handler(event, handler)
+        except _UnsupportedExpression as exc:
+            failure = self._set_failure(
+                "invalid_current_task_ref"
+                if exc.feature.startswith("CurrentTaskRef")
+                else "unsupported_feature",
+                f"{path}.event.arguments",
+                "handler argument cannot be resolved",
+                (exc.feature,),
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=handler.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
         blocks = handler.blocks
         expressions = {
             name: tuple(
@@ -1056,10 +1505,16 @@ class _Execution:
             )
             for name in ("depends_on", "ensures", "establishes")
         }
-        emit_events = tuple(
-            _event(signal)
+        emit_signals = tuple(
+            signal
             for block in blocks
             if block.kind == "emits"
+            for signal in block.signals
+        )
+        resume_signals = tuple(
+            signal
+            for block in blocks
+            if block.kind == "resumes"
             for signal in block.signals
         )
         candidate_state = (
@@ -1083,13 +1538,22 @@ class _Execution:
                 status=failure.code,
                 failure=failure,
                 directives=directives,
+                resumes=resumes,
             )
 
         for index, expression in enumerate(expressions["depends_on"]):
-            text = self.context.expression_text(expression, module)
+            text = self.context.expression_text(
+                expression, module, model_object.name, bindings, self.values
+            )
             try:
                 passed = self.context.evaluate(
-                    expression, module, self.states, self.facts
+                    expression,
+                    module,
+                    self.states,
+                    self.facts,
+                    model_object.name,
+                    bindings,
+                    self.values,
                 )
             except _UnsupportedExpression as exc:
                 checks["depends_on"].append(DerivationCheck(text, "unsupported"))
@@ -1136,7 +1600,21 @@ class _Execution:
                         )
                     )
                 continue
-            child_event = _event(control)
+            try:
+                child_event = self._signal_event(
+                    control, model_object.name, bindings
+                )
+            except _UnsupportedExpression as exc:
+                return failed_unit(
+                    self._set_failure(
+                        "invalid_current_task_ref"
+                        if exc.feature.startswith("CurrentTaskRef")
+                        else "unsupported_feature",
+                        f"{path}.drives[{len(drives)}].event.arguments",
+                        "signal argument cannot be resolved",
+                        (exc.feature,),
+                    )
+                )
             drives.append(
                 self.run_unit(
                     child_event, "drive", f"{path}.drives[{len(drives)}]"
@@ -1159,13 +1637,41 @@ class _Execution:
                     status="stopped",
                     failure=None,
                     directives=directives,
+                    resumes=resumes,
                 )
 
+        candidate_states = dict(self.states)
+        if candidate_state is not None:
+            candidate_states[event.target] = candidate_state
+        try:
+            candidate_values = self._candidate_values(
+                model_object, handler, bindings
+            )
+        except _UnsupportedExpression as exc:
+            return failed_unit(
+                self._set_failure(
+                    "invalid_current_task_ref"
+                    if exc.feature.startswith("CurrentTaskRef")
+                    else "unsupported_feature",
+                    f"{path}.updates",
+                    "updates value cannot be resolved",
+                    (exc.feature,),
+                )
+            )
+
         for index, expression in enumerate(expressions["ensures"]):
-            text = self.context.expression_text(expression, module)
+            text = self.context.expression_text(
+                expression, module, model_object.name, bindings, candidate_values
+            )
             try:
                 passed = self.context.evaluate(
-                    expression, module, self.states, self.facts
+                    expression,
+                    module,
+                    candidate_states,
+                    self.facts,
+                    model_object.name,
+                    bindings,
+                    candidate_values,
                 )
             except _UnsupportedExpression as exc:
                 checks["ensures"].append(DerivationCheck(text, "unsupported"))
@@ -1189,9 +1695,17 @@ class _Execution:
 
         staged_facts: set[DerivationFact] = set()
         for index, expression in enumerate(expressions["establishes"]):
-            text = self.context.expression_text(expression, module)
+            text = self.context.expression_text(
+                expression, module, model_object.name, bindings, candidate_values
+            )
             try:
-                fact = self.context.normalize_fact(expression, module)
+                fact = self.context.normalize_fact(
+                    expression,
+                    module,
+                    model_object.name,
+                    bindings,
+                    candidate_values,
+                )
             except _UnsupportedExpression as exc:
                 checks["establishes"].append(DerivationCheck(text, "unsupported"))
                 failure = self._set_failure(
@@ -1206,9 +1720,6 @@ class _Execution:
             )
             staged_facts.add(fact)
 
-        candidate_states = dict(self.states)
-        if candidate_state is not None:
-            candidate_states[event.target] = candidate_state
         candidate_facts = self.facts | staged_facts
         checked_state_name = (
             self.states[event.target]
@@ -1222,10 +1733,18 @@ class _Execution:
             expression for block in checked_state.invariants for expression in block
         )
         for index, expression in enumerate(invariant_expressions):
-            text = self.context.expression_text(expression, module)
+            text = self.context.expression_text(
+                expression, module, model_object.name, bindings, candidate_values
+            )
             try:
                 passed = self.context.evaluate(
-                    expression, module, candidate_states, candidate_facts
+                    expression,
+                    module,
+                    candidate_states,
+                    candidate_facts,
+                    model_object.name,
+                    bindings,
+                    candidate_values,
                 )
             except _UnsupportedExpression as exc:
                 checks["invariants"].append(DerivationCheck(text, "unsupported"))
@@ -1258,10 +1777,22 @@ class _Execution:
         if candidate_state is not None:
             self.states[event.target] = candidate_state
         self.facts.update(staged_facts)
-        for index, child_event in enumerate(emit_events):
+        self.values = candidate_values
+        for index, signal in enumerate(emit_signals):
+            child_event = self._signal_event(signal, model_object.name, bindings)
             emits.append(self.run_unit(child_event, "emit", f"{path}.emits[{index}]"))
             if self.failure is not None:
                 break
+        if self.failure is None:
+            for index, signal in enumerate(resume_signals):
+                child_event = self._signal_event(signal, model_object.name, bindings)
+                resumes.append(
+                    self.run_unit(
+                        child_event, "resume", f"{path}.resumes[{index}]"
+                    )
+                )
+                if self.failure is not None:
+                    break
         return self._unit(
             kind=kind,
             event=event,
@@ -1278,6 +1809,7 @@ class _Execution:
             status="passed",
             failure=None,
             directives=directives,
+            resumes=resumes,
         )
 
 
@@ -1306,6 +1838,7 @@ def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
             (),
             failure,
             execution.continuation_snapshots(),
+            execution.final_values(),
         )
 
     origin = next(item for item in model.externals if item.name == model.entry.origin)
@@ -1335,4 +1868,5 @@ def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
         tuple(execution.facts),
         execution.failure,
         execution.continuation_snapshots(),
+        execution.final_values(),
     )

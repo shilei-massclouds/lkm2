@@ -24,9 +24,7 @@ object Kernel: KernelType {
     state State::Ready {
         transitions {
             on Transition::Enable -> State::Online {
-                emits {
-                    BootInitFlow.Action::Enter;
-                }
+                resumes BootInitFlow.Action::Enter;
             }
         }
     }

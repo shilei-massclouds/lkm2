@@ -11,15 +11,20 @@ Scheduler 是 per-CPU 运行对象，不是整个内核共享的全局单例。�
 `Cpu0Scheduler` 的最小生命周期是：
 
 ```text
-Ready --BootSetup/Enable--> BootTaskRunning
-BootTaskRunning --Schedule--> KernelInitTaskRunning
-KernelInitTaskRunning --Schedule--> BootTaskRunning
+Ready --BootSetup/Enable--> Online
+Online --Schedule--> panic "impl sched"
 ```
 
-- `BootSetup` 必须先将它从 `Ready` 推进到 `BootTaskRunning`。
-- 两个运行态都接受 `Schedule`，并确定性交替选择 `BootTask` 与 `KernelInitTask`。
-- 每次切换依次暂停当前任务、以 `Transition::Resume` 恢复目标任务、提交 Scheduler 运行态，再向目标 `TaskFlow` root 投递 `Action::Enter`。
-- 当前切片不定义 TaskRef、current、selected-next、runqueue、run token、其它 CPU Scheduler 或通用任务选择策略。
+- Scheduler 固定维护 `mutable curr: TaskRef`、`mutable idle: TaskRef` 和
+  `runq: Collection<TaskRef>`；CPU0 实例初始 curr/idle 都是 `BootTaskRef`，runq
+  指向 owned 的 `Cpu0RunQ`。
+- `SetIdleTask(task_ref)` 与 `SetCurrentTask(task_ref)` 分别只更新对应字段。
+- `Enqueue(task_ref)` 委托 `Cpu0RunQ.Action::Enqueue(task_ref)`；队列保持唯一 FIFO。
+- `BootSetup` 先将 Scheduler 推进到 Online，再显式设置 BootTaskRef，并让
+  `KernelInitTask.Enable(KernelInitTaskRef)` 把 KernelInitTaskRef 入队。BootTaskRef
+  是直接维护的 current/idle，不进入 RunQ。
+- `Schedule` 仍是占位 panic。本轮不定义出队、PickNext、curr 切换、idle fallback、
+  run token、其它 CPU Scheduler 或通用任务选择策略。
 
 ## 后续 ownership
 

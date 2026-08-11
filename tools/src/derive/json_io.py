@@ -1,14 +1,15 @@
-"""Strict JSON boundaries for sequence schema v2 and result schema v5."""
+"""Strict JSON boundaries for sequence schema v3 and result schema v6."""
 
 from __future__ import annotations
 
 import json
 from typing import Any, Callable, TextIO, TypeVar
 
-from model_ir import canonicalize_signal_name
+from model_ir import ModelExpression, canonicalize_signal_name
 
 from .model import (
     DerivationCheck,
+    DerivationBinding,
     DerivationContinuation,
     DerivationDirective,
     DerivationEvent,
@@ -19,6 +20,7 @@ from .model import (
     DerivationSequence,
     DerivationState,
     DerivationUnit,
+    DerivationValue,
     DerivationValidationError,
 )
 
@@ -82,11 +84,27 @@ def _optional_name(value: object, path: str) -> tuple[str, ...] | None:
     return None if value is None else _name(value, path)
 
 
+def _expression(value: object, path: str) -> ModelExpression:
+    data = _object(value, frozenset({"kind", "value", "children"}), path)
+    raw_value = data["value"]
+    if raw_value is not None and type(raw_value) not in {str, int}:
+        raise DerivationValidationError(
+            f"{path}.value must be a string, integer, or null"
+        )
+    return ModelExpression(
+        _string(data["kind"], f"{path}.kind"),
+        raw_value,
+        _array(data["children"], f"{path}.children", _expression),
+    )
+
+
 def _event(
     value: object, path: str, *, accept_compatibility_aliases: bool
 ) -> DerivationEvent:
     data = _object(
-        value, frozenset({"source", "target", "signal", "mode"}), path
+        value,
+        frozenset({"source", "target", "signal", "mode", "arguments"}),
+        path,
     )
     signal = _name(data["signal"], f"{path}.signal")
     canonical = canonicalize_signal_name(signal)
@@ -99,6 +117,7 @@ def _event(
         target=_name(data["target"], f"{path}.target"),
         signal=signal,
         mode=_string(data["mode"], f"{path}.mode"),
+        arguments=_array(data["arguments"], f"{path}.arguments", _expression),
     )
 
 
@@ -179,13 +198,39 @@ def _state(value: object, path: str) -> DerivationState:
 def _frame(value: object, path: str) -> DerivationFrame:
     data = _object(
         value,
-        frozenset({"object", "handler", "control_index"}),
+        frozenset({"object", "handler", "control_index", "bindings"}),
         path,
     )
     return DerivationFrame(
         _name(data["object"], f"{path}.object"),
         _name(data["handler"], f"{path}.handler"),
         _integer(data["control_index"], f"{path}.control_index"),
+        _array(data["bindings"], f"{path}.bindings", _binding),
+    )
+
+
+def _binding(value: object, path: str) -> DerivationBinding:
+    data = _object(value, frozenset({"name", "value"}), path)
+    return DerivationBinding(
+        _string(data["name"], f"{path}.name"),
+        _name(data["value"], f"{path}.value"),
+    )
+
+
+def _value(value: object, path: str) -> DerivationValue:
+    data = _object(
+        value, frozenset({"object", "field", "values", "collection"}), path
+    )
+    field = data["field"]
+    if field is not None:
+        field = _string(field, f"{path}.field")
+    if type(data["collection"]) is not bool:
+        raise DerivationValidationError(f"{path}.collection must be a boolean")
+    return DerivationValue(
+        _name(data["object"], f"{path}.object"),
+        field,
+        _array(data["values"], f"{path}.values", _name),
+        data["collection"],
     )
 
 
@@ -220,6 +265,7 @@ def _unit(value: object, path: str) -> DerivationUnit:
                 "state_after",
                 "emits",
                 "yields",
+                "resumes",
                 "status",
             }
         ),
@@ -259,11 +305,12 @@ def _unit(value: object, path: str) -> DerivationUnit:
         if "failure" not in data
         else _failure(data["failure"], f"{path}.failure"),
         yields=_array(data["yields"], f"{path}.yields", _unit),
+        resumes=_array(data["resumes"], f"{path}.resumes", _unit),
     )
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v5 result document."""
+    """Load and strictly validate one schema-v6 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -276,6 +323,7 @@ def load_derivation_result(stream: TextIO) -> DerivationResult:
                 "final_state",
                 "facts",
                 "continuations",
+                "final_values",
             }
         ),
         "document",
@@ -293,7 +341,16 @@ def load_derivation_result(stream: TextIO) -> DerivationResult:
         continuations=_array(
             document["continuations"], "continuations", _continuation
         ),
+        final_values=_array(document["final_values"], "final_values", _value),
     )
+
+
+def _expression_data(expression: ModelExpression) -> dict[str, Any]:
+    return {
+        "kind": expression.kind,
+        "value": expression.value,
+        "children": [_expression_data(item) for item in expression.children],
+    }
 
 
 def _event_data(event: DerivationEvent) -> dict[str, Any]:
@@ -302,6 +359,7 @@ def _event_data(event: DerivationEvent) -> dict[str, Any]:
         "target": list(event.target),
         "signal": list(event.signal),
         "mode": event.mode,
+        "arguments": [_expression_data(item) for item in event.arguments],
     }
 
 
@@ -330,6 +388,10 @@ def _continuation_data(item: DerivationContinuation) -> dict[str, Any]:
                 "object": list(frame.object),
                 "handler": list(frame.handler),
                 "control_index": frame.control_index,
+                "bindings": [
+                    {"name": binding.name, "value": list(binding.value)}
+                    for binding in frame.bindings
+                ],
             }
             for frame in item.frames
         ],
@@ -354,6 +416,7 @@ def _unit_data(unit: DerivationUnit) -> dict[str, Any]:
         "state_after": None if unit.state_after is None else list(unit.state_after),
         "emits": [_unit_data(item) for item in unit.emits],
         "yields": [_unit_data(item) for item in unit.yields],
+        "resumes": [_unit_data(item) for item in unit.resumes],
         "status": unit.status,
     }
     if unit.failure is not None:
@@ -378,7 +441,7 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v5 derivation result followed by a newline."""
+    """Write one canonical schema-v6 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")
@@ -399,6 +462,15 @@ def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
         ],
         "continuations": [
             _continuation_data(item) for item in result.continuations
+        ],
+        "final_values": [
+            {
+                "object": list(item.object),
+                "field": item.field,
+                "values": [list(value) for value in item.values],
+                "collection": item.collection,
+            }
+            for item in result.final_values
         ],
     }
     if result.failure is not None:

@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v6."""
+"""Frozen data model and semantic validation for Model IR schema v7."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -21,12 +21,14 @@ _BLOCK_KINDS = frozenset(
         "ensures",
         "establishes",
         "emits",
+        "resumes",
+        "updates",
         "print",
         "panic",
         "deferred",
     }
 )
-_SIGNAL_MODES = frozenset({"drive", "emit", "yield"})
+_SIGNAL_MODES = frozenset({"drive", "emit", "yield", "resume"})
 _UNARY_OPERATORS = frozenset({"!", "-"})
 _BINARY_OPERATORS = frozenset(
     {"||", "&&", "==", "!=", ">=", "<=", ">", "<", "+", "-", "*", "/", "%"}
@@ -179,11 +181,17 @@ class ModelTypeExpression:
 class ModelField:
     name: str
     type: ModelTypeExpression
+    mutable: bool = False
+    default: ModelExpression | None = None
 
     def __post_init__(self) -> None:
         _validate_identifier(self.name, "field.name")
         if not isinstance(self.type, ModelTypeExpression):
             raise ModelIRValidationError("field.type must be a ModelTypeExpression")
+        if type(self.mutable) is not bool:
+            raise ModelIRValidationError("field.mutable must be a boolean")
+        if self.default is not None and not isinstance(self.default, ModelExpression):
+            raise ModelIRValidationError("field.default must be a ModelExpression or null")
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +274,7 @@ class ModelSignal:
     target: tuple[str, ...]
     signal: tuple[str, ...]
     mode: str
+    arguments: tuple[ModelExpression, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.source, "signal.source")
@@ -277,8 +286,22 @@ class ModelSignal:
             )
         if self.mode not in _SIGNAL_MODES:
             raise ModelIRValidationError(
-                f"signal.mode must be 'drive', 'emit', or 'yield', got {self.mode!r}"
+                "signal.mode must be 'drive', 'emit', 'yield', or 'resume', "
+                f"got {self.mode!r}"
             )
+        _validate_tuple(self.arguments, ModelExpression, "signal.arguments")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelUpdate:
+    target: ModelExpression
+    value: ModelExpression
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, ModelExpression):
+            raise ModelIRValidationError("update.target must be a ModelExpression")
+        if not isinstance(self.value, ModelExpression):
+            raise ModelIRValidationError("update.value must be a ModelExpression")
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,27 +332,33 @@ class ModelHandlerBlock:
     expressions: tuple[ModelExpression, ...] = ()
     signals: tuple[ModelSignal, ...] = ()
     deferred: ModelDeferred | None = None
+    updates: tuple[ModelUpdate, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _BLOCK_KINDS:
             raise ModelIRValidationError(f"invalid handler block kind {self.kind!r}")
         _validate_tuple(self.expressions, ModelExpression, "handler_block.expressions")
         _validate_tuple(self.signals, ModelSignal, "handler_block.signals")
-        if self.kind in {"drives", "yields", "emits"}:
-            if self.expressions or self.deferred is not None:
+        _validate_tuple(self.updates, ModelUpdate, "handler_block.updates")
+        if self.kind in {"drives", "yields", "emits", "resumes"}:
+            if self.expressions or self.deferred is not None or self.updates:
                 raise ModelIRValidationError(f"{self.kind} block may only contain signals")
             expected_mode = {
                 "drives": "drive",
                 "yields": "yield",
                 "emits": "emit",
+                "resumes": "resume",
             }[self.kind]
             if any(signal.mode != expected_mode for signal in self.signals):
                 raise ModelIRValidationError(f"{self.kind} block has a mismatched signal mode")
         elif self.kind == "deferred":
-            if self.expressions or self.signals or self.deferred is None:
+            if self.expressions or self.signals or self.deferred is None or self.updates:
                 raise ModelIRValidationError("deferred block must contain one deferred declaration")
+        elif self.kind == "updates":
+            if self.expressions or self.signals or self.deferred is not None:
+                raise ModelIRValidationError("updates block may only contain updates")
         elif self.kind in {"print", "panic"}:
-            if self.signals or self.deferred is not None:
+            if self.signals or self.deferred is not None or self.updates:
                 raise ModelIRValidationError(
                     f"{self.kind} block may only contain one string expression"
                 )
@@ -337,7 +366,7 @@ class ModelHandlerBlock:
                 raise ModelIRValidationError(
                     f"{self.kind} block requires exactly one string expression"
                 )
-        elif self.signals or self.deferred is not None:
+        elif self.signals or self.deferred is not None or self.updates:
             raise ModelIRValidationError(f"{self.kind} block may only contain expressions")
 
 
@@ -348,6 +377,7 @@ class ModelTransition:
     blocks: tuple[ModelHandlerBlock, ...]
     abstract: bool = False
     override: bool = False
+    parameters: tuple[ModelParameter, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_signal_name(self.signal, "transition.signal")
@@ -367,6 +397,10 @@ class ModelTransition:
                 "abstract transition must not contain a target state or blocks"
             )
         _validate_tuple(self.blocks, ModelHandlerBlock, "transition.blocks")
+        _validate_tuple(self.parameters, ModelParameter, "transition.parameters")
+        names = tuple(parameter.name for parameter in self.parameters)
+        if len(set(names)) != len(names):
+            raise ModelIRValidationError("duplicate transition parameter")
 
 
 @dataclass(frozen=True, slots=True)
@@ -375,6 +409,7 @@ class ModelAction:
     blocks: tuple[ModelHandlerBlock, ...]
     abstract: bool = False
     override: bool = False
+    parameters: tuple[ModelParameter, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_special_name(self.signal, "Action", "action.signal")
@@ -387,6 +422,10 @@ class ModelAction:
             raise ModelIRValidationError(
                 "concrete action must contain at least one handler block"
             )
+        _validate_tuple(self.parameters, ModelParameter, "action.parameters")
+        names = tuple(parameter.name for parameter in self.parameters)
+        if len(set(names)) != len(names):
+            raise ModelIRValidationError("duplicate action parameter")
 
 
 @dataclass(frozen=True, slots=True)
@@ -623,12 +662,26 @@ class ModelIR:
                             f"signal targets unknown object {'.'.join(signal.target)!r}"
                         )
                     target = object_items[signal.target]
-                    if target.continuation and signal.signal != ("Action", "Enter"):
+                    if signal.mode == "resume" and (
+                        not target.continuation
+                        or signal.signal != ("Action", "Enter")
+                    ):
                         raise ModelIRValidationError(
-                            "external signals may only target Action::Enter on a "
-                            "continuation object"
+                            "resumes must target Action::Enter on a continuation object"
+                        )
+                    if target.continuation and (
+                        signal.mode != "resume"
+                        or signal.signal != ("Action", "Enter")
+                    ):
+                        raise ModelIRValidationError(
+                            "external continuation entry must use resumes Action::Enter"
                         )
             for model_object in module.objects:
+                if model_object.name[-1] == "CurrentTaskRef":
+                    raise ModelIRValidationError(
+                        "CurrentTaskRef is a reserved runtime selector and must not be "
+                        "declared as an object"
+                    )
                 state_names = tuple(state.name for state in model_object.states)
                 state_name_set = set(state_names)
                 if state_names and model_object.initial_state is None:
@@ -696,17 +749,25 @@ class ModelIR:
                                         f"signal targets unknown object {'.'.join(signal.target)!r}"
                                     )
                                 target = object_items[signal.target]
-                                if target.continuation and signal.signal != (
-                                    "Action",
-                                    "Enter",
+                                if signal.mode == "resume" and (
+                                    not target.continuation
+                                    or signal.signal != ("Action", "Enter")
+                                ):
+                                    raise ModelIRValidationError(
+                                        "resumes must target Action::Enter on a "
+                                        "continuation object"
+                                    )
+                                if target.continuation and not (
+                                    signal.mode == "resume"
+                                    and signal.signal == ("Action", "Enter")
                                 ) and not (
                                     signal.signal[0] == "Action"
                                     and signal.source == signal.target
                                     and signal.mode == "drive"
                                 ):
                                     raise ModelIRValidationError(
-                                        "only Action::Enter may target a continuation "
-                                        "from outside"
+                                        "continuation entry from outside must use "
+                                        "resumes Action::Enter"
                                     )
                                 if block.kind == "yields" and (
                                     not model_object.continuation

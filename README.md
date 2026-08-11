@@ -22,3 +22,7 @@ make clean
 ```
 
 当前这些目标委托给 `tools/Makefile`；后续增加其他组件时，根 Makefile 将继续负责组合各组件目标。组件特有的安装、运行和测试方式不在根 README 重复说明。
+
+当前默认推导会完成 CPU0 Scheduler 初始化，把 `KernelInitTaskRef` 放入
+`Cpu0RunQ`，随后在首次 `Action::Schedule` 的占位 `panic "impl sched"` 停止；
+因此 `tools/bin/derive`/`make run` 当前预期返回失败状态，详细因果输出见工具说明。
