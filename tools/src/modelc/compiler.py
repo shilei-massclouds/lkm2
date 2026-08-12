@@ -252,9 +252,17 @@ def _signal(
     if len(raw_target) == 1 and raw_target[0] in {
         *bindings,
         "CurrentTaskRef",
-        "CurrentUserAppRuntimeRef",
     }:
         target = ModelExpression("identifier", raw_target[0])
+    elif (
+        raw_target == ("CurrentTaskRef", "UserAppRuntimeRef")
+        and operations[:-2] == ["member"]
+    ):
+        target = ModelExpression(
+            "member",
+            "UserAppRuntimeRef",
+            (ModelExpression("identifier", "CurrentTaskRef"),),
+        )
     else:
         target = _object_expression(
             _resolve_target(raw_target, module.name, imports)
@@ -1079,7 +1087,7 @@ def _expand_inheritance(
         module = loaded[source_module.name]
         for raw in source_module.objects:
             node = object_nodes[raw.name]
-            if raw.name[-1] in {"CurrentTaskRef", "CurrentUserAppRuntimeRef"}:
+            if raw.name[-1] == "CurrentTaskRef":
                 raise _semantic_error(
                     module,
                     node,
@@ -1483,6 +1491,24 @@ def _expand_inheritance(
         parameters: dict[str, TypeKey],
         fields: dict[str, ModelField],
     ) -> TypeKey | None:
+        access = _flatten_access(expression)
+        if access == (
+            ["CurrentTaskRef", "UserAppRuntimeRef"],
+            ["member"],
+        ):
+            if len(task_types) != 1:
+                raise _semantic_error(
+                    loaded[module_name],
+                    loaded[module_name].tree,
+                    "CurrentTaskRef.UserAppRuntimeRef requires exactly one declared Task type",
+                )
+            if len(user_runtime_types) != 1:
+                raise _semantic_error(
+                    loaded[module_name],
+                    loaded[module_name].tree,
+                    "CurrentTaskRef.UserAppRuntimeRef requires exactly one declared user_runtime type",
+                )
+            return (user_runtime_types[0], ())
         if expression.kind == "identifier":
             identifier = str(expression.value)
             if identifier in parameters:
@@ -1490,7 +1516,6 @@ def _expand_inheritance(
             if identifier == "self" and source is not None:
                 return object_type(source)
             if identifier == "CurrentTaskRef":
-                task_types = tuple(name for name in raw_types if name[-1] == "Task")
                 if len(task_types) != 1:
                     raise _semantic_error(
                         loaded[module_name],
@@ -1498,15 +1523,6 @@ def _expand_inheritance(
                         "CurrentTaskRef requires exactly one declared Task type",
                     )
                 return (task_types[0], ())
-            if identifier == "CurrentUserAppRuntimeRef":
-                if len(user_runtime_types) != 1:
-                    raise _semantic_error(
-                        loaded[module_name],
-                        loaded[module_name].tree,
-                        "CurrentUserAppRuntimeRef requires exactly one declared user_runtime type",
-                    )
-                return (user_runtime_types[0], ())
-        access = _flatten_access(expression)
         if (
             access is not None
             and source is not None
@@ -1669,6 +1685,23 @@ def _expand_inheritance(
                         continue
                     for signal in block.signals:
                         flattened_target = _flatten_access(signal.target)
+                        runtime_selector = flattened_target == (
+                            ["CurrentTaskRef", "UserAppRuntimeRef"],
+                            ["member"],
+                        )
+                        if runtime_selector:
+                            if len(task_types) != 1:
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "CurrentTaskRef.UserAppRuntimeRef requires exactly one Task type",
+                                )
+                            if len(user_runtime_types) != 1:
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "CurrentTaskRef.UserAppRuntimeRef requires exactly one user_runtime type",
+                                )
                         if (
                             flattened_target is not None
                             and len(flattened_target[0]) == 1
@@ -1681,13 +1714,6 @@ def _expand_inheritance(
                                         loaded[module_name],
                                         owner,
                                         "CurrentTaskRef is only available in a sched_core handler",
-                                    )
-                            elif dynamic == "CurrentUserAppRuntimeRef":
-                                if len(user_runtime_types) != 1:
-                                    raise _semantic_error(
-                                        loaded[module_name],
-                                        owner,
-                                        "CurrentUserAppRuntimeRef requires exactly one user_runtime type",
                                     )
                             elif dynamic not in environment:
                                 raise _semantic_error(

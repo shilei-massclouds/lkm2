@@ -164,11 +164,13 @@ handler 校验全部成功后才原子提交 current；Task Resume 的受控 Tas
 Online 并启用 `KernelInitTask`；其 Enable 与 Resume 生命周期分别驱动隐藏 runq 的
 Enqueue 与 Dequeue。BootTask 是 idle Task；其引导 Resume 自迁移保持 OnCpu，调度
 Resume/Suspend override 避免队列动作。切换到 `KernelInitTask` 后，`UserRunPhase`
-同步完成推导器按需生成的 `KernelInitTask.UserAppRuntime` 的 Preset、Setup、Enable，
-再 yield 到其 `Action::Enter` 用户态黑盒入口。`user_runtime: true` 指示推导器默认从
-该入口触发一次 Schedule；Task 切回时恢复同一 Runtime 入口。当前启动路径因而返回
-BootTask、进入 BootIdle，并在 Runtime 的下一次默认调度后命中
-`panic "boot idle repeated!"`；CLI 输出 `stopped: panic` 并返回 1。
+通过 `CurrentTaskRef.UserAppRuntimeRef` 同步完成推导器按需生成的
+`KernelInitTask.UserAppRuntime` 的 Preset、Setup、Enable，再 yield 到其
+`Action::Enter` 用户态黑盒入口。`user_runtime: true` 指示推导器为每个 episode 从该
+入口触发一次普通 Schedule；KernelInitTask Suspend 后进入 runq并被正常策略再次选中，
+Resume 回到同一 Runtime 坐标时只确认 episode 已恢复，不再递归调度。推导保留
+BootHandoff 与 UserRunPhase continuation，以 `yielded` 结束；BootIdle 及其 panic
+不可达，CLI 返回 0。Model IR schema 仍为 v10。
 
 公共库接口为：
 

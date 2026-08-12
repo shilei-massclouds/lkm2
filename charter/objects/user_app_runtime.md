@@ -4,9 +4,11 @@
 
 `UserAppRuntime` 是承载用户态执行坐标的运行对象，不是 TaskFlow 或 Scheduler
 成员。类型以 `user_runtime: true` 标记；模型不声明具名 Runtime 实例，推导器在
-`CurrentUserAppRuntimeRef` 首次求值时为当前 Task 按需生成一个 owned child。因此
-KernelInitTask 的运行实例身份是 `KernelInitTask.UserAppRuntime`，而不是全局的
-`KernelInitUserAppRuntime`。
+完整复合选择器 `CurrentTaskRef.UserAppRuntimeRef` 首次求值时为当前 Scheduler Task
+按需生成一个 owned child。因此 KernelInitTask 的运行实例身份是
+`KernelInitTask.UserAppRuntime`，而不是全局的 `KernelInitUserAppRuntime`。裸
+`CurrentTaskRef` 仍只用于 `sched_core` handler；`UserAppRuntimeRef` 是推导器虚拟
+child selector，不是模型字段。
 
 本阶段不为 Runtime 声明 `ApplicationInstance`。具体应用、exec 与地址空间等语义在
 开始模拟应用执行时另行引入。
@@ -20,20 +22,21 @@ Base --Preset--> Prepared --Setup--> Ready --Enable--> Online
 Online --Enter--> 用户态执行断点
 ```
 
-`UserRunPhase.Action::Enter` 必须通过 `CurrentUserAppRuntimeRef` 同步依次驱动
-`Preset`、`Setup`、`Enable`，然后 `yields Action::Enter`。`Enable` 只发布 Online
-状态；只有 `Action::Enter` 表示控制到达用户态执行坐标。
+`UserRunPhase.Action::Enter` 必须通过 `CurrentTaskRef.UserAppRuntimeRef` 同步依次
+驱动 `Preset`、`Setup`、`Enable`，然后 `yields Action::Enter`。`Enable` 只发布
+Online 状态；只有 `Action::Enter` 表示控制到达用户态执行坐标。
 
 `Action::Enter` 在类型中是 abstract 入口，model 层不提供实现。推导器将带
-`user_runtime` 标记的实例视为内核外黑盒：默认场景触发一次
-`Scheduler.Action::Schedule`。Task 被切走时，恢复点保留在 Runtime 入口；Task 再次
-被调度时重新进入同一用户态坐标，并由默认场景再次触发调度，而不是重启 TaskFlow
-或从 `UserRunPhase` 的 yield 后方继续执行。
+`user_runtime` 标记的实例视为内核外黑盒：每个用户态执行 episode 默认触发一次普通
+`Scheduler.Action::Schedule`，完全遵循 runq 策略。Task 被切走时，恢复点保留在
+Runtime 入口；Task 再次被调度时回到同一用户态坐标，只确认该 episode 已恢复，不再
+触发 Schedule，也不重启 TaskFlow 或从 `UserRunPhase` 的 yield 后方继续执行。未来的
+syscall、中断或异常才会开启新的用户态 episode。
 
-当前默认启动推导因此从 KernelInitTask 用户态切回 BootTask，使 StartKernel 进入
-BootIdle；BootIdle 再调度 KernelInitTask，而 Runtime 的下一次默认调度又切回
-BootTask，最终执行 `panic "boot idle repeated!"`。Runtime 在整个过程中保持
-`State::Online`。
+当前默认启动推导中，KernelInitTask Suspend 时将自己重新加入 runq，Scheduler 因而
+再次选择 KernelInitTask，并完成 Resume 与 Dequeue。推导停在用户态黑盒边界，保留
+BootHandoff 和 UserRunPhase continuation；StartKernel 不会恢复到 BootIdle，
+`panic "boot idle repeated!"` 不可达。Runtime 在整个过程中保持 `State::Online`。
 
 ## trap 与 exit 边界
 

@@ -39,7 +39,7 @@ def _all_units(units):
 def _target_name(expression):
     parts = []
     cursor = expression
-    while cursor.kind == "path":
+    while cursor.kind in {"member", "path"}:
         parts.append(cursor.value)
         cursor = cursor.children[0]
     parts.append(cursor.value)
@@ -91,7 +91,8 @@ class BootSchedulerModelTests(unittest.TestCase):
         signals = tuple(block.signals[0] for block in blocks)
         self.assertTrue(
             all(
-                _target_name(signal.target) == ("CurrentUserAppRuntimeRef",)
+                _target_name(signal.target)
+                == ("CurrentTaskRef", "UserAppRuntimeRef")
                 for signal in signals
             )
         )
@@ -140,7 +141,7 @@ class BootSchedulerModelTests(unittest.TestCase):
 
     def test_default_derivation_runs_full_task_switch_lifecycle(self) -> None:
         result = derive(self.model, default_derivation_sequence(self.model))
-        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.status, "yielded")
         self.assertEqual(len(result.paths), 1)
         path = result.paths[0]
         units = tuple(_all_units(path.units))
@@ -151,11 +152,11 @@ class BootSchedulerModelTests(unittest.TestCase):
             and unit.event.signal == ("Action", "Schedule")
         )
 
-        self.assertEqual(len(schedules), 4)
+        self.assertEqual(len(schedules), 2)
         self.assertTrue(all(unit.status == "passed" for unit in schedules))
         self.assertEqual(
             tuple(switch.task for unit in schedules for switch in unit.switches),
-            (KERNEL_INIT_TASK, BOOT_TASK, KERNEL_INIT_TASK, BOOT_TASK),
+            (KERNEL_INIT_TASK, KERNEL_INIT_TASK),
         )
         self.assertEqual(
             tuple(
@@ -163,7 +164,7 @@ class BootSchedulerModelTests(unittest.TestCase):
                 for unit in schedules
                 for switch in unit.switches
             ),
-            (False, True, False, True),
+            (False, False),
         )
         queue_actions = tuple(
             unit.event.signal
@@ -181,7 +182,6 @@ class BootSchedulerModelTests(unittest.TestCase):
                 ("Action", "Dequeue"),
                 ("Action", "Enqueue"),
                 ("Action", "Dequeue"),
-                ("Action", "Enqueue"),
             ),
         )
 
@@ -191,20 +191,22 @@ class BootSchedulerModelTests(unittest.TestCase):
         ).paths[0]
         states = {item.object: item.state for item in path.final_state}
 
-        self.assertEqual(path.status, "panic")
-        self.assertEqual(path.failure.code, "panic")
-        self.assertEqual(path.failure.message, "boot idle repeated!")
+        self.assertEqual(path.status, "yielded")
+        self.assertIsNone(path.failure)
         self.assertEqual(states[CPU0_SCHEDULER], ("State", "Online"))
-        self.assertEqual(states[BOOT_TASK], ("State", "OnCpu"))
-        self.assertEqual(states[KERNEL_INIT_TASK], ("State", "Online"))
+        self.assertEqual(states[BOOT_TASK], ("State", "Online"))
+        self.assertEqual(states[KERNEL_INIT_TASK], ("State", "OnCpu"))
         self.assertEqual(states[USER_APP_RUNTIME], ("State", "Online"))
         self.assertEqual(len(path.schedulers), 1)
         scheduler = path.schedulers[0]
         self.assertEqual(scheduler.scheduler, CPU0_SCHEDULER)
         self.assertEqual(scheduler.idle_task, BOOT_TASK)
-        self.assertEqual(scheduler.current_task, BOOT_TASK)
-        self.assertEqual(scheduler.runq, (KERNEL_INIT_TASK,))
-        self.assertEqual(path.continuations, ())
+        self.assertEqual(scheduler.current_task, KERNEL_INIT_TASK)
+        self.assertEqual(scheduler.runq, ())
+        self.assertEqual(
+            tuple(continuation.root for continuation in path.continuations),
+            (BOOT_HANDOFF, USER_RUN_PHASE),
+        )
 
         units = tuple(_all_units(path.units))
         runtime_entries = tuple(
@@ -216,11 +218,22 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(len(runtime_entries), 2)
         self.assertEqual(runtime_entries[0].event.mode, "yield")
         self.assertEqual(runtime_entries[1].event.mode, "resume")
-        self.assertTrue(
-            all(
-                entry.drives[0].event.target == CPU0_SCHEDULER
-                and entry.drives[0].event.signal == ("Action", "Schedule")
-                for entry in runtime_entries
+        self.assertEqual(len(runtime_entries[0].drives), 1)
+        self.assertEqual(runtime_entries[0].drives[0].event.target, CPU0_SCHEDULER)
+        self.assertEqual(
+            runtime_entries[0].drives[0].event.signal,
+            ("Action", "Schedule"),
+        )
+        self.assertEqual(runtime_entries[1].drives, ())
+        self.assertFalse(
+            any(unit.event.target[-1] == "BootIdle" for unit in units)
+        )
+        self.assertFalse(
+            any(
+                directive.kind == "panic"
+                and directive.message == "boot idle repeated!"
+                for unit in units
+                for directive in unit.directives
             )
         )
         self.assertFalse(

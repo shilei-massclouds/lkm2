@@ -6,10 +6,10 @@ object UserRunPhase: PhaseType {
     state State::Online {
         actions {
             override on Action::Enter {
-                drives CurrentUserAppRuntimeRef.Transition::Preset;
-                drives CurrentUserAppRuntimeRef.Transition::Setup;
-                drives CurrentUserAppRuntimeRef.Transition::Enable;
-                yields CurrentUserAppRuntimeRef.Action::Enter;
+                drives CurrentTaskRef.UserAppRuntimeRef.Transition::Preset;
+                drives CurrentTaskRef.UserAppRuntimeRef.Transition::Setup;
+                drives CurrentTaskRef.UserAppRuntimeRef.Transition::Enable;
+                yields CurrentTaskRef.UserAppRuntimeRef.Action::Enter;
             }
         }
     }

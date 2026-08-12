@@ -48,7 +48,7 @@ def _signal(
 def _target_name(expression: ModelExpression) -> tuple[str, ...]:
     parts: list[str] = []
     cursor = expression
-    while cursor.kind == "path":
+    while cursor.kind in {"member", "path"}:
         parts.append(str(cursor.value))
         cursor = cursor.children[0]
     parts.append(str(cursor.value))
@@ -919,7 +919,7 @@ class ParserAndCompilerTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(_target_name(block.signals[0].target) for block in blocks),
-            (("CurrentUserAppRuntimeRef",),) * 4,
+            (("CurrentTaskRef", "UserAppRuntimeRef"),) * 4,
         )
         self.assertEqual(
             tuple(block.signals[0].signal for block in blocks),
@@ -983,7 +983,7 @@ class ParserAndCompilerTests(unittest.TestCase):
         )
         self.assertTrue(enter.abstract)
 
-    def test_user_runtime_marker_and_selector_are_strict(self) -> None:
+    def test_user_runtime_marker_and_composite_selector_are_strict(self) -> None:
         protocol = """
 type Runtime {
     user_runtime: true;
@@ -1010,20 +1010,55 @@ type Runtime {
                 with self.assertRaisesRegex(CompilationError, message):
                     compile_spec(entry)
 
-        with model_tree(
-            {
-                "root.spec": """
+        task = """
+type Task { initial_state: State::Online;
+    state State::Online { actions { on Action::Observe; } }
+}
+"""
+        probe = """
 type T { initial_state: State::Online;
     state State::Online { actions { on Action::Enter {
-        drives CurrentUserAppRuntimeRef.Action::Enter;
+        drives CurrentTaskRef.UserAppRuntimeRef.Action::Enter;
     } } }
 }
 object Probe: T {}
 """
-            }
-        ) as (_, entry):
-            with self.assertRaisesRegex(CompilationError, "requires exactly one user_runtime type"):
-                compile_spec(entry)
+        valid = task + protocol + probe
+        with model_tree({"root.spec": valid}) as (_, entry):
+            signal = compile_spec(entry).objects[0].states[0].actions[0].blocks[0].signals[0]
+            self.assertEqual(
+                _target_name(signal.target),
+                ("CurrentTaskRef", "UserAppRuntimeRef"),
+            )
+
+        invalid_selectors = (
+            (
+                valid.replace(
+                    "CurrentTaskRef.UserAppRuntimeRef",
+                    "CurrentUserAppRuntimeRef",
+                ),
+                "not in scope|unknown object|dynamic signal target",
+            ),
+            (
+                valid.replace(
+                    "CurrentTaskRef.UserAppRuntimeRef",
+                    "CurrentTaskRef.OtherRuntimeRef",
+                ),
+                "not in scope|unknown object|dynamic signal target",
+            ),
+            (
+                protocol + probe,
+                "requires exactly one (declared )?Task type",
+            ),
+            (
+                task + probe,
+                "requires exactly one (declared )?user_runtime type",
+            ),
+        )
+        for body, message in invalid_selectors:
+            with self.subTest(message=message), model_tree({"root.spec": body}) as (_, entry):
+                with self.assertRaisesRegex(CompilationError, message):
+                    compile_spec(entry)
 
     def test_real_phase_type_and_arch_head_override_are_preserved(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
@@ -1949,6 +1984,48 @@ class ModelIRJSONTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ModelIRValidationError,
                     "must use canonical signal Transition::Preset",
+                ):
+                    load_model_ir(StringIO(json.dumps(document)))
+
+    def test_user_runtime_composite_selector_is_strict_in_model_ir(self) -> None:
+        legacy = json.loads(EXPECTED_JSON)
+        legacy_signal = _json_module(legacy, "phases", "user_run")["objects"][0][
+            "states"
+        ][0]["actions"][0]["blocks"][0]["signals"][0]
+        legacy_signal["target"] = {
+            "kind": "identifier",
+            "value": "CurrentUserAppRuntimeRef",
+            "children": [],
+        }
+
+        malformed = json.loads(EXPECTED_JSON)
+        malformed_target = _json_module(malformed, "phases", "user_run")[
+            "objects"
+        ][0]["states"][0]["actions"][0]["blocks"][0]["signals"][0][
+            "target"
+        ]
+        malformed_target["value"] = "OtherRuntimeRef"
+
+        missing_runtime = json.loads(EXPECTED_JSON)
+        runtime_type = _json_module(
+            missing_runtime, "objects", "user_app_runtime"
+        )["types"][0]
+        runtime_type["user_runtime"] = False
+
+        multiple_tasks = json.loads(EXPECTED_JSON)
+        duplicate_task_type = json.loads(
+            json.dumps(_json_module(multiple_tasks, "objects", "task")["types"][0])
+        )
+        duplicate_task_type["name"] = ["phases", "user_run", "Task"]
+        _json_module(multiple_tasks, "phases", "user_run")["types"].append(
+            duplicate_task_type
+        )
+
+        for document in (legacy, malformed, missing_runtime, multiple_tasks):
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(
+                    ModelIRValidationError,
+                    "dynamic signal target is not in scope|dynamic signal target is unavailable",
                 ):
                     load_model_ir(StringIO(json.dumps(document)))
 

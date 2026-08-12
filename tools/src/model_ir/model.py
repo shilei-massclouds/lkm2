@@ -742,6 +742,9 @@ class ModelIR:
         user_runtime_types = tuple(
             item for item in type_items.values() if item.user_runtime
         )
+        task_types = tuple(
+            item for item in type_items.values() if item.name[-1] == "Task"
+        )
         if len(user_runtime_types) > 1:
             raise ModelIRValidationError(
                 "the model may declare at most one user_runtime type"
@@ -892,10 +895,7 @@ class ModelIR:
                             "external continuation entry must use resumes Action::Enter"
                         )
             for model_object in module.objects:
-                if model_object.name[-1] in {
-                    "CurrentTaskRef",
-                    "CurrentUserAppRuntimeRef",
-                }:
+                if model_object.name[-1] == "CurrentTaskRef":
                     raise ModelIRValidationError(
                         f"{model_object.name[-1]} is a reserved runtime selector and must not be "
                         "declared as an object"
@@ -1029,9 +1029,13 @@ class ModelIR:
                                     if signal.target.kind == "identifier"
                                     else None
                                 )
-                                dynamic = dynamic_name in {
+                                target_access = _expression_access(signal.target)
+                                runtime_selector = target_access == (
+                                    ("CurrentTaskRef", "UserAppRuntimeRef"),
+                                    ("member",),
+                                )
+                                dynamic = runtime_selector or dynamic_name in {
                                     "CurrentTaskRef",
-                                    "CurrentUserAppRuntimeRef",
                                     *switched_bindings,
                                 }
                                 if target_name is None and not dynamic:
@@ -1040,12 +1044,13 @@ class ModelIR:
                                     )
                                 if dynamic:
                                     valid_runtime = (
-                                        dynamic_name == "CurrentUserAppRuntimeRef"
+                                        runtime_selector
+                                        and len(task_types) == 1
                                         and len(user_runtime_types) == 1
                                         and not signal.arguments
                                     )
                                     valid_task = (
-                                        dynamic_name != "CurrentUserAppRuntimeRef"
+                                        not runtime_selector
                                         and sched_core
                                         and not signal.arguments
                                     )
