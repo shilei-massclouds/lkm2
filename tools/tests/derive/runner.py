@@ -180,7 +180,7 @@ class SmokeGoldenTests(_DiffingTestCase):
 
 
 class EngineTests(unittest.TestCase):
-    def test_sequence_selects_roots_and_engine_schedules_nested_units(self) -> None:
+    def test_sequence_chooses_roots_and_engine_schedules_nested_units(self) -> None:
         directory, model = _compile_text(
             """
             object Child: T {
@@ -1521,7 +1521,7 @@ class DerivationJSONTests(unittest.TestCase):
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 7)
+        self.assertEqual(document["schema_version"], 8)
         self.assertNotIn("failure", document)
 
         startup_event = json.loads(output.getvalue())
@@ -1554,10 +1554,14 @@ class DerivationJSONTests(unittest.TestCase):
         missing = dict(document)
         del missing["paths"]
         invalid_documents.append(json.dumps(missing))
-        invalid_documents.append('{"schema_version":7,"status":"passed","status":"passed"}')
+        invalid_documents.append('{"schema_version":8,"status":"passed","status":"passed"}')
         old_result = dict(document)
-        old_result["schema_version"] = 6
+        old_result["schema_version"] = 7
         invalid_documents.append(json.dumps(old_result))
+        old_switch_field = json.loads(output.getvalue())
+        old_unit = old_switch_field["paths"][0]["units"][0]
+        old_unit["selections"] = old_unit.pop("switches")
+        invalid_documents.append(json.dumps(old_switch_field))
         for invalid in invalid_documents:
             with self.subTest(document=invalid):
                 with self.assertRaises(DerivationValidationError):

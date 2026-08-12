@@ -208,7 +208,7 @@ def _deferred(value: object, path: str) -> ModelDeferred:
 def _handler_block(value: object, path: str) -> ModelHandlerBlock:
     data = _require_object(
         value,
-        frozenset({"kind", "expressions", "signals", "deferred", "updates", "selects"}),
+        frozenset({"kind", "expressions", "signals", "deferred", "updates", "switches"}),
         path,
     )
     deferred = data["deferred"]
@@ -218,9 +218,9 @@ def _handler_block(value: object, path: str) -> ModelHandlerBlock:
         signals=_array(data["signals"], f"{path}.signals", _signal),
         deferred=None if deferred is None else _deferred(deferred, f"{path}.deferred"),
         updates=_array(data["updates"], f"{path}.updates", _update),
-        selects=None
-        if data["selects"] is None
-        else _string(data["selects"], f"{path}.selects"),
+        switches=None
+        if data["switches"] is None
+        else _string(data["switches"], f"{path}.switches"),
     )
 
 
@@ -432,7 +432,7 @@ def _block_data(block: ModelHandlerBlock) -> dict[str, Any]:
             {"target": _expr_data(item.target), "value": _expr_data(item.value)}
             for item in block.updates
         ],
-        "selects": block.selects,
+        "switches": block.switches,
     }
 
 

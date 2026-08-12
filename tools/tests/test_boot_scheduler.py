@@ -18,6 +18,7 @@ KERNEL_INIT_FLOW = ("flows", "task_flow", "KernelInitFlow")
 CPU0_SCHEDULER = ("objects", "scheduler", "Cpu0Scheduler")
 BOOT_TASK = ("objects", "task", "BootTask")
 KERNEL_INIT_TASK = ("objects", "task", "KernelInitTask")
+KERNEL = ("systems", "kernel", "Kernel")
 BOOT_HANDOFF = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
 USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
 
@@ -59,9 +60,9 @@ class BootSchedulerModelTests(unittest.TestCase):
         online = next(state for state in scheduler.states if state.name == ("State", "Online"))
         self.assertEqual(tuple(action.signal for action in online.actions), (("Action", "Schedule"),))
         blocks = online.actions[0].blocks
-        self.assertEqual(tuple(block.kind for block in blocks), ("drives", "selects", "drives"))
+        self.assertEqual(tuple(block.kind for block in blocks), ("drives", "switches", "drives"))
         self.assertEqual(blocks[0].signals[0].target.value, "CurrentTaskRef")
-        self.assertEqual(blocks[1].selects, "next_task_ref")
+        self.assertEqual(blocks[1].switches, "next_task_ref")
         self.assertEqual(blocks[2].signals[0].target.value, "next_task_ref")
 
     def test_boot_and_user_run_yield_to_the_scheduler(self) -> None:
@@ -75,6 +76,35 @@ class BootSchedulerModelTests(unittest.TestCase):
             )
             self.assertEqual(_target_name(signal.target), CPU0_SCHEDULER)
             self.assertEqual(signal.signal, ("Action", "Schedule"))
+
+    def test_kernel_boots_exclusively_through_boot_task_resume(self) -> None:
+        kernel = next(item for item in self.model.objects if item.name == KERNEL)
+        enable = next(
+            transition
+            for state in kernel.states
+            for transition in state.transitions
+            if transition.signal == ("Transition", "Enable")
+        )
+        signals = tuple(
+            signal for block in enable.blocks for signal in block.signals
+        )
+
+        self.assertEqual(len(signals), 1)
+        self.assertEqual(_target_name(signals[0].target), BOOT_TASK)
+        self.assertEqual(signals[0].signal, ("Transition", "Resume"))
+        self.assertEqual(signals[0].mode, "drive")
+
+        result = derive(self.model, default_derivation_sequence(self.model))
+        units = tuple(_all_units(result.units))
+        boot_resume = next(
+            unit
+            for unit in units
+            if unit.event.target == BOOT_TASK
+            and unit.event.signal == ("Transition", "Resume")
+        )
+        self.assertEqual(boot_resume.state_before, ("State", "OnCpu"))
+        self.assertEqual(boot_resume.state_after, ("State", "OnCpu"))
+        self.assertEqual(tuple(unit.event.target for unit in boot_resume.resumes), (BOOT_FLOW,))
 
     def test_default_derivation_runs_full_task_switch_lifecycle(self) -> None:
         result = derive(self.model, default_derivation_sequence(self.model))
@@ -92,7 +122,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(len(schedules), 2)
         self.assertTrue(all(unit.status == "passed" for unit in schedules))
         self.assertEqual(
-            tuple(selection.task for unit in schedules for selection in unit.selections),
+            tuple(switch.task for unit in schedules for switch in unit.switches),
             (KERNEL_INIT_TASK, KERNEL_INIT_TASK),
         )
         queue_actions = tuple(

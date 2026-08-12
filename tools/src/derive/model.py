@@ -1,4 +1,4 @@
-"""Data model for derivation root selection and schema-v7 path results."""
+"""Data model for derivation root selection and schema-v8 path results."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from model_ir import ModelExpression, canonicalize_signal_name
 
 
 SEQUENCE_SCHEMA_VERSION = 3
-RESULT_SCHEMA_VERSION = 7
+RESULT_SCHEMA_VERSION = 8
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MODES = frozenset({"drive", "emit", "yield", "resume"})
 _UNIT_KINDS = frozenset({"root", "drive", "emit", "yield", "resume"})
@@ -236,7 +236,7 @@ class DerivationDirective:
 
 
 @dataclass(frozen=True, slots=True)
-class DerivationSelection:
+class DerivationSwitch:
     binding: str
     task: tuple[str, ...]
     idle_fallback: bool = False
@@ -245,19 +245,19 @@ class DerivationSelection:
 
     def __post_init__(self) -> None:
         if type(self.binding) is not str or _IDENTIFIER.fullmatch(self.binding) is None:
-            raise DerivationValidationError("selection.binding must be an identifier")
-        _name(self.task, "selection.task")
+            raise DerivationValidationError("switch.binding must be an identifier")
+        _name(self.task, "switch.task")
         if type(self.idle_fallback) is not bool:
             raise DerivationValidationError(
-                "selection.idle_fallback must be a boolean"
+                "switch.idle_fallback must be a boolean"
             )
         if type(self.cycle_closed) is not bool:
             raise DerivationValidationError(
-                "selection.cycle_closed must be a boolean"
+                "switch.cycle_closed must be a boolean"
             )
         if type(self.after_drives) is not int or self.after_drives < 0:
             raise DerivationValidationError(
-                "selection.after_drives must be a non-negative integer"
+                "switch.after_drives must be a non-negative integer"
             )
 
 
@@ -280,7 +280,7 @@ class DerivationUnit:
     yields: tuple[DerivationUnit, ...] = ()
     directives: tuple[DerivationDirective, ...] = ()
     resumes: tuple[DerivationUnit, ...] = ()
-    selections: tuple[DerivationSelection, ...] = ()
+    switches: tuple[DerivationSwitch, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _UNIT_KINDS:
@@ -324,7 +324,7 @@ class DerivationUnit:
         _tuple_of(self.yields, DerivationUnit, "unit.yields")
         _tuple_of(self.directives, DerivationDirective, "unit.directives")
         _tuple_of(self.resumes, DerivationUnit, "unit.resumes")
-        _tuple_of(self.selections, DerivationSelection, "unit.selections")
+        _tuple_of(self.switches, DerivationSwitch, "unit.switches")
         if self.handler is not None and self.handler != self.event.signal:
             raise DerivationValidationError("unit.handler must match unit.event.signal")
         if self.handler is None and self.candidate_state is not None:

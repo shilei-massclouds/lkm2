@@ -220,7 +220,7 @@ def _signal(
     mode: str,
     imports: dict[str, tuple[str, ...]],
     bindings: frozenset[str] = frozenset(),
-    selector_names: frozenset[str] = frozenset(),
+    switch_names: frozenset[str] = frozenset(),
 ) -> ModelSignal:
     expression = _lower_expression(node)
     arguments: tuple[ModelExpression, ...] = ()
@@ -241,13 +241,13 @@ def _signal(
     raw_target = tuple(segments[:-2])
     if (
         len(raw_target) == 1
-        and raw_target[0] in selector_names
+        and raw_target[0] in switch_names
         and raw_target[0] not in bindings
     ):
         raise _semantic_error(
             module,
             node,
-            f"selects binding {raw_target[0]!r} is not in scope before its declaration",
+            f"switches binding {raw_target[0]!r} is not in scope before its declaration",
         )
     if len(raw_target) == 1 and raw_target[0] in {*bindings, "CurrentTaskRef"}:
         target = ModelExpression("identifier", raw_target[0])
@@ -387,10 +387,10 @@ def _handler_blocks(
 ) -> tuple[ModelHandlerBlock, ...]:
     result: list[ModelHandlerBlock] = []
     bindings: set[str] = set()
-    selector_names = frozenset(
+    switch_names = frozenset(
         str(child.children[0])
         for child in owner.children
-        if isinstance(child, Tree) and child.data == "selects_statement"
+        if isinstance(child, Tree) and child.data == "switches_statement"
     )
     expression_kinds = {
         "depends_on_block": "depends_on",
@@ -407,7 +407,7 @@ def _handler_blocks(
         elif rule in {"drives_block", "emits_block"}:
             mode = "drive" if rule == "drives_block" else "emit"
             signals = tuple(
-                _signal(module, statement, source, mode, imports, frozenset(bindings), selector_names)
+                _signal(module, statement, source, mode, imports, frozenset(bindings), switch_names)
                 for statement in _signal_nodes(child)
             )
             result.append(ModelHandlerBlock(rule.removesuffix("_block"), signals=signals))
@@ -416,7 +416,7 @@ def _handler_blocks(
                 ModelHandlerBlock(
                     "yields",
                     signals=(
-                        _signal(module, child.children[0], source, "yield", imports, frozenset(bindings), selector_names),
+                        _signal(module, child.children[0], source, "yield", imports, frozenset(bindings), switch_names),
                     ),
                 )
             )
@@ -425,7 +425,7 @@ def _handler_blocks(
                 ModelHandlerBlock(
                     "resumes",
                     signals=(
-                        _signal(module, child.children[0], source, "resume", imports, frozenset(bindings), selector_names),
+                        _signal(module, child.children[0], source, "resume", imports, frozenset(bindings), switch_names),
                     ),
                 )
             )
@@ -454,13 +454,13 @@ def _handler_blocks(
                     f"{kind} requires exactly one string literal",
                 )
             result.append(ModelHandlerBlock(kind, expressions=(expression,)))
-        elif rule == "selects_statement":
+        elif rule == "switches_statement":
             binding = str(child.children[0])
             if binding in bindings:
                 raise _semantic_error(
-                    module, child, f"duplicate selects binding {binding!r}"
+                    module, child, f"duplicate switches binding {binding!r}"
                 )
-            result.append(ModelHandlerBlock("selects", selects=binding))
+            result.append(ModelHandlerBlock("switches", switches=binding))
             bindings.add(binding)
         elif rule == "deferred_declaration":
             result.append(ModelHandlerBlock("deferred", deferred=_deferred(module, child)))
@@ -911,7 +911,7 @@ def _rebind_states(
                 tuple(_rebind_signal(signal, source) for signal in block.signals),
                 block.deferred,
                 block.updates,
-                block.selects,
+                block.switches,
             )
             for block in values
         )
@@ -1541,28 +1541,28 @@ def _expand_inheritance(
         for state in model_object.states:
             for handler in (*state.transitions, *state.actions):
                 environment = parameter_types(handler.parameters, module_name)
-                selection_count = 0
+                switch_count = 0
                 for block in handler.blocks:
-                    if block.kind == "selects":
-                        selection_count += 1
+                    if block.kind == "switches":
+                        switch_count += 1
                         if (
-                            selection_count > 1
+                            switch_count > 1
                             or not isinstance(handler, ModelAction)
                             or not is_sched_core_object(name)
                         ):
                             raise _semantic_error(
                                 loaded[module_name],
                                 owner,
-                                "selects is allowed at most once in a sched_core Action handler",
+                                "switches is allowed at most once in a sched_core Action handler",
                             )
-                        assert block.selects is not None
-                        if block.selects in environment:
+                        assert block.switches is not None
+                        if block.switches in environment:
                             raise _semantic_error(
                                 loaded[module_name],
                                 owner,
-                                f"selects binding {block.selects!r} conflicts with an existing binding",
+                                f"switches binding {block.switches!r} conflicts with an existing binding",
                             )
-                        environment[block.selects] = (task_types[0], ())
+                        environment[block.switches] = (task_types[0], ())
                         continue
                     for signal in block.signals:
                         flattened_target = _flatten_access(signal.target)
@@ -1588,6 +1588,16 @@ def _expand_inheritance(
                         target_name = resolve_object_expression(
                             signal.target, module_name
                         )
+                        if (
+                            target_name is not None
+                            and is_task_flow_object(target_name)
+                            and signal.signal == ("Action", "Enter")
+                        ):
+                            raise _semantic_error(
+                                loaded[module_name],
+                                owner,
+                                "TaskFlow Action::Enter is derived exclusively from its parent Task Transition::Resume",
+                            )
                         if (
                             target_name is not None
                             and is_sched_core_object(target_name)
@@ -1651,6 +1661,16 @@ def _expand_inheritance(
             )
             for signal in external.signals:
                 target_name = resolve_object_expression(signal.target, module.name)
+                if (
+                    target_name is not None
+                    and is_task_flow_object(target_name)
+                    and signal.signal == ("Action", "Enter")
+                ):
+                    raise _semantic_error(
+                        owner_module,
+                        owner,
+                        "TaskFlow Action::Enter is derived exclusively from its parent Task Transition::Resume",
+                    )
                 if (
                     target_name is not None
                     and is_sched_core_object(target_name)

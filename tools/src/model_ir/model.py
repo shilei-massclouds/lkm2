@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v8."""
+"""Frozen data model and semantic validation for Model IR schema v9."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -26,7 +26,7 @@ _BLOCK_KINDS = frozenset(
         "print",
         "panic",
         "deferred",
-        "selects",
+        "switches",
     }
 )
 _SIGNAL_MODES = frozenset({"drive", "emit", "yield", "resume"})
@@ -358,7 +358,7 @@ class ModelHandlerBlock:
     signals: tuple[ModelSignal, ...] = ()
     deferred: ModelDeferred | None = None
     updates: tuple[ModelUpdate, ...] = ()
-    selects: str | None = None
+    switches: str | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in _BLOCK_KINDS:
@@ -366,10 +366,10 @@ class ModelHandlerBlock:
         _validate_tuple(self.expressions, ModelExpression, "handler_block.expressions")
         _validate_tuple(self.signals, ModelSignal, "handler_block.signals")
         _validate_tuple(self.updates, ModelUpdate, "handler_block.updates")
-        if self.selects is not None:
-            _validate_identifier(self.selects, "handler_block.selects")
+        if self.switches is not None:
+            _validate_identifier(self.switches, "handler_block.switches")
         if self.kind in {"drives", "yields", "emits", "resumes"}:
-            if self.expressions or self.deferred is not None or self.updates or self.selects is not None:
+            if self.expressions or self.deferred is not None or self.updates or self.switches is not None:
                 raise ModelIRValidationError(f"{self.kind} block may only contain signals")
             expected_mode = {
                 "drives": "drive",
@@ -380,18 +380,18 @@ class ModelHandlerBlock:
             if any(signal.mode != expected_mode for signal in self.signals):
                 raise ModelIRValidationError(f"{self.kind} block has a mismatched signal mode")
         elif self.kind == "deferred":
-            if self.expressions or self.signals or self.deferred is None or self.updates or self.selects is not None:
+            if self.expressions or self.signals or self.deferred is None or self.updates or self.switches is not None:
                 raise ModelIRValidationError("deferred block must contain one deferred declaration")
         elif self.kind == "updates":
-            if self.expressions or self.signals or self.deferred is not None or self.selects is not None:
+            if self.expressions or self.signals or self.deferred is not None or self.switches is not None:
                 raise ModelIRValidationError("updates block may only contain updates")
-        elif self.kind == "selects":
-            if self.expressions or self.signals or self.deferred is not None or self.updates or self.selects is None:
+        elif self.kind == "switches":
+            if self.expressions or self.signals or self.deferred is not None or self.updates or self.switches is None:
                 raise ModelIRValidationError(
-                    "selects block must contain exactly one binding"
+                    "switches block must contain exactly one binding"
                 )
         elif self.kind in {"print", "panic"}:
-            if self.signals or self.deferred is not None or self.updates or self.selects is not None:
+            if self.signals or self.deferred is not None or self.updates or self.switches is not None:
                 raise ModelIRValidationError(
                     f"{self.kind} block may only contain one string expression"
                 )
@@ -399,7 +399,7 @@ class ModelHandlerBlock:
                 raise ModelIRValidationError(
                     f"{self.kind} block requires exactly one string expression"
                 )
-        elif self.signals or self.deferred is not None or self.updates or self.selects is not None:
+        elif self.signals or self.deferred is not None or self.updates or self.switches is not None:
             raise ModelIRValidationError(f"{self.kind} block may only contain expressions")
 
 
@@ -783,6 +783,13 @@ class ModelIR:
                     assert target_name is not None
                     target = object_items[target_name]
                     if (
+                        object_has_type(target, "TaskFlow")
+                        and signal.signal == ("Action", "Enter")
+                    ):
+                        raise ModelIRValidationError(
+                            "TaskFlow Action::Enter is derived exclusively from its parent Task Transition::Resume"
+                        )
+                    if (
                         object_is_sched_core(target)
                         and signal.signal
                         in {("Action", "Enqueue"), ("Action", "Dequeue")}
@@ -900,28 +907,28 @@ class ModelIR:
                                 f"transition in {'.'.join(model_object.name)!r} targets "
                                 f"unknown state {'::'.join(handler.target_state)!r}"
                             )
-                        selected_bindings: set[str] = set()
-                        selection_count = 0
+                        switched_bindings: set[str] = set()
+                        switch_count = 0
                         for block in handler.blocks:
-                            if block.kind == "selects":
-                                selection_count += 1
+                            if block.kind == "switches":
+                                switch_count += 1
                                 if (
-                                    selection_count > 1
+                                    switch_count > 1
                                     or not sched_core
                                     or not isinstance(handler, ModelAction)
                                 ):
                                     raise ModelIRValidationError(
-                                        "selects is allowed at most once in a sched_core Action handler"
+                                        "switches is allowed at most once in a sched_core Action handler"
                                     )
-                                assert block.selects is not None
-                                if block.selects in {
+                                assert block.switches is not None
+                                if block.switches in {
                                     parameter.name
                                     for parameter in handler.parameters
                                 }:
                                     raise ModelIRValidationError(
-                                        "selects binding conflicts with a handler parameter"
+                                        "switches binding conflicts with a handler parameter"
                                     )
-                                selected_bindings.add(block.selects)
+                                switched_bindings.add(block.switches)
                                 continue
                             for signal in block.signals:
                                 if signal.source != model_object.name:
@@ -932,7 +939,7 @@ class ModelIR:
                                 dynamic = (
                                     signal.target.kind == "identifier"
                                     and signal.target.value
-                                    in {"CurrentTaskRef", *selected_bindings}
+                                    in {"CurrentTaskRef", *switched_bindings}
                                 )
                                 if target_name is None and not dynamic:
                                     raise ModelIRValidationError(
@@ -950,6 +957,13 @@ class ModelIR:
                                         "signal targets unknown object"
                                     )
                                 target = object_items[target_name]
+                                if (
+                                    object_has_type(target, "TaskFlow")
+                                    and signal.signal == ("Action", "Enter")
+                                ):
+                                    raise ModelIRValidationError(
+                                        "TaskFlow Action::Enter is derived exclusively from its parent Task Transition::Resume"
+                                    )
                                 if (
                                     object_is_sched_core(target)
                                     and signal.signal

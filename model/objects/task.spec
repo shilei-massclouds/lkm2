@@ -47,6 +47,16 @@ object BootTask: Task {
     initial_state: State::OnCpu;
     parent: Kernel;
 
+    state State::OnCpu {
+        transitions {
+            on Transition::Resume -> State::OnCpu {
+            }
+
+            override on Transition::Suspend -> State::Online {
+            }
+        }
+    }
+
     state State::Online {
         transitions {
             override on Transition::Resume -> State::OnCpu {
@@ -54,12 +64,6 @@ object BootTask: Task {
         }
     }
 
-    state State::OnCpu {
-        transitions {
-            override on Transition::Suspend -> State::Online {
-            }
-        }
-    }
 }
 
 object KernelInitTask: Task {

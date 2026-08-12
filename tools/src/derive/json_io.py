@@ -1,4 +1,4 @@
-"""Strict JSON boundaries for sequence schema v3 and result schema v7."""
+"""Strict JSON boundaries for sequence schema v3 and result schema v8."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from .model import (
     DerivationPath,
     DerivationResult,
     DerivationScheduler,
-    DerivationSelection,
+    DerivationSwitch,
     DerivationSequence,
     DerivationState,
     DerivationUnit,
@@ -269,7 +269,7 @@ def _unit(value: object, path: str) -> DerivationUnit:
                 "emits",
                 "yields",
                 "resumes",
-                "selections",
+                "switches",
                 "status",
             }
         ),
@@ -310,11 +310,11 @@ def _unit(value: object, path: str) -> DerivationUnit:
         else _failure(data["failure"], f"{path}.failure"),
         yields=_array(data["yields"], f"{path}.yields", _unit),
         resumes=_array(data["resumes"], f"{path}.resumes", _unit),
-        selections=_array(data["selections"], f"{path}.selections", _selection),
+        switches=_array(data["switches"], f"{path}.switches", _switch),
     )
 
 
-def _selection(value: object, path: str) -> DerivationSelection:
+def _switch(value: object, path: str) -> DerivationSwitch:
     data = _object(
         value,
         frozenset({"binding", "task", "idle_fallback", "cycle_closed", "after_drives"}),
@@ -324,7 +324,7 @@ def _selection(value: object, path: str) -> DerivationSelection:
         raise DerivationValidationError(f"{path}.idle_fallback must be a boolean")
     if type(data["cycle_closed"]) is not bool:
         raise DerivationValidationError(f"{path}.cycle_closed must be a boolean")
-    return DerivationSelection(
+    return DerivationSwitch(
         _string(data["binding"], f"{path}.binding"),
         _name(data["task"], f"{path}.task"),
         data["idle_fallback"],
@@ -379,7 +379,7 @@ def _path(value: object, path: str) -> DerivationPath:
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v7 result document."""
+    """Load and strictly validate one schema-v8 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -472,7 +472,7 @@ def _unit_data(unit: DerivationUnit) -> dict[str, Any]:
         "emits": [_unit_data(item) for item in unit.emits],
         "yields": [_unit_data(item) for item in unit.yields],
         "resumes": [_unit_data(item) for item in unit.resumes],
-        "selections": [
+        "switches": [
             {
                 "binding": item.binding,
                 "task": list(item.task),
@@ -480,7 +480,7 @@ def _unit_data(unit: DerivationUnit) -> dict[str, Any]:
                 "cycle_closed": item.cycle_closed,
                 "after_drives": item.after_drives,
             }
-            for item in unit.selections
+            for item in unit.switches
         ],
         "status": unit.status,
     }
@@ -506,7 +506,7 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v7 derivation result followed by a newline."""
+    """Write one canonical schema-v8 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")

@@ -1,4 +1,4 @@
-"""Stable human rendering for schema-v7 multi-path derivation results."""
+"""Stable human rendering for schema-v8 multi-path derivation results."""
 
 from __future__ import annotations
 
@@ -106,14 +106,14 @@ def _render_unit(
     ]
     lines.append(f"{detail_indent}current state: {_special(unit.state_before)}")
     for drive_index in range(len(unit.drives) + 1):
-        for selection in unit.selections:
-            if selection.after_drives != drive_index:
+        for switch in unit.switches:
+            if switch.after_drives != drive_index:
                 continue
-            fallback = " (idle fallback)" if selection.idle_fallback else ""
-            closed = " [cycle closed]" if selection.cycle_closed else ""
+            fallback = " (idle fallback)" if switch.idle_fallback else ""
+            closed = " [cycle closed]" if switch.cycle_closed else ""
             lines.append(
-                f"{detail_indent}selects {selection.binding} = "
-                f"{names[selection.task]}{fallback}{closed}"
+                f"{detail_indent}switches {switch.binding} = "
+                f"{names[switch.task]}{fallback}{closed}"
             )
         if drive_index < len(unit.drives):
             lines.extend(_render_unit(unit.drives[drive_index], depth + 1, names))

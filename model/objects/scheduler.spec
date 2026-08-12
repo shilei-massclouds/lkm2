@@ -24,7 +24,7 @@ type Scheduler {
         actions {
             on Action::Schedule {
                 drives CurrentTaskRef.Transition::Suspend;
-                selects next_task_ref;
+                switches next_task_ref;
                 drives next_task_ref.Transition::Resume;
             }
         }

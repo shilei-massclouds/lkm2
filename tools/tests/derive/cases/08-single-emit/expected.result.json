@@ -72,7 +72,6 @@
               "invariants": [],
               "kind": "emit",
               "resumes": [],
-              "selections": [],
               "state_after": [
                 "State",
                 "Done"
@@ -82,6 +81,7 @@
                 "Idle"
               ],
               "status": "passed",
+              "switches": [],
               "yields": []
             }
           ],
@@ -110,7 +110,6 @@
           "invariants": [],
           "kind": "root",
           "resumes": [],
-          "selections": [],
           "state_after": [
             "State",
             "Done"
@@ -120,11 +119,12 @@
             "Idle"
           ],
           "status": "passed",
+          "switches": [],
           "yields": []
         }
       ]
     }
   ],
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "passed"
 }

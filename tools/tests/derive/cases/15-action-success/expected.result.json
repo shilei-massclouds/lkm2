@@ -50,7 +50,6 @@
           "invariants": [],
           "kind": "root",
           "resumes": [],
-          "selections": [],
           "state_after": [
             "State",
             "Idle"
@@ -60,11 +59,12 @@
             "Idle"
           ],
           "status": "passed",
+          "switches": [],
           "yields": []
         }
       ]
     }
   ],
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "passed"
 }

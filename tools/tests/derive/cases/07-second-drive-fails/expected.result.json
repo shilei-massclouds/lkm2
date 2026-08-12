@@ -87,7 +87,6 @@
               "invariants": [],
               "kind": "drive",
               "resumes": [],
-              "selections": [],
               "state_after": [
                 "State",
                 "Done"
@@ -97,6 +96,7 @@
                 "Idle"
               ],
               "status": "passed",
+              "switches": [],
               "yields": []
             },
             {
@@ -133,13 +133,13 @@
               "invariants": [],
               "kind": "drive",
               "resumes": [],
-              "selections": [],
               "state_after": null,
               "state_before": [
                 "State",
                 "Idle"
               ],
               "status": "unhandled_signal",
+              "switches": [],
               "yields": []
             }
           ],
@@ -169,18 +169,18 @@
           "invariants": [],
           "kind": "root",
           "resumes": [],
-          "selections": [],
           "state_after": null,
           "state_before": [
             "State",
             "Idle"
           ],
           "status": "stopped",
+          "switches": [],
           "yields": []
         }
       ]
     }
   ],
-  "schema_version": 7,
+  "schema_version": 8,
   "status": "failed"
 }

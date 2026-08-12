@@ -78,7 +78,7 @@ handler_body: "{" handler_item* "}"
              | establishes_block
              | emits_block
              | resumes_statement
-             | selects_statement
+             | switches_statement
              | updates_block
              | deferred_declaration
 depends_on_block: "depends_on" expression_block
@@ -86,7 +86,7 @@ may_change_block: "may_change" expression_block
 drives_block: "drives" signal_body
 yields_statement: "yields" expression ";"
 resumes_statement: "resumes" expression ";"
-selects_statement: "selects" IDENTIFIER ";"
+switches_statement: "switches" IDENTIFIER ";"
 print_statement: "print" STRING ";"
 panic_statement: "panic" STRING ";"
 ensures_block: "ensures" expression_block

@@ -146,20 +146,25 @@ continuation 的 `yields` 目标立即深度优先执行；未启动时 `resumes
 reference、may_change、deferred 及其它未实现表达式会明确返回
 `unsupported_feature`。当前 Computer 按顺序处理 `Preset`、`Setup` 和 `Enable`，
 依次提交到 `State::Prepared`、`State::Ready` 和 `State::Online`；Kernel 的
-Enable 提交后 resumes `BootInitFlow.Action::Enter`。
+Enable 提交后只驱动 `BootTask.Transition::Resume`，成功的 Task Resume 再由
+推导器启动或恢复该 Task 唯一的 parent TaskFlow。模型不得直接进入 TaskFlow。
 `sched_core: true` 类型为实例隐式提供无参数 `Action::Enqueue` 和
 `Action::Dequeue`。这两个信号只能由 Task 对象发出，分别把 source Task 加入或
 移出实例私有的唯一 FIFO runq；重复入队和不存在的出队会产生明确失败码。
-`selects name;` 在 Scheduler Action 中按 runq 顺序展开每个候选路径，空队列时选择
-idle Task，且选择本身不出队。`CurrentTaskRef` 与 selects 绑定都是运行时 Task target。
-Scheduler handler 成功后才提交 current，随后恢复所选 Task 唯一的 parent TaskFlow。
+`switches name;` 在 Scheduler Action 中按 runq 顺序展开每个候选路径，空队列时绑定
+idle Task，且 switch 本身不出队，也不隐式执行 Suspend 或 Resume。`CurrentTaskRef`
+与 switches 绑定都是运行时 Task target。Suspend、Resume、Dequeue 以及 Scheduler
+handler 校验全部成功后才原子提交 current；Task Resume 的受控 TaskFlow 后置效果在
+提交之后执行，因此新 TaskFlow 观察到新的 current。任何失败都保留旧 current 且不进入
+新 TaskFlow。
 结果总体状态在任一路径失败时为 `failed`，否则在存在 suspended 路径时为
 `yielded`，其余为 `passed`；CLI 对多路径按稳定顺序分段输出，并在总体失败时返回 1。
 
 默认 `make run` 输出完整推导，与结论空开一行。BootSetup 将 Scheduler 推进到
 Online 并启用 `KernelInitTask`；其 Enable、Resume、Suspend 生命周期分别驱动隐藏
-runq 的 Enqueue、Dequeue、Enqueue。BootTask 是 idle Task，并 override
-Resume/Suspend 以避免队列动作。默认路径最终 current 为 `KernelInitTask`、runq
+runq 的 Enqueue、Dequeue、Enqueue。BootTask 是 idle Task；其引导 Resume 自迁移保持
+OnCpu，调度 Resume/Suspend override 避免队列动作。默认路径最终 current 为
+`KernelInitTask`、runq
 为空，BootTask 为 Online、KernelInitTask 为 OnCpu，BootHandoff 保留 yielded
 continuation；CLI 输出 `Derivation yielded!` 并返回 0。
 
@@ -174,6 +179,8 @@ continuation；CLI 输出 `Derivation yielded!` 并返回 0。
 - `derive.load_derivation_result()`
 - `derive.render_derivation_result()`
 
-AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v8
+AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v9
 loader 严格拒绝旧版本、未知字段、重复声明、无效状态引用、重复 handler 和未知
 信号目标，并规范排序模块和声明。
+Derivation Result schema v8 同样严格拒绝旧 `selections` 字段与旧 schema，仅输出
+事务式 `switches` 记录。

@@ -12,27 +12,32 @@ Scheduler 是 per-CPU 运行对象，不是整个内核共享的全局单例。�
 
 ```text
 Ready --BootSetup/Enable--> Online
-Online --Schedule--> Suspend(current) → selects next → Resume(next)
+Online --Schedule--> Suspend(current) → switches next → Resume(next)
 ```
 
 - `Scheduler` 声明 `sched_core: true`，模型只定义 Schedule 策略与生命周期；
   current Task、idle Task 和实例私有 runq 由推导器按路径维护，不再建模为字段、
   `Collection` 或 `TaskRef` 对象。
 - `Cpu0Scheduler.idle_task` 固定引用 `BootTask`。初始 current 与 idle 都是
-  `BootTask`，runq 为空。
+  `BootTask`，runq 为空；初始化之后 current 只能由成功的 `switches` 修改。
 - sched_core 隐式提供无参数 `Action::Enqueue`、`Action::Dequeue`。signal source
   必须是 Task；runq 保存 Task 对象身份、保持唯一 FIFO，且 Scheduler 仅在
   `State::Online` 处理这两个信号。
-- `selects next_task_ref;` 对当前 runq 的每个成员按 FIFO 建立隔离推导路径；空
-  runq 使用 idle Task。选择不自动出队，后续 Resume 通过 Task 生命周期触发
+- `switches next_task_ref;` 对当前 runq 的每个成员按 FIFO 建立隔离推导路径；空
+  runq 绑定 idle Task。switch 不自动出队，后续 Resume 通过 Task 生命周期触发
   Dequeue。
 - `CurrentTaskRef` 是当前 Scheduler 路径上下文的动态 Task target；它不是字段或
-  可声明对象。Schedule 严格执行 Suspend(current)、selects、Resume(next)，全部
+  可声明对象。Schedule 严格执行 Suspend(current)、switches、Resume(next)，全部
   成功后才提交 current。
-- 每个 Task 必须有且仅有一个以它为 `parent` 的 TaskFlow。Schedule 提交并完成
-  普通 emits/resumes 后，推导器隐式恢复所选 TaskFlow 的 `Action::Enter`。
+- 每个 Task 必须有且仅有一个以它为 `parent` 的 TaskFlow。模型不得直接进入
+  TaskFlow；任何成功的 `Task.Transition::Resume` 都由推导器启动或恢复该唯一
+  TaskFlow。Scheduler 内的这个后置效果延迟到 current 原子提交之后执行。
+- `switches` 不隐式执行 Suspend 或 Resume。Suspend、Resume、Dequeue 以及 Schedule
+  handler 校验全部成功后才提交 current；任一失败均保留旧 current，且不进入新的
+  TaskFlow。
 - `Task.Enable` 和 `Task.Suspend` 触发 Enqueue，`Task.Resume` 触发 Dequeue；
-  `BootTask` 作为 idle Task override Resume/Suspend，不操作 runq。
+  `BootTask` 作为 idle Task，其引导 Resume 自迁移保持 OnCpu，调度 Resume/Suspend
+  override 不操作 runq。
 - `BootSetup` 只把 Scheduler 推进 Online，并完成 `KernelInitTask` 的 Preset、Setup
   与 Enable。默认推导最终 current 为 `KernelInitTask`、runq 为空。
 

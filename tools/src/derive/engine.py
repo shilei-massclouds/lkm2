@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 
 from model_ir import (
@@ -27,7 +27,7 @@ from .model import (
     DerivationPath,
     DerivationResult,
     DerivationScheduler,
-    DerivationSelection,
+    DerivationSwitch,
     DerivationSequence,
     DerivationState,
     DerivationUnit,
@@ -88,9 +88,9 @@ class _SchedulerRuntime:
     runq: list[tuple[str, ...]] = field(default_factory=list)
 
 
-class _SelectionNeeded(Exception):
+class _SwitchNeeded(Exception):
     def __init__(self, candidates: tuple[tuple[str, ...], ...]) -> None:
-        super().__init__("scheduler selection requires path expansion")
+        super().__init__("scheduler switch requires path expansion")
         self.candidates = candidates
 
 
@@ -498,7 +498,7 @@ class _Execution:
     def __init__(
         self,
         model: ModelIR,
-        selection_choices: tuple[tuple[str, ...], ...] = (),
+        switch_choices: tuple[tuple[str, ...], ...] = (),
     ) -> None:
         self.context = _Context(model)
         self.states = _states(model)
@@ -509,8 +509,8 @@ class _Execution:
             tuple[tuple[str, ...], str], tuple[str, ...]
         ] = {}
         self.collections: dict[tuple[str, ...], list[tuple[str, ...]]] = {}
-        self.selection_choices = selection_choices
-        self.selection_cursor = 0
+        self.switch_choices = switch_choices
+        self.switch_cursor = 0
         self.cycle_closed = False
         self.seen_snapshots: set[tuple[object, ...]] = set()
         for model_object in model.objects:
@@ -712,7 +712,7 @@ class _Execution:
         yields: list[DerivationUnit] | None = None,
         directives: list[DerivationDirective] | None = None,
         resumes: list[DerivationUnit] | None = None,
-        selections: list[DerivationSelection] | None = None,
+        switches: list[DerivationSwitch] | None = None,
     ) -> DerivationUnit:
         return DerivationUnit(
             kind=kind,
@@ -732,7 +732,7 @@ class _Execution:
             yields=() if yields is None else tuple(yields),
             directives=() if directives is None else tuple(directives),
             resumes=() if resumes is None else tuple(resumes),
-            selections=() if selections is None else tuple(selections),
+            switches=() if switches is None else tuple(switches),
         )
 
     def _clear_continuations_for_panic(self) -> None:
@@ -1667,7 +1667,14 @@ class _Execution:
             failure=None,
         )
 
-    def run_unit(self, event: DerivationEvent, kind: str, path: str) -> DerivationUnit:
+    def run_unit(
+        self,
+        event: DerivationEvent,
+        kind: str,
+        path: str,
+        *,
+        defer_task_flow: bool = False,
+    ) -> DerivationUnit:
         if (
             event.target in self.schedulers
             and event.signal
@@ -1701,8 +1708,9 @@ class _Execution:
         emits: list[DerivationUnit] = []
         resumes: list[DerivationUnit] = []
         directives: list[DerivationDirective] = []
-        selections: list[DerivationSelection] = []
-        selected_task: tuple[str, ...] | None = None
+        switches: list[DerivationSwitch] = []
+        switched_task: tuple[str, ...] | None = None
+        deferred_task_resumes: list[int] = []
         if handler is None:
             signal_kind = event.signal[0].lower()
             failure = self._set_failure(
@@ -1799,7 +1807,7 @@ class _Execution:
                 failure=failure,
                 directives=directives,
                 resumes=resumes,
-                selections=selections,
+                switches=switches,
             )
 
         for index, expression in enumerate(expressions["depends_on"]):
@@ -1842,7 +1850,7 @@ class _Execution:
         for block in blocks:
             if block.kind == "drives":
                 controls.extend(block.signals)
-            elif block.kind == "selects":
+            elif block.kind == "switches":
                 controls.append(block)
             elif block.kind in {"print", "panic"}:
                 controls.append(
@@ -1862,24 +1870,24 @@ class _Execution:
                     )
                 continue
             if isinstance(control, ModelHandlerBlock):
-                assert control.selects is not None
+                assert control.switches is not None
                 scheduler = self.schedulers[event.target]
                 candidates = (
                     tuple(scheduler.runq)
                     if scheduler.runq
                     else (scheduler.idle_task,)
                 )
-                if self.selection_cursor >= len(self.selection_choices):
-                    raise _SelectionNeeded(candidates)
-                selected_task = self.selection_choices[self.selection_cursor]
-                self.selection_cursor += 1
-                if selected_task not in candidates:
+                if self.switch_cursor >= len(self.switch_choices):
+                    raise _SwitchNeeded(candidates)
+                switched_task = self.switch_choices[self.switch_cursor]
+                self.switch_cursor += 1
+                if switched_task not in candidates:
                     raise RuntimeError("scheduler replay selected a stale candidate")
-                bindings[control.selects] = selected_task
-                selections.append(
-                    DerivationSelection(
-                        control.selects,
-                        selected_task,
+                bindings[control.switches] = switched_task
+                switches.append(
+                    DerivationSwitch(
+                        control.switches,
+                        switched_task,
                         not scheduler.runq,
                         False,
                         len(drives),
@@ -1901,11 +1909,22 @@ class _Execution:
                         (exc.feature,),
                     )
                 )
+            defer_child_task_flow = (
+                switched_task is not None
+                and child_event.target == switched_task
+                and child_event.signal == ("Transition", "Resume")
+            )
+            drive_index = len(drives)
             drives.append(
                 self.run_unit(
-                    child_event, "drive", f"{path}.drives[{len(drives)}]"
+                    child_event,
+                    "drive",
+                    f"{path}.drives[{drive_index}]",
+                    defer_task_flow=defer_child_task_flow,
                 )
             )
+            if defer_child_task_flow:
+                deferred_task_resumes.append(drive_index)
             if self.failure is not None:
                 return self._unit(
                     kind=kind,
@@ -1924,7 +1943,7 @@ class _Execution:
                     failure=None,
                     directives=directives,
                     resumes=resumes,
-                    selections=selections,
+                    switches=switches,
                 )
 
         candidate_states = dict(self.states)
@@ -2065,8 +2084,8 @@ class _Execution:
             self.states[event.target] = candidate_state
         self.facts.update(staged_facts)
         self.values = candidate_values
-        if selected_task is not None:
-            self.schedulers[event.target].current_task = selected_task
+        if switched_task is not None:
+            self.schedulers[event.target].current_task = switched_task
         for index, signal in enumerate(emit_signals):
             child_event = self._signal_event(signal, model_object.name, bindings)
             emits.append(self.run_unit(child_event, "emit", f"{path}.emits[{index}]"))
@@ -2082,20 +2101,20 @@ class _Execution:
                 )
                 if self.failure is not None:
                     break
-        if self.failure is None and selected_task is not None:
+        if self.failure is None and switched_task is not None:
             snapshot = self._runtime_snapshot(
                 (
-                    "selected",
+                    "switched",
                     event.source,
                     event.target,
                     event.signal,
-                    selected_task,
+                    switched_task,
                 )
             )
             if snapshot in self.seen_snapshots:
                 self.cycle_closed = True
-                last = selections[-1]
-                selections[-1] = DerivationSelection(
+                last = switches[-1]
+                switches[-1] = DerivationSwitch(
                     last.binding,
                     last.task,
                     last.idle_fallback,
@@ -2104,19 +2123,43 @@ class _Execution:
                 )
             else:
                 self.seen_snapshots.add(snapshot)
-                flow = self.task_flows[selected_task]
-                resumes.append(
-                    self.run_unit(
+                for drive_index in deferred_task_resumes:
+                    flow = self.task_flows[switched_task]
+                    flow_unit = self.run_unit(
                         DerivationEvent(
-                            event.target,
+                            switched_task,
                             flow,
                             ("Action", "Enter"),
                             "resume",
                         ),
                         "resume",
-                        f"{path}.resumes[{len(resumes)}]",
+                        f"{path}.drives[{drive_index}].resumes[0]",
                     )
+                    drives[drive_index] = replace(
+                        drives[drive_index],
+                        resumes=drives[drive_index].resumes + (flow_unit,),
+                    )
+                    if self.failure is not None:
+                        break
+        if (
+            self.failure is None
+            and not defer_task_flow
+            and event.signal == ("Transition", "Resume")
+            and self.context.object_has_type(event.target, "Task")
+        ):
+            flow = self.task_flows[event.target]
+            resumes.append(
+                self.run_unit(
+                    DerivationEvent(
+                        event.target,
+                        flow,
+                        ("Action", "Enter"),
+                        "resume",
+                    ),
+                    "resume",
+                    f"{path}.resumes[{len(resumes)}]",
                 )
+            )
         return self._unit(
             kind=kind,
             event=event,
@@ -2134,7 +2177,7 @@ class _Execution:
             failure=None,
             directives=directives,
             resumes=resumes,
-            selections=selections,
+            switches=switches,
         )
 
 
@@ -2189,7 +2232,7 @@ def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
                     units.append(execution.run_unit(selected, "root", unit_path))
                     if execution.failure is not None or execution.cycle_closed:
                         break
-            except _SelectionNeeded as needed:
+            except _SwitchNeeded as needed:
                 for candidate in reversed(needed.candidates):
                     prefixes.append(choices + (candidate,))
                 continue

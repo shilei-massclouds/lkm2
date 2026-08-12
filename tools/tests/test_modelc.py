@@ -512,7 +512,7 @@ boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
 EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.spec"))(
-    schema_version=8,
+    schema_version=9,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -1873,7 +1873,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_invalid_documents_are_rejected(self) -> None:
         wrong_version = json.loads(EXPECTED_JSON)
-        wrong_version["schema_version"] = 7
+        wrong_version["schema_version"] = 8
         unknown_field = json.loads(EXPECTED_JSON)
         unknown_field["extra"] = 0
         duplicate_module = json.loads(EXPECTED_JSON)
@@ -1893,6 +1893,11 @@ class ModelIRJSONTests(unittest.TestCase):
         invalid_signal_prefix = json.loads(EXPECTED_JSON)
         human = _json_module(invalid_signal_prefix, "systems", "human")
         human["externals"][0]["signals"][0]["signal"] = ["Effect", "Preset"]
+        legacy_selects_field = EXPECTED_JSON.replace(
+            '"switches": "next_task_ref"',
+            '"selects": "next_task_ref"',
+            1,
+        )
         invalid_documents = [
             "{",
             json.dumps(wrong_version),
@@ -1901,9 +1906,10 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(duplicate_declaration),
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
-            EXPECTED_JSON.replace('"schema_version": 8', '"schema_version": true'),
+            legacy_selects_field,
+            EXPECTED_JSON.replace('"schema_version": 9', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":8,"schema_version":8}',
+            '{"schema_version":9,"schema_version":9}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -1912,7 +1918,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=8,
+            schema_version=9,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -1920,14 +1926,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=8,
+                schema_version=9,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=8,
+                schema_version=9,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),
