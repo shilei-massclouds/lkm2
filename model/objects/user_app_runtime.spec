@@ -1,8 +1,7 @@
-/* User application runtime owned by KernelInitFlow. */
-
-use model::flows::task_flow::KernelInitFlow;
+/* User application runtime protocol implemented by the inference engine. */
 
 type UserAppRuntime {
+    user_runtime: true;
     initial_state: State::Base;
 
     state State::Base {
@@ -29,19 +28,6 @@ type UserAppRuntime {
     state State::Online {
         actions {
             on Action::Enter;
-        }
-    }
-}
-
-object KernelInitUserAppRuntime: UserAppRuntime {
-    parent: KernelInitFlow;
-
-    state State::Online {
-        actions {
-            override on Action::Enter {
-                drives {
-                }
-            }
         }
     }
 }

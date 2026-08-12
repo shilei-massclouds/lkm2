@@ -24,6 +24,7 @@ type_base: ":" type_expression
 ?type_item: field_declaration
           | continuation_property
           | sched_core_property
+          | user_runtime_property
           | initial_state_property
           | state_declaration
 field_declaration: mutable_marker? IDENTIFIER ":" type_expression field_default? ";"
@@ -43,6 +44,7 @@ object_declaration: "object" IDENTIFIER ":" type_expression "{" object_item* "}"
 initial_state_property: "initial_state" ":" expression ";"
 continuation_property: "continuation" ":" IDENTIFIER ";"
 sched_core_property: "sched_core" ":" IDENTIFIER ";"
+user_runtime_property: "user_runtime" ":" IDENTIFIER ";"
 parent_property: "parent" ":" expression ";"
 source_property: "source" ":" expression ";"
 idle_task_property: "idle_task" ":" expression ";"

@@ -1,4 +1,4 @@
-"""Compilation pipeline from a model-root specification to Model IR v8."""
+"""Compilation pipeline from a model-root specification to Model IR v10."""
 
 from __future__ import annotations
 
@@ -249,7 +249,11 @@ def _signal(
             node,
             f"switches binding {raw_target[0]!r} is not in scope before its declaration",
         )
-    if len(raw_target) == 1 and raw_target[0] in {*bindings, "CurrentTaskRef"}:
+    if len(raw_target) == 1 and raw_target[0] in {
+        *bindings,
+        "CurrentTaskRef",
+        "CurrentUserAppRuntimeRef",
+    }:
         target = ModelExpression("identifier", raw_target[0])
     else:
         target = _object_expression(
@@ -715,6 +719,21 @@ def _model_type(
                 "sched_core can only be declared as true and cannot be cancelled",
             )
         sched_core = True
+    user_runtime_nodes = tuple(
+        item for item in items if item.data == "user_runtime_property"
+    )
+    if len(user_runtime_nodes) > 1:
+        raise _semantic_error(module, user_runtime_nodes[1], "duplicate user_runtime")
+    user_runtime = False
+    if user_runtime_nodes:
+        value = str(user_runtime_nodes[0].children[0])
+        if value != "true":
+            raise _semantic_error(
+                module,
+                user_runtime_nodes[0],
+                "user_runtime can only be declared as true and cannot be cancelled",
+            )
+        user_runtime = True
     base_node = next(
         (
             child
@@ -747,6 +766,7 @@ def _model_type(
         ),
         states=states,
         sched_core=sched_core,
+        user_runtime=user_runtime,
     )
 
 
@@ -1018,6 +1038,7 @@ def _expand_inheritance(
             initial_state = ("State", "Base")
         continuation = raw.continuation or (base is not None and base.continuation)
         sched_core = raw.sched_core or (base is not None and base.sched_core)
+        user_runtime = raw.user_runtime or (base is not None and base.user_runtime)
         expanded = ModelType(
             raw.name,
             fields,
@@ -1026,6 +1047,7 @@ def _expand_inheritance(
             initial_state,
             states,
             sched_core,
+            user_runtime,
         )
         state_names = {state.name for state in states}
         if initial_state is not None and initial_state not in state_names:
@@ -1057,11 +1079,11 @@ def _expand_inheritance(
         module = loaded[source_module.name]
         for raw in source_module.objects:
             node = object_nodes[raw.name]
-            if raw.name[-1] == "CurrentTaskRef":
+            if raw.name[-1] in {"CurrentTaskRef", "CurrentUserAppRuntimeRef"}:
                 raise _semantic_error(
                     module,
                     node,
-                    "CurrentTaskRef is a reserved runtime selector and must not be "
+                    f"{raw.name[-1]} is a reserved runtime selector and must not be "
                     "declared as an object",
                 )
             base_name = resolve_base(raw.base_type, source_module.name)
@@ -1086,7 +1108,8 @@ def _expand_inheritance(
                 for handler in (*state.transitions, *state.actions)
                 if handler.abstract
             )
-            if abstract:
+            user_runtime = base is not None and base.user_runtime
+            if abstract and not user_runtime:
                 state_name, signal = abstract[0]
                 raise _semantic_error(
                     module,
@@ -1114,6 +1137,12 @@ def _expand_inheritance(
                     raise _semantic_error(
                         module, node, "continuation object requires Action::Enter"
                     )
+            if user_runtime:
+                raise _semantic_error(
+                    module,
+                    node,
+                    "user_runtime instances are inference-owned Task children and must not be declared as model objects",
+                )
             for state in states:
                 for transition in state.transitions:
                     if transition.target_state not in {item.name for item in states}:
@@ -1287,6 +1316,69 @@ def _expand_inheritance(
 
     task_types = tuple(name for name in raw_types if name[-1] == "Task")
     task_flow_types = tuple(name for name in raw_types if name[-1] == "TaskFlow")
+    user_runtime_types = tuple(
+        name for name, model_type in expanded_types.items() if model_type.user_runtime
+    )
+
+    if len(user_runtime_types) > 1:
+        name = user_runtime_types[1]
+        raise _semantic_error(
+            loaded[name[:-1]],
+            type_nodes[name],
+            "the model may declare at most one user_runtime type",
+        )
+
+    for name in user_runtime_types:
+        model_type = expanded_types[name]
+        online = next(
+            (state for state in model_type.states if state.name == ("State", "Online")),
+            None,
+        )
+        enter = None if online is None else next(
+            (
+                action
+                for action in online.actions
+                if action.signal == ("Action", "Enter")
+            ),
+            None,
+        )
+        transitions = {
+            (state.name, transition.signal, transition.target_state)
+            for state in model_type.states
+            for transition in state.transitions
+        }
+        required = {
+            (
+                ("State", "Base"),
+                ("Transition", "Preset"),
+                ("State", "Prepared"),
+            ),
+            (
+                ("State", "Prepared"),
+                ("Transition", "Setup"),
+                ("State", "Ready"),
+            ),
+            (
+                ("State", "Ready"),
+                ("Transition", "Enable"),
+                ("State", "Online"),
+            ),
+        }
+        if (
+            model_type.continuation
+            or model_type.sched_core
+            or model_type.initial_state != ("State", "Base")
+            or not required.issubset(transitions)
+            or enter is None
+            or not enter.abstract
+            or enter.parameters
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "user_runtime type requires the Base/Prepared/Ready/Online lifecycle "
+                "and an abstract, parameterless Online Action::Enter",
+            )
 
     def is_task_object(name: tuple[str, ...]) -> bool:
         return len(task_types) == 1 and compatible(
@@ -1406,6 +1498,14 @@ def _expand_inheritance(
                         "CurrentTaskRef requires exactly one declared Task type",
                     )
                 return (task_types[0], ())
+            if identifier == "CurrentUserAppRuntimeRef":
+                if len(user_runtime_types) != 1:
+                    raise _semantic_error(
+                        loaded[module_name],
+                        loaded[module_name].tree,
+                        "CurrentUserAppRuntimeRef requires exactly one declared user_runtime type",
+                    )
+                return (user_runtime_types[0], ())
         access = _flatten_access(expression)
         if (
             access is not None
@@ -1473,16 +1573,19 @@ def _expand_inheritance(
             target_type = expression_type(
                 signal.target, module_name, source, environment, fields
             )
-            task_types = tuple(name for name in raw_types if name[-1] == "Task")
             if (
                 target_type is None
-                or len(task_types) != 1
-                or not compatible(target_type, (task_types[0], ()))
+                or not (
+                    len(task_types) == 1
+                    and compatible(target_type, (task_types[0], ()))
+                    or len(user_runtime_types) == 1
+                    and compatible(target_type, (user_runtime_types[0], ()))
+                )
             ):
                 raise _semantic_error(
                     loaded[module_name],
                     owner,
-                    "dynamic signal target must have Task type",
+                    "dynamic signal target must have Task or user_runtime type",
                 )
             return
         signature = signatures.get((target_name, signal.signal))
@@ -1578,6 +1681,13 @@ def _expand_inheritance(
                                         loaded[module_name],
                                         owner,
                                         "CurrentTaskRef is only available in a sched_core handler",
+                                    )
+                            elif dynamic == "CurrentUserAppRuntimeRef":
+                                if len(user_runtime_types) != 1:
+                                    raise _semantic_error(
+                                        loaded[module_name],
+                                        owner,
+                                        "CurrentUserAppRuntimeRef requires exactly one user_runtime type",
                                     )
                             elif dynamic not in environment:
                                 raise _semantic_error(

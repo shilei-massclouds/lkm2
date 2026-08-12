@@ -1620,7 +1620,7 @@ class CLITests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 1)
         for signal in (
             "Transition::Preset",
             "Transition::Setup",
@@ -1628,7 +1628,7 @@ class CLITests(unittest.TestCase):
         ):
             with self.subTest(signal=signal):
                 self.assertIn(signal, completed.stdout)
-        self.assertTrue(completed.stdout.endswith("Derivation yielded!\n"))
+        self.assertTrue(completed.stdout.endswith("stopped: panic\n"))
         self.assertEqual(completed.stderr, "")
 
     def test_model_and_sequence_options_are_mutually_exclusive(self) -> None:

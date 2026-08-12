@@ -5,27 +5,27 @@
 当前工具链处理流程为：
 
 ```text
-model/main.spec → entry AST → recursive module graph → Model IR v8 → canonical JSON
+model/main.spec → entry AST → recursive module graph → Model IR v10 → canonical JSON
 entry external signals → tools/build/derive/main.sequence.json
-Model IR v8 + external-root sequence v3 → derive → result JSON v7 / human stdout
+Model IR v10 + external-root sequence v3 → derive → result JSON v8 / human stdout
 ```
 
 有状态对象可以省略 `initial_state`；modelc 会将其规范化为
 `State::Base`。因此这类对象必须声明 `state State::Base`。显式指定的初始状态保持
-不变，无状态对象仍没有初始状态。Model IR v8 的严格 JSON schema 中：
+不变，无状态对象仍没有初始状态。Model IR v10 的严格 JSON schema 中：
 `initial_state` 字段始终必需，有状态对象的默认值会明确写成
 `["State", "Base"]`，无状态对象写成 `null`。
 
 入口接受一条或多条简单的 `spec IDENT;`，然后是一条点分
 `origin <qualified-name>;`。每条入口 `spec` 都声明一个并列根模块；第一条是
-Model IR v8 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
+Model IR v10 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
 `phases`、`flows` 四个并列根模块组成。`spec` 与 Rust 的 `mod` 类似：入口根
 声明 `spec systems;` 装载同目录的 `systems.spec`，其中的
 `spec human;` 再装载 `systems/human.spec`。只有显式声明会进入模块图，
 不自动发现目录，也不使用 `<module>/main.spec`。
 
 模块文件必须完整符合 [`module_grammar.lark`](src/modelc/module_grammar.lark)
-定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v8 lowering
+定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v10 lowering
 保留 predicate、type、object、external、state、handler、deferred 和通用表达式树。
 绝对 `use` 路径使用 `model::`，相对路径使用 `self::` 或连续的
 `super::`；不带根关键字的裸路径也从 model root 开始。`crate::` 不再受支持。
@@ -164,10 +164,11 @@ handler 校验全部成功后才原子提交 current；Task Resume 的受控 Tas
 Online 并启用 `KernelInitTask`；其 Enable 与 Resume 生命周期分别驱动隐藏 runq 的
 Enqueue 与 Dequeue。BootTask 是 idle Task；其引导 Resume 自迁移保持 OnCpu，调度
 Resume/Suspend override 避免队列动作。切换到 `KernelInitTask` 后，`UserRunPhase`
-同步完成 `KernelInitUserAppRuntime` 的 Preset、Setup、Enable，再 yield 到其
-`Action::Enter` 用户态执行边界。默认路径最终 current 为 `KernelInitTask`、runq 为空，
-BootTask 为 Online、KernelInitTask 为 OnCpu、Runtime 为 Online；BootHandoff 与
-UserRunPhase 保留 yielded continuation，CLI 输出 `Derivation yielded!` 并返回 0。
+同步完成推导器按需生成的 `KernelInitTask.UserAppRuntime` 的 Preset、Setup、Enable，
+再 yield 到其 `Action::Enter` 用户态黑盒入口。`user_runtime: true` 指示推导器默认从
+该入口触发一次 Schedule；Task 切回时恢复同一 Runtime 入口。当前启动路径因而返回
+BootTask、进入 BootIdle，并在 Runtime 的下一次默认调度后命中
+`panic "boot idle repeated!"`；CLI 输出 `stopped: panic` 并返回 1。
 
 公共库接口为：
 
@@ -180,7 +181,7 @@ UserRunPhase 保留 yielded continuation，CLI 输出 `Derivation yielded!` 并�
 - `derive.load_derivation_result()`
 - `derive.render_derivation_result()`
 
-AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v9
+AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v10
 loader 严格拒绝旧版本、未知字段、重复声明、无效状态引用、重复 handler 和未知
 信号目标，并规范排序模块和声明。
 Derivation Result schema v8 同样严格拒绝旧 `selections` 字段与旧 schema，仅输出

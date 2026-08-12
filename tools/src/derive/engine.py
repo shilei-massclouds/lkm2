@@ -12,6 +12,7 @@ from model_ir import (
     ModelIR,
     ModelObject,
     ModelSignal,
+    ModelTypeExpression,
 )
 
 from .model import (
@@ -186,6 +187,10 @@ class _Context:
         self.object_names = _shortest_names(tuple(self.objects))
         self.predicate_names = _shortest_names(tuple(self.predicates))
         self.schedulers: dict[tuple[str, ...], _SchedulerRuntime] = {}
+        self.user_runtime_type = next(
+            (item for item in self.types.values() if item.user_runtime), None
+        )
+        self.user_runtime_resolver = None
 
     def _type_name(
         self, raw: tuple[str, ...], module: tuple[str, ...]
@@ -279,6 +284,12 @@ class _Context:
                 if len(schedulers) != 1:
                     raise _UnsupportedExpression("CurrentTaskRef:ambiguous_scheduler")
                 return self.schedulers[schedulers[0]].current_task
+            if identifier == "CurrentUserAppRuntimeRef":
+                if self.user_runtime_resolver is None:
+                    raise _UnsupportedExpression(
+                        "CurrentUserAppRuntimeRef:unavailable"
+                    )
+                return self.user_runtime_resolver()
         flattened = _access(expression)
         if (
             flattened is not None
@@ -545,6 +556,16 @@ class _Execution:
                 model_object.name, idle, idle
             )
         self.context.schedulers = self.schedulers
+        self.user_runtimes: dict[tuple[str, ...], tuple[str, ...]] = {}
+        self.user_runtime_owners: dict[tuple[str, ...], tuple[str, ...]] = {}
+        self.force_idle_schedulers: set[tuple[str, ...]] = set()
+        self.parked_user_tasks: dict[
+            tuple[str, ...], tuple[str, ...]
+        ] = {}
+        self.parked_user_continuations: dict[
+            tuple[str, ...], tuple[str, ...]
+        ] = {}
+        self.context.user_runtime_resolver = self._current_user_runtime
         self.task_flows: dict[tuple[str, ...], tuple[str, ...]] = {}
         for model_object in model.objects:
             if (
@@ -562,6 +583,182 @@ class _Execution:
                 parent_object = self.context.objects[parent]
                 if self.context.object_has_type(parent_object.name, "Task"):
                     self.task_flows[parent] = model_object.name
+
+    def _current_user_runtime(self) -> tuple[str, ...]:
+        schedulers = tuple(self.schedulers.values())
+        if len(schedulers) != 1 or self.context.user_runtime_type is None:
+            raise _UnsupportedExpression(
+                "CurrentUserAppRuntimeRef:ambiguous_runtime_context"
+            )
+        task = schedulers[0].current_task
+        existing = self.user_runtimes.get(task)
+        if existing is not None:
+            return existing
+        runtime_type = self.context.user_runtime_type
+        name = task + (runtime_type.name[-1],)
+        if name in self.context.objects:
+            raise _UnsupportedExpression(
+                "CurrentUserAppRuntimeRef:runtime_identity_collision"
+            )
+        model_object = ModelObject(
+            name=name,
+            base_type=ModelTypeExpression(runtime_type.name),
+            initial_state=runtime_type.initial_state,
+            parent=self.context.object_expression(task),
+            source=None,
+            attrs=runtime_type.fields,
+            states=runtime_type.states,
+            references=(),
+        )
+        self.context.objects[name] = model_object
+        self.states[name] = runtime_type.initial_state
+        self.user_runtimes[task] = name
+        self.user_runtime_owners[name] = task
+        return name
+
+    def _run_user_runtime(
+        self, event: DerivationEvent, kind: str, path: str
+    ) -> DerivationUnit:
+        before = self.states[event.target]
+        if (
+            event.signal != ("Action", "Enter")
+            or event.arguments
+            or before != ("State", "Online")
+        ):
+            failure = self._set_failure(
+                "unhandled_signal",
+                f"{path}.handler",
+                "user_runtime only handles parameterless Action::Enter in State::Online",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=None,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
+
+        owner = self.user_runtime_owners[event.target]
+        matching = tuple(
+            runtime
+            for runtime in self.schedulers.values()
+            if runtime.current_task == owner
+        )
+        if len(matching) != 1:
+            failure = self._set_failure(
+                "invalid_current_task_ref",
+                f"{path}.handler",
+                "user_runtime owner is not current on exactly one Scheduler",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=event.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
+
+        scheduler = matching[0]
+        continuation = self.continuations.get(event.source)
+        first_entry = owner not in self.parked_user_tasks
+        if first_entry and (
+            continuation is None
+            or not continuation.owner_active
+            or not continuation.suspended
+            or not continuation.waiting_yield_target
+        ):
+            failure = self._set_failure(
+                "invalid_user_runtime_entry",
+                f"{path}.handler",
+                "user_runtime Action::Enter must be reached through a continuation yield",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=event.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
+
+        if first_entry:
+            assert continuation is not None
+            self.parked_user_tasks[owner] = event.target
+            self.parked_user_continuations[owner] = continuation.root
+        self.force_idle_schedulers.add(scheduler.scheduler)
+        scheduled = self.run_unit(
+            DerivationEvent(
+                event.target,
+                scheduler.scheduler,
+                ("Action", "Schedule"),
+                "drive",
+            ),
+            "drive",
+            f"{path}.drives[0]",
+        )
+        if self.failure is not None:
+            self.force_idle_schedulers.discard(scheduler.scheduler)
+            if first_entry:
+                self.parked_user_tasks.pop(owner, None)
+                self.parked_user_continuations.pop(owner, None)
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=event.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[scheduled],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status="stopped",
+                failure=None,
+            )
+        return self._unit(
+            kind=kind,
+            event=event,
+            before=before,
+            handler=event.signal,
+            candidate=None,
+            depends_on=[],
+            drives=[scheduled],
+            ensures=[],
+            establishes=[],
+            invariants=[],
+            state_after=before,
+            emits=[],
+            status="passed",
+            failure=None,
+        )
 
     def final_values(self) -> tuple[DerivationValue, ...]:
         fields = tuple(
@@ -584,6 +781,12 @@ class _Execution:
             )
             for runtime in self.schedulers.values()
         )
+
+    def _task_resume_target(self, task: tuple[str, ...]) -> tuple[str, ...]:
+        parked = self.parked_user_tasks.get(task)
+        if parked is not None:
+            return parked
+        return self.task_flows[task]
 
     def _runtime_snapshot(self, position: tuple[object, ...]) -> tuple[object, ...]:
         continuations = tuple(
@@ -622,6 +825,8 @@ class _Execution:
                 )
                 for name, runtime in sorted(self.schedulers.items())
             ),
+            tuple(sorted(self.parked_user_tasks.items())),
+            tuple(sorted(self.parked_user_continuations.items())),
             continuations,
         )
 
@@ -1383,6 +1588,7 @@ class _Execution:
                 and candidate.owner_active
                 and candidate.suspended
                 and candidate.waiting_yield_target
+                and candidate.root not in self.parked_user_continuations.values()
             )
             if suspended_children:
                 child = suspended_children[-1]
@@ -1676,6 +1882,11 @@ class _Execution:
         defer_task_flow: bool = False,
     ) -> DerivationUnit:
         if (
+            event.target in self.user_runtime_owners
+            and event.signal == ("Action", "Enter")
+        ):
+            return self._run_user_runtime(event, kind, path)
+        if (
             event.target in self.schedulers
             and event.signal
             in {("Action", "Enqueue"), ("Action", "Dequeue")}
@@ -1872,11 +2083,16 @@ class _Execution:
             if isinstance(control, ModelHandlerBlock):
                 assert control.switches is not None
                 scheduler = self.schedulers[event.target]
+                forced_idle = event.target in self.force_idle_schedulers
                 candidates = (
-                    tuple(scheduler.runq)
+                    (scheduler.idle_task,)
+                    if forced_idle
+                    else tuple(scheduler.runq)
                     if scheduler.runq
                     else (scheduler.idle_task,)
                 )
+                if forced_idle:
+                    self.force_idle_schedulers.remove(event.target)
                 if self.switch_cursor >= len(self.switch_choices):
                     raise _SwitchNeeded(candidates)
                 switched_task = self.switch_choices[self.switch_cursor]
@@ -1888,7 +2104,7 @@ class _Execution:
                     DerivationSwitch(
                         control.switches,
                         switched_task,
-                        not scheduler.runq,
+                        forced_idle or not scheduler.runq,
                         False,
                         len(drives),
                     )
@@ -2124,7 +2340,7 @@ class _Execution:
             else:
                 self.seen_snapshots.add(snapshot)
                 for drive_index in deferred_task_resumes:
-                    flow = self.task_flows[switched_task]
+                    flow = self._task_resume_target(switched_task)
                     flow_unit = self.run_unit(
                         DerivationEvent(
                             switched_task,
@@ -2147,7 +2363,7 @@ class _Execution:
             and event.signal == ("Transition", "Resume")
             and self.context.object_has_type(event.target, "Task")
         ):
-            flow = self.task_flows[event.target]
+            flow = self._task_resume_target(event.target)
             resumes.append(
                 self.run_unit(
                     DerivationEvent(

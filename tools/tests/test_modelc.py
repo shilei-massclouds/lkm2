@@ -506,11 +506,6 @@ user_app_runtime_type_path = (
     "user_app_runtime",
     "UserAppRuntime",
 )
-kernel_init_user_app_runtime_path = (
-    "objects",
-    "user_app_runtime",
-    "KernelInitUserAppRuntime",
-)
 arch_head_path = ("phases", "arch_head", "ArchHead")
 kernel_init_phase_path = ("phases", "kernel_init", "KernelInitPhase")
 user_run_phase_path = ("phases", "user_run", "UserRunPhase")
@@ -522,7 +517,7 @@ boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
 EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.spec"))(
-    schema_version=9,
+    schema_version=10,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -924,7 +919,7 @@ class ParserAndCompilerTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(_target_name(block.signals[0].target) for block in blocks),
-            (kernel_init_user_app_runtime_path,) * 4,
+            (("CurrentUserAppRuntimeRef",),) * 4,
         )
         self.assertEqual(
             tuple(block.signals[0].signal for block in blocks),
@@ -936,7 +931,7 @@ class ParserAndCompilerTests(unittest.TestCase):
             ),
         )
 
-    def test_user_app_runtime_lifecycle_and_flow_ownership_are_explicit(self) -> None:
+    def test_user_app_runtime_is_an_inference_owned_task_child_protocol(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
         module = next(
             item
@@ -944,16 +939,11 @@ class ParserAndCompilerTests(unittest.TestCase):
             if item.name == ("objects", "user_app_runtime")
         )
         runtime_type = module.types[0]
-        runtime = module.objects[0]
 
         self.assertEqual(runtime_type.name, user_app_runtime_type_path)
         self.assertEqual(runtime_type.initial_state, ("State", "Base"))
-        self.assertEqual(runtime.name, kernel_init_user_app_runtime_path)
-        self.assertEqual(runtime.initial_state, ("State", "Base"))
-        self.assertEqual(
-            runtime.parent,
-            ModelExpression("identifier", "KernelInitFlow"),
-        )
+        self.assertTrue(runtime_type.user_runtime)
+        self.assertEqual(module.objects, ())
 
         entries = tuple(
             (state.name, transition.signal, transition.target_state)
@@ -985,6 +975,55 @@ class ParserAndCompilerTests(unittest.TestCase):
                 (("State", "Online"), ("Action", "Enter"), None),
             ),
         )
+        enter = next(
+            action
+            for state in runtime_type.states
+            for action in state.actions
+            if action.signal == ("Action", "Enter")
+        )
+        self.assertTrue(enter.abstract)
+
+    def test_user_runtime_marker_and_selector_are_strict(self) -> None:
+        protocol = """
+type Runtime {
+    user_runtime: true;
+    initial_state: State::Base;
+    state State::Base { transitions {
+        on Transition::Preset -> State::Prepared {}
+    } }
+    state State::Prepared { transitions {
+        on Transition::Setup -> State::Ready {}
+    } }
+    state State::Ready { transitions {
+        on Transition::Enable -> State::Online {}
+    } }
+    state State::Online { actions { on Action::Enter; } }
+}
+"""
+        invalid = (
+            (protocol.replace("user_runtime: true", "user_runtime: false"), "only be declared as true"),
+            (protocol.replace("on Action::Enter;", 'on Action::Enter { print "bad"; }'), "abstract, parameterless"),
+            (protocol + "object Named: Runtime {}", "inference-owned Task children"),
+        )
+        for body, message in invalid:
+            with self.subTest(message=message), model_tree({"root.spec": body}) as (_, entry):
+                with self.assertRaisesRegex(CompilationError, message):
+                    compile_spec(entry)
+
+        with model_tree(
+            {
+                "root.spec": """
+type T { initial_state: State::Online;
+    state State::Online { actions { on Action::Enter {
+        drives CurrentUserAppRuntimeRef.Action::Enter;
+    } } }
+}
+object Probe: T {}
+"""
+            }
+        ) as (_, entry):
+            with self.assertRaisesRegex(CompilationError, "requires exactly one user_runtime type"):
+                compile_spec(entry)
 
     def test_real_phase_type_and_arch_head_override_are_preserved(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
@@ -1982,9 +2021,9 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
             legacy_selects_field,
-            EXPECTED_JSON.replace('"schema_version": 9', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 10', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":9,"schema_version":9}',
+            '{"schema_version":10,"schema_version":10}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -1993,7 +2032,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=9,
+            schema_version=10,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -2001,14 +2040,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=9,
+                schema_version=10,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=9,
+                schema_version=10,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

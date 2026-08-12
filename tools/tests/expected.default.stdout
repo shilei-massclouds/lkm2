@@ -101,19 +101,72 @@ OpenSBI -> Kernel: emits Transition::Enable
         commit state: unchanged
       KernelInitFlow -> UserRunPhase: resumes Action::Enter
         current state: State::Online
-        UserRunPhase -> KernelInitUserAppRuntime: drives Transition::Preset
+        UserRunPhase -> UserAppRuntime: drives Transition::Preset
           current state: State::Base
           commit state: State::Prepared
-        UserRunPhase -> KernelInitUserAppRuntime: drives Transition::Setup
+        UserRunPhase -> UserAppRuntime: drives Transition::Setup
           current state: State::Prepared
           commit state: State::Ready
-        UserRunPhase -> KernelInitUserAppRuntime: drives Transition::Enable
+        UserRunPhase -> UserAppRuntime: drives Transition::Enable
           current state: State::Ready
           commit state: State::Online
-        UserRunPhase -> KernelInitUserAppRuntime: yields Action::Enter
+        UserRunPhase -> UserAppRuntime: yields Action::Enter
           current state: State::Online
+          UserAppRuntime -> Cpu0Scheduler: drives Action::Schedule
+            current state: State::Online
+            Cpu0Scheduler -> KernelInitTask: drives Transition::Suspend
+              current state: State::OnCpu
+              KernelInitTask -> Cpu0Scheduler: drives Action::Enqueue
+                current state: State::Online
+                commit state: unchanged
+              commit state: State::Online
+            switches next_task_ref = BootTask (idle fallback)
+            Cpu0Scheduler -> BootTask: drives Transition::Resume
+              current state: State::Online
+              commit state: State::OnCpu
+            BootTask -> BootInitFlow: resumes Action::Enter
+              current state: State::Online
+              commit state: unchanged
+            commit state: unchanged
           commit state: unchanged
       commit state: unchanged
-  commit state: State::Online
+    commit state: unchanged
+  StartKernel -> BootIdle: resumes Action::Enter
+    current state: State::Online
+    BootIdle -> Cpu0Scheduler: yields Action::Schedule
+      current state: State::Online
+      Cpu0Scheduler -> BootTask: drives Transition::Suspend
+        current state: State::OnCpu
+        commit state: State::Online
+      switches next_task_ref = KernelInitTask
+      Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
+        current state: State::Online
+        KernelInitTask -> Cpu0Scheduler: drives Action::Dequeue
+          current state: State::Online
+          commit state: unchanged
+        commit state: State::OnCpu
+      KernelInitTask -> UserAppRuntime: resumes Action::Enter
+        current state: State::Online
+        UserAppRuntime -> Cpu0Scheduler: drives Action::Schedule
+          current state: State::Online
+          Cpu0Scheduler -> KernelInitTask: drives Transition::Suspend
+            current state: State::OnCpu
+            KernelInitTask -> Cpu0Scheduler: drives Action::Enqueue
+              current state: State::Online
+              commit state: unchanged
+            commit state: State::Online
+          switches next_task_ref = BootTask (idle fallback)
+          Cpu0Scheduler -> BootTask: drives Transition::Resume
+            current state: State::Online
+            commit state: State::OnCpu
+          BootTask -> BootInitFlow: resumes Action::Enter
+            current state: State::Online
+            commit state: unchanged
+          commit state: unchanged
+        commit state: unchanged
+      commit state: unchanged
+    panic: boot idle repeated! ✗
+    commit state: not committed ✗
+  commit state: not committed ✗
 
-Derivation yielded!
+stopped: panic

@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v9."""
+"""Frozen data model and semantic validation for Model IR schema v10."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -257,6 +257,7 @@ class ModelType:
     initial_state: tuple[str, ...] | None = None
     states: tuple[ModelState, ...] = ()
     sched_core: bool = False
+    user_runtime: bool = False
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.name, "type.name")
@@ -270,6 +271,8 @@ class ModelType:
             raise ModelIRValidationError("type.continuation must be a boolean")
         if type(self.sched_core) is not bool:
             raise ModelIRValidationError("type.sched_core must be a boolean")
+        if type(self.user_runtime) is not bool:
+            raise ModelIRValidationError("type.user_runtime must be a boolean")
         if self.fields is not None:
             _validate_tuple(self.fields, ModelField, "type.fields")
             names = [field.name for field in self.fields]
@@ -719,6 +722,83 @@ class ModelIR:
                 )
             return False
 
+        def object_is_user_runtime(model_object: ModelObject) -> bool:
+            current = resolve_type_name(
+                model_object.base_type, model_object.name[:-1]
+            )
+            seen: set[tuple[str, ...]] = set()
+            while current is not None and current not in seen:
+                seen.add(current)
+                if type_items[current].user_runtime:
+                    return True
+                base = type_items[current].base_type
+                current = (
+                    None
+                    if base is None
+                    else resolve_type_name(base, current[:-1])
+                )
+            return False
+
+        user_runtime_types = tuple(
+            item for item in type_items.values() if item.user_runtime
+        )
+        if len(user_runtime_types) > 1:
+            raise ModelIRValidationError(
+                "the model may declare at most one user_runtime type"
+            )
+        for model_type in user_runtime_types:
+            online = next(
+                (
+                    state
+                    for state in model_type.states
+                    if state.name == ("State", "Online")
+                ),
+                None,
+            )
+            enter = None if online is None else next(
+                (
+                    action
+                    for action in online.actions
+                    if action.signal == ("Action", "Enter")
+                ),
+                None,
+            )
+            transitions = {
+                (state.name, transition.signal, transition.target_state)
+                for state in model_type.states
+                for transition in state.transitions
+            }
+            required = {
+                (
+                    ("State", "Base"),
+                    ("Transition", "Preset"),
+                    ("State", "Prepared"),
+                ),
+                (
+                    ("State", "Prepared"),
+                    ("Transition", "Setup"),
+                    ("State", "Ready"),
+                ),
+                (
+                    ("State", "Ready"),
+                    ("Transition", "Enable"),
+                    ("State", "Online"),
+                ),
+            }
+            if (
+                model_type.continuation
+                or model_type.sched_core
+                or model_type.initial_state != ("State", "Base")
+                or not required.issubset(transitions)
+                or enter is None
+                or not enter.abstract
+                or enter.parameters
+            ):
+                raise ModelIRValidationError(
+                    "user_runtime type requires the Base/Prepared/Ready/Online "
+                    "lifecycle and an abstract, parameterless Online Action::Enter"
+                )
+
         externals = {item.name for module in ordered for item in module.externals}
         if self.entry.origin not in externals:
             raise ModelIRValidationError(
@@ -812,10 +892,18 @@ class ModelIR:
                             "external continuation entry must use resumes Action::Enter"
                         )
             for model_object in module.objects:
-                if model_object.name[-1] == "CurrentTaskRef":
+                if model_object.name[-1] in {
+                    "CurrentTaskRef",
+                    "CurrentUserAppRuntimeRef",
+                }:
                     raise ModelIRValidationError(
-                        "CurrentTaskRef is a reserved runtime selector and must not be "
+                        f"{model_object.name[-1]} is a reserved runtime selector and must not be "
                         "declared as an object"
+                    )
+                if object_is_user_runtime(model_object):
+                    raise ModelIRValidationError(
+                        "user_runtime instances are inference-owned Task children and "
+                        "must not be declared as model objects"
                     )
                 state_names = tuple(state.name for state in model_object.states)
                 state_name_set = set(state_names)
@@ -936,19 +1024,34 @@ class ModelIR:
                                         f"handler in {'.'.join(model_object.name)!r} contains a signal with another source"
                                     )
                                 target_name = static_target(signal.target)
-                                dynamic = (
-                                    signal.target.kind == "identifier"
-                                    and signal.target.value
-                                    in {"CurrentTaskRef", *switched_bindings}
+                                dynamic_name = (
+                                    str(signal.target.value)
+                                    if signal.target.kind == "identifier"
+                                    else None
                                 )
+                                dynamic = dynamic_name in {
+                                    "CurrentTaskRef",
+                                    "CurrentUserAppRuntimeRef",
+                                    *switched_bindings,
+                                }
                                 if target_name is None and not dynamic:
                                     raise ModelIRValidationError(
                                         "dynamic signal target is not in scope"
                                     )
                                 if dynamic:
-                                    if not sched_core or signal.arguments:
+                                    valid_runtime = (
+                                        dynamic_name == "CurrentUserAppRuntimeRef"
+                                        and len(user_runtime_types) == 1
+                                        and not signal.arguments
+                                    )
+                                    valid_task = (
+                                        dynamic_name != "CurrentUserAppRuntimeRef"
+                                        and sched_core
+                                        and not signal.arguments
+                                    )
+                                    if not (valid_runtime or valid_task):
                                         raise ModelIRValidationError(
-                                            "dynamic Task signal targets require a sched_core handler and no arguments"
+                                            "dynamic signal target is unavailable or has arguments"
                                         )
                                     continue
                                 assert target_name is not None

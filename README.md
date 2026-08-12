@@ -25,7 +25,8 @@ make clean
 
 当前默认推导会完成 CPU0 Scheduler 初始化，把 `KernelInitTask` 放入推导器维护的
 隐藏 runq，并完整执行 Suspend、事务式 current 切换、Resume、Dequeue 与 TaskFlow 恢复。
-随后 `UserRunPhase` 初始化 `KernelInitUserAppRuntime`，并把推导停在其用户态
-`Action::Enter` 边界。最终 CPU0 current Task 为 `KernelInitTask`、runq 为空、Runtime
-为 Online；`tools/bin/derive`/`make run` 因而以 yielded 结果正常返回 0。详细语义与
-因果输出见工具说明。
+随后 `UserRunPhase` 为 `KernelInitTask` 按需初始化带 `user_runtime: true` 标记的
+`UserAppRuntime` child。推导器把它的 abstract `Action::Enter` 视为用户应用黑盒，
+默认触发一次调度。当前启动链由此返回 BootTask、进入 BootIdle，并在用户 Runtime
+再次默认调度后到达 `panic "boot idle repeated!"`；`tools/bin/derive` 返回 1，
+`make run` 传播非零状态。详细语义与因果输出见工具说明。

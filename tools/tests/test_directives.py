@@ -78,7 +78,7 @@ class ModelDirectiveTests(unittest.TestCase):
             tuple(action.blocks[0].kind for action in actions), ("print", "panic")
         )
 
-    def test_directives_lower_to_strict_model_ir_v9_blocks(self) -> None:
+    def test_directives_lower_to_strict_model_ir_v10_blocks(self) -> None:
         directory, _, model = _compile_text(
             """
             object Computer: T {
@@ -91,7 +91,7 @@ class ModelDirectiveTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         blocks = model.objects[0].states[0].actions[0].blocks
-        self.assertEqual(model.schema_version, 9)
+        self.assertEqual(model.schema_version, 10)
         self.assertEqual(tuple(block.kind for block in blocks), ("print", "panic"))
         self.assertEqual(
             tuple(block.expressions[0].value for block in blocks), ("你好", "停止")
@@ -100,7 +100,7 @@ class ModelDirectiveTests(unittest.TestCase):
         output = StringIO()
         dump_model_ir(model, output)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 9)
+        self.assertEqual(document["schema_version"], 10)
         self.assertEqual(load_model_ir(StringIO(output.getvalue())), model)
 
         action = document["modules"][0]["objects"][0]["states"][0]["actions"][0]

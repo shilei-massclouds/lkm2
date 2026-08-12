@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v8."""
+"""Strict JSON loading and canonical JSON output for Model IR v10."""
 
 from __future__ import annotations
 
@@ -144,6 +144,7 @@ def _type(value: object, path: str) -> ModelType:
                 "base_type",
                 "continuation",
                 "sched_core",
+                "user_runtime",
                 "initial_state",
                 "states",
             }
@@ -165,6 +166,7 @@ def _type(value: object, path: str) -> ModelType:
         else _qualified_name(initial_state, f"{path}.initial_state"),
         states=_array(data["states"], f"{path}.states", _state),
         sched_core=data["sched_core"],
+        user_runtime=data["user_runtime"],
     )
 
 
@@ -497,6 +499,7 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
                 else _type_expr_data(item.base_type),
                 "continuation": item.continuation,
                 "sched_core": item.sched_core,
+                "user_runtime": item.user_runtime,
                 "initial_state": None
                 if item.initial_state is None
                 else list(item.initial_state),
