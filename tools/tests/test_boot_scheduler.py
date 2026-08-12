@@ -18,6 +18,11 @@ KERNEL_INIT_FLOW = ("flows", "task_flow", "KernelInitFlow")
 CPU0_SCHEDULER = ("objects", "scheduler", "Cpu0Scheduler")
 BOOT_TASK = ("objects", "task", "BootTask")
 KERNEL_INIT_TASK = ("objects", "task", "KernelInitTask")
+USER_APP_RUNTIME = (
+    "objects",
+    "user_app_runtime",
+    "KernelInitUserAppRuntime",
+)
 KERNEL = ("systems", "kernel", "Kernel")
 BOOT_HANDOFF = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
 USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
@@ -65,17 +70,42 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(blocks[1].switches, "next_task_ref")
         self.assertEqual(blocks[2].signals[0].target.value, "next_task_ref")
 
-    def test_boot_and_user_run_yield_to_the_scheduler(self) -> None:
-        for name in (BOOT_HANDOFF, USER_RUN_PHASE):
-            phase = next(item for item in self.model.objects if item.name == name)
-            signal = next(
-                signal
-                for block in phase.states[0].actions[0].blocks
-                if block.kind == "yields"
-                for signal in block.signals
-            )
-            self.assertEqual(_target_name(signal.target), CPU0_SCHEDULER)
-            self.assertEqual(signal.signal, ("Action", "Schedule"))
+    def test_boot_handoff_yields_to_the_scheduler(self) -> None:
+        phase = next(item for item in self.model.objects if item.name == BOOT_HANDOFF)
+        signal = next(
+            signal
+            for block in phase.states[0].actions[0].blocks
+            if block.kind == "yields"
+            for signal in block.signals
+        )
+        self.assertEqual(_target_name(signal.target), CPU0_SCHEDULER)
+        self.assertEqual(signal.signal, ("Action", "Schedule"))
+
+    def test_user_run_prepares_runtime_then_yields_to_its_enter_action(self) -> None:
+        phase = next(item for item in self.model.objects if item.name == USER_RUN_PHASE)
+        blocks = phase.states[0].actions[0].blocks
+
+        self.assertEqual(
+            tuple(block.kind for block in blocks),
+            ("drives", "drives", "drives", "yields"),
+        )
+        signals = tuple(block.signals[0] for block in blocks)
+        self.assertTrue(
+            all(_target_name(signal.target) == USER_APP_RUNTIME for signal in signals)
+        )
+        self.assertEqual(
+            tuple(signal.signal for signal in signals),
+            (
+                ("Transition", "Preset"),
+                ("Transition", "Setup"),
+                ("Transition", "Enable"),
+                ("Action", "Enter"),
+            ),
+        )
+        self.assertEqual(
+            tuple(signal.mode for signal in signals),
+            ("drive", "drive", "drive", "yield"),
+        )
 
     def test_kernel_boots_exclusively_through_boot_task_resume(self) -> None:
         kernel = next(item for item in self.model.objects if item.name == KERNEL)
@@ -119,11 +149,11 @@ class BootSchedulerModelTests(unittest.TestCase):
             and unit.event.signal == ("Action", "Schedule")
         )
 
-        self.assertEqual(len(schedules), 2)
+        self.assertEqual(len(schedules), 1)
         self.assertTrue(all(unit.status == "passed" for unit in schedules))
         self.assertEqual(
             tuple(switch.task for unit in schedules for switch in unit.switches),
-            (KERNEL_INIT_TASK, KERNEL_INIT_TASK),
+            (KERNEL_INIT_TASK,),
         )
         queue_actions = tuple(
             unit.event.signal
@@ -139,8 +169,6 @@ class BootSchedulerModelTests(unittest.TestCase):
             (
                 ("Action", "Enqueue"),
                 ("Action", "Dequeue"),
-                ("Action", "Enqueue"),
-                ("Action", "Dequeue"),
             ),
         )
 
@@ -154,13 +182,29 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(states[CPU0_SCHEDULER], ("State", "Online"))
         self.assertEqual(states[BOOT_TASK], ("State", "Online"))
         self.assertEqual(states[KERNEL_INIT_TASK], ("State", "OnCpu"))
+        self.assertEqual(states[USER_APP_RUNTIME], ("State", "Online"))
         self.assertEqual(len(path.schedulers), 1)
         scheduler = path.schedulers[0]
         self.assertEqual(scheduler.scheduler, CPU0_SCHEDULER)
         self.assertEqual(scheduler.idle_task, BOOT_TASK)
         self.assertEqual(scheduler.current_task, KERNEL_INIT_TASK)
         self.assertEqual(scheduler.runq, ())
-        self.assertEqual(tuple(item.root for item in path.continuations), (BOOT_HANDOFF,))
+        self.assertEqual(
+            tuple(item.root for item in path.continuations),
+            (BOOT_HANDOFF, USER_RUN_PHASE),
+        )
+
+        units = tuple(_all_units(path.units))
+        self.assertEqual(units[-1].event.target, USER_APP_RUNTIME)
+        self.assertEqual(units[-1].event.signal, ("Action", "Enter"))
+        self.assertEqual(units[-1].event.mode, "yield")
+        self.assertFalse(
+            any(
+                unit.event.signal
+                in {("Transition", "Disable"), ("Transition", "Cleanup")}
+                for unit in units
+            )
+        )
 
 
 if __name__ == "__main__":

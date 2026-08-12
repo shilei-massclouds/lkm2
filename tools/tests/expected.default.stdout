@@ -101,26 +101,18 @@ OpenSBI -> Kernel: emits Transition::Enable
         commit state: unchanged
       KernelInitFlow -> UserRunPhase: resumes Action::Enter
         current state: State::Online
-        UserRunPhase -> Cpu0Scheduler: yields Action::Schedule
+        UserRunPhase -> KernelInitUserAppRuntime: drives Transition::Preset
+          current state: State::Base
+          commit state: State::Prepared
+        UserRunPhase -> KernelInitUserAppRuntime: drives Transition::Setup
+          current state: State::Prepared
+          commit state: State::Ready
+        UserRunPhase -> KernelInitUserAppRuntime: drives Transition::Enable
+          current state: State::Ready
+          commit state: State::Online
+        UserRunPhase -> KernelInitUserAppRuntime: yields Action::Enter
           current state: State::Online
-          Cpu0Scheduler -> KernelInitTask: drives Transition::Suspend
-            current state: State::OnCpu
-            KernelInitTask -> Cpu0Scheduler: drives Action::Enqueue
-              current state: State::Online
-              commit state: unchanged
-            commit state: State::Online
-          switches next_task_ref = KernelInitTask
-          Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
-            current state: State::Online
-            KernelInitTask -> Cpu0Scheduler: drives Action::Dequeue
-              current state: State::Online
-              commit state: unchanged
-            commit state: State::OnCpu
-          KernelInitTask -> KernelInitFlow: resumes Action::Enter
-            current state: State::Online
-            commit state: unchanged
           commit state: unchanged
-        commit state: unchanged
       commit state: unchanged
   commit state: State::Online
 

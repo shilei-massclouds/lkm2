@@ -9,6 +9,7 @@
 ## 当前映射
 
 - [Scheduler 章程](objects/scheduler.md)
+- [UserAppRuntime 章程](objects/user_app_runtime.md)
 - 临时模型映射：[model/objects.spec](../model/objects.spec)
 
 章程与模型的关系见[系统章程](main.md)。

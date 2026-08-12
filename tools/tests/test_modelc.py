@@ -501,6 +501,16 @@ boot_flow_path = ("flows", "task_flow", "BootInitFlow")
 kernel_init_flow_path = ("flows", "task_flow", "KernelInitFlow")
 boot_task_path = ("objects", "task", "BootTask")
 kernel_init_task_path = ("objects", "task", "KernelInitTask")
+user_app_runtime_type_path = (
+    "objects",
+    "user_app_runtime",
+    "UserAppRuntime",
+)
+kernel_init_user_app_runtime_path = (
+    "objects",
+    "user_app_runtime",
+    "KernelInitUserAppRuntime",
+)
 arch_head_path = ("phases", "arch_head", "ArchHead")
 kernel_init_phase_path = ("phases", "kernel_init", "KernelInitPhase")
 user_run_phase_path = ("phases", "user_run", "UserRunPhase")
@@ -907,10 +917,74 @@ class ParserAndCompilerTests(unittest.TestCase):
         printed = kernel_init_phase.states[0].actions[0].blocks[0]
         self.assertEqual(printed.kind, "print")
         self.assertEqual(printed.expressions, (ModelExpression("string", "kernel init"),))
-        yielded = user_run_phase.states[0].actions[0].blocks[0]
-        self.assertEqual(yielded.kind, "yields")
-        self.assertEqual(_target_name(yielded.signals[0].target), cpu0_scheduler_path)
-        self.assertEqual(yielded.signals[0].signal, ("Action", "Schedule"))
+        blocks = user_run_phase.states[0].actions[0].blocks
+        self.assertEqual(
+            tuple(block.kind for block in blocks),
+            ("drives", "drives", "drives", "yields"),
+        )
+        self.assertEqual(
+            tuple(_target_name(block.signals[0].target) for block in blocks),
+            (kernel_init_user_app_runtime_path,) * 4,
+        )
+        self.assertEqual(
+            tuple(block.signals[0].signal for block in blocks),
+            (
+                ("Transition", "Preset"),
+                ("Transition", "Setup"),
+                ("Transition", "Enable"),
+                ("Action", "Enter"),
+            ),
+        )
+
+    def test_user_app_runtime_lifecycle_and_flow_ownership_are_explicit(self) -> None:
+        model = compile_spec(REPOSITORY / "model" / "main.spec")
+        module = next(
+            item
+            for item in model.modules
+            if item.name == ("objects", "user_app_runtime")
+        )
+        runtime_type = module.types[0]
+        runtime = module.objects[0]
+
+        self.assertEqual(runtime_type.name, user_app_runtime_type_path)
+        self.assertEqual(runtime_type.initial_state, ("State", "Base"))
+        self.assertEqual(runtime.name, kernel_init_user_app_runtime_path)
+        self.assertEqual(runtime.initial_state, ("State", "Base"))
+        self.assertEqual(
+            runtime.parent,
+            ModelExpression("identifier", "KernelInitFlow"),
+        )
+
+        entries = tuple(
+            (state.name, transition.signal, transition.target_state)
+            for state in runtime_type.states
+            for transition in state.transitions
+        ) + tuple(
+            (state.name, action.signal, None)
+            for state in runtime_type.states
+            for action in state.actions
+        )
+        self.assertEqual(
+            entries,
+            (
+                (
+                    ("State", "Base"),
+                    ("Transition", "Preset"),
+                    ("State", "Prepared"),
+                ),
+                (
+                    ("State", "Prepared"),
+                    ("Transition", "Setup"),
+                    ("State", "Ready"),
+                ),
+                (
+                    ("State", "Ready"),
+                    ("Transition", "Enable"),
+                    ("State", "Online"),
+                ),
+                (("State", "Online"), ("Action", "Enter"), None),
+            ),
+        )
 
     def test_real_phase_type_and_arch_head_override_are_preserved(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
@@ -1851,6 +1925,7 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("objects",),
                 ("objects", "scheduler"),
                 ("objects", "task"),
+                ("objects", "user_app_runtime"),
                 ("phases",),
                 ("phases", "arch_head"),
                 ("phases", "kernel_init"),

@@ -161,12 +161,13 @@ handler 校验全部成功后才原子提交 current；Task Resume 的受控 Tas
 `yielded`，其余为 `passed`；CLI 对多路径按稳定顺序分段输出，并在总体失败时返回 1。
 
 默认 `make run` 输出完整推导，与结论空开一行。BootSetup 将 Scheduler 推进到
-Online 并启用 `KernelInitTask`；其 Enable、Resume、Suspend 生命周期分别驱动隐藏
-runq 的 Enqueue、Dequeue、Enqueue。BootTask 是 idle Task；其引导 Resume 自迁移保持
-OnCpu，调度 Resume/Suspend override 避免队列动作。默认路径最终 current 为
-`KernelInitTask`、runq
-为空，BootTask 为 Online、KernelInitTask 为 OnCpu，BootHandoff 保留 yielded
-continuation；CLI 输出 `Derivation yielded!` 并返回 0。
+Online 并启用 `KernelInitTask`；其 Enable 与 Resume 生命周期分别驱动隐藏 runq 的
+Enqueue 与 Dequeue。BootTask 是 idle Task；其引导 Resume 自迁移保持 OnCpu，调度
+Resume/Suspend override 避免队列动作。切换到 `KernelInitTask` 后，`UserRunPhase`
+同步完成 `KernelInitUserAppRuntime` 的 Preset、Setup、Enable，再 yield 到其
+`Action::Enter` 用户态执行边界。默认路径最终 current 为 `KernelInitTask`、runq 为空，
+BootTask 为 Online、KernelInitTask 为 OnCpu、Runtime 为 Online；BootHandoff 与
+UserRunPhase 保留 yielded continuation，CLI 输出 `Derivation yielded!` 并返回 0。
 
 公共库接口为：
 
