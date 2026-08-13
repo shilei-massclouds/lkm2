@@ -44,14 +44,11 @@ type Task {
 }
 
 object BootTask: Task {
-    initial_state: State::OnCpu;
+    initial_state: State::Online;
     parent: Kernel;
 
     state State::OnCpu {
         transitions {
-            on Transition::Resume -> State::OnCpu {
-            }
-
             override on Transition::Suspend -> State::Online {
             }
         }

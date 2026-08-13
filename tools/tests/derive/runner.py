@@ -20,6 +20,7 @@ sys.path.insert(0, str(TESTS_DIRECTORY))
 sys.path.insert(0, str(SOURCE_DIRECTORY))
 
 from _compact_result import CompactTextTestResult  # noqa: E402
+from _derive_harness import copy_case_with_cpu_line, with_cpu_line  # noqa: E402
 from derive import (  # noqa: E402
     DerivationEvent,
     DerivationSequence,
@@ -58,7 +59,7 @@ def _compile_text(body: str):
     (root / "main.spec").write_text(
         "spec root;\norigin root.Human;\n", encoding="utf-8"
     )
-    (root / "root.spec").write_text(body, encoding="utf-8")
+    (root / "root.spec").write_text(with_cpu_line(body), encoding="utf-8")
     return directory, compile_spec(root / "main.spec")
 
 
@@ -122,7 +123,9 @@ class SmokeGoldenTests(_DiffingTestCase):
                 expected_json = expected_json_path.read_bytes()
                 expected_stdout = expected_stdout_path.read_bytes()
 
-                model = compile_spec(case / "main.spec")
+                harness, entry = copy_case_with_cpu_line(case)
+                self.addCleanup(harness.cleanup)
+                model = compile_spec(entry)
                 selected = default_derivation_sequence(model)
                 first = derive(model, selected)
                 second = derive(model, selected)
@@ -158,7 +161,7 @@ class SmokeGoldenTests(_DiffingTestCase):
                     [
                         str(REPOSITORY / "tools" / "bin" / "derive"),
                         "--model",
-                        str(case / "main.spec"),
+                        str(entry),
                     ],
                     cwd=case,
                     text=False,
@@ -213,7 +216,9 @@ class EngineTests(unittest.TestCase):
 
     def test_completed_child_is_kept_when_later_drive_fails(self) -> None:
         case = CASES_DIRECTORY / "07-second-drive-fails"
-        model = compile_spec(case / "main.spec")
+        harness, entry = copy_case_with_cpu_line(case)
+        self.addCleanup(harness.cleanup)
+        model = compile_spec(entry)
         result = derive(model, default_derivation_sequence(model))
         states = {item.object[-1]: item.state for item in result.final_state}
         self.assertEqual(result.status, "failed")
@@ -621,7 +626,9 @@ class EngineTests(unittest.TestCase):
 
     def test_failed_invariant_rolls_back_state_and_staged_facts(self) -> None:
         case = CASES_DIRECTORY / "13-invariant-rollback"
-        model = compile_spec(case / "main.spec")
+        harness, entry = copy_case_with_cpu_line(case)
+        self.addCleanup(harness.cleanup)
+        model = compile_spec(entry)
         result = derive(model, default_derivation_sequence(model))
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.paths[0].status, "invariant_failed")
@@ -782,7 +789,11 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result.units[0].event.mode, "emit")
 
     def test_undeclared_sequence_event_is_rejected_as_a_root(self) -> None:
-        model = compile_spec(CASES_DIRECTORY / "02-simple-transition" / "main.spec")
+        harness, entry = copy_case_with_cpu_line(
+            CASES_DIRECTORY / "02-simple-transition"
+        )
+        self.addCleanup(harness.cleanup)
+        model = compile_spec(entry)
         selected = _sequence(("root.Computer", "root.Computer", "Go", "drive"))
         result = derive(model, selected)
         self.assertEqual(result.status, "failed")
@@ -1515,13 +1526,15 @@ class DerivationJSONTests(unittest.TestCase):
 
     def test_result_is_strict_canonical_and_round_trips(self) -> None:
         case = CASES_DIRECTORY / "11-establishes-invariant"
-        model = compile_spec(case / "main.spec")
+        harness, entry = copy_case_with_cpu_line(case)
+        self.addCleanup(harness.cleanup)
+        model = compile_spec(entry)
         result = derive(model, default_derivation_sequence(model))
         output = StringIO()
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 8)
+        self.assertEqual(document["schema_version"], 9)
         self.assertNotIn("failure", document)
 
         startup_event = json.loads(output.getvalue())
@@ -1554,10 +1567,19 @@ class DerivationJSONTests(unittest.TestCase):
         missing = dict(document)
         del missing["paths"]
         invalid_documents.append(json.dumps(missing))
-        invalid_documents.append('{"schema_version":8,"status":"passed","status":"passed"}')
+        invalid_documents.append('{"schema_version":9,"status":"passed","status":"passed"}')
         old_result = dict(document)
-        old_result["schema_version"] = 7
+        old_result["schema_version"] = 8
         invalid_documents.append(json.dumps(old_result))
+        missing_current = json.loads(output.getvalue())
+        del missing_current["paths"][0]["current_task_ref"]
+        invalid_documents.append(json.dumps(missing_current))
+        scheduler_current = json.loads(output.getvalue())
+        scheduler_current["paths"][0]["schedulers"][0]["current_task"] = [
+            "root",
+            "__HarnessBootTask",
+        ]
+        invalid_documents.append(json.dumps(scheduler_current))
         old_switch_field = json.loads(output.getvalue())
         old_unit = old_switch_field["paths"][0]["units"][0]
         old_unit["selections"] = old_unit.pop("switches")
@@ -1576,9 +1598,11 @@ class CLITests(unittest.TestCase):
         ):
             with self.subTest(case=case_name):
                 case = CASES_DIRECTORY / case_name
+                harness, entry = copy_case_with_cpu_line(case)
+                self.addCleanup(harness.cleanup)
                 stdout, stderr = StringIO(), StringIO()
                 with redirect_stdout(stdout), redirect_stderr(stderr):
-                    status = derive_main(["--model", str(case / "main.spec")])
+                    status = derive_main(["--model", str(entry)])
                 self.assertEqual(status, expected_status)
                 self.assertEqual(
                     stdout.getvalue(),
@@ -1596,7 +1620,9 @@ class CLITests(unittest.TestCase):
 
     def test_explicit_sequence_uses_the_supplied_default_model(self) -> None:
         case = CASES_DIRECTORY / "02-simple-transition"
-        model = compile_spec(case / "main.spec")
+        harness, entry = copy_case_with_cpu_line(case)
+        self.addCleanup(harness.cleanup)
+        model = compile_spec(entry)
         with tempfile.TemporaryDirectory() as directory:
             sequence_path = Path(directory) / "selected.sequence.json"
             with sequence_path.open("w", encoding="utf-8") as stream:
@@ -1605,7 +1631,7 @@ class CLITests(unittest.TestCase):
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 status = derive_main(
                     ["--sequence", str(sequence_path)],
-                    default_model=case / "main.spec",
+                    default_model=entry,
                 )
         self.assertEqual(status, 0)
         self.assertTrue(stdout.getvalue().endswith("Derivation passed!\n"))

@@ -1393,6 +1393,11 @@ def _expand_inheritance(
             object_type(name), (task_types[0], ())
         )
 
+    def is_task_type(name: tuple[str, ...]) -> bool:
+        return len(task_types) == 1 and compatible(
+            (name, ()), (task_types[0], ())
+        )
+
     def is_task_flow_object(name: tuple[str, ...]) -> bool:
         return len(task_flow_types) == 1 and compatible(
             object_type(name), (task_flow_types[0], ())
@@ -1403,6 +1408,23 @@ def _expand_inheritance(
         return type_name in expanded_types and expanded_types[type_name].sched_core
 
     core_actions = {("Action", "Enqueue"), ("Action", "Dequeue")}
+    for name, model_type in expanded_types.items():
+        if not is_task_type(name):
+            continue
+        for state in model_type.states:
+            for transition in state.transitions:
+                if transition.signal != ("Transition", "Resume"):
+                    continue
+                if (
+                    state.name != ("State", "Online")
+                    or transition.target_state != ("State", "OnCpu")
+                ):
+                    raise _semantic_error(
+                        loaded[name[:-1]],
+                        type_nodes[name],
+                        "Task Transition::Resume is only allowed from State::Online "
+                        "to State::OnCpu",
+                    )
     for name, model_type in raw_types.items():
         effective = expanded_types[name]
         if not effective.sched_core:
@@ -1421,6 +1443,32 @@ def _expand_inheritance(
     for name, model_object in expanded_objects.items():
         owner = object_nodes[name]
         sched_core = is_sched_core_object(name)
+        if any(
+            (_flatten_access(assignment.target) or ([], []))[0][:1]
+            == ["CurrentTaskRef"]
+            for reference in model_object.references
+            for assignment in reference.assignments
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                owner,
+                "CurrentTaskRef is a read-only runtime selector and cannot be assigned",
+            )
+        if is_task_object(name):
+            for state in model_object.states:
+                for transition in state.transitions:
+                    if transition.signal != ("Transition", "Resume"):
+                        continue
+                    if (
+                        state.name != ("State", "Online")
+                        or transition.target_state != ("State", "OnCpu")
+                    ):
+                        raise _semantic_error(
+                            loaded[name[:-1]],
+                            owner,
+                            "Task Transition::Resume is only allowed from State::Online "
+                            "to State::OnCpu",
+                        )
         if sched_core and model_object.idle_task is None:
             raise _semantic_error(
                 loaded[name[:-1]], owner, "sched_core object requires idle_task"
@@ -1709,12 +1757,7 @@ def _expand_inheritance(
                         ):
                             dynamic = flattened_target[0][0]
                             if dynamic == "CurrentTaskRef":
-                                if not is_sched_core_object(name):
-                                    raise _semantic_error(
-                                        loaded[module_name],
-                                        owner,
-                                        "CurrentTaskRef is only available in a sched_core handler",
-                                    )
+                                pass
                             elif dynamic not in environment:
                                 raise _semantic_error(
                                     loaded[module_name],

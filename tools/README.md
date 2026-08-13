@@ -7,7 +7,7 @@
 ```text
 model/main.spec → entry AST → recursive module graph → Model IR v10 → canonical JSON
 entry external signals → tools/build/derive/main.sequence.json
-Model IR v10 + external-root sequence v3 → derive → result JSON v8 / human stdout
+Model IR v10 + external-root sequence v3 → derive → result JSON v9 / human stdout
 ```
 
 有状态对象可以省略 `initial_state`；modelc 会将其规范化为
@@ -119,9 +119,9 @@ IR schema 版本；完全命中并能严格加载缓存 IR 时不会改写文件
 
 推导序列 schema v3 的每个事件显式指定 `source`、`target`、`signal`、`mode` 和
 实参，但 sequence 只选择外部根信号；drives、emits 与 resumes 由引擎按因果关系
-自动调度。结果 JSON schema v7 顶层记录有序路径集合；每条路径保留嵌套推导单元、
+自动调度。结果 JSON schema v9 顶层记录有序路径集合；每条路径保留嵌套推导单元、
 逐项条件、最终状态、运行时字段/Collection 值、predicate facts、continuation
-frame、参数绑定快照，以及 Scheduler 的 idle/current/runq 上下文；
+frame、参数绑定快照、线路 `current_task_ref`，以及 Scheduler 的 idle/runq 上下文；
 `dump_derivation_result()` 提供包含完整检查细节的规范 JSON，CLI 默认使用精简的
 人类因果 renderer。当前支持
 Transition 与 Action 信号、对象状态比较、布尔组合、depends_on、drives、ensures、
@@ -151,19 +151,24 @@ Enable 提交后只驱动 `BootTask.Transition::Resume`，成功的 Task Resume 
 `sched_core: true` 类型为实例隐式提供无参数 `Action::Enqueue` 和
 `Action::Dequeue`。这两个信号只能由 Task 对象发出，分别把 source Task 加入或
 移出实例私有的唯一 FIFO runq；重复入队和不存在的出队会产生明确失败码。
-`switches name;` 在 Scheduler Action 中按 runq 顺序展开每个候选路径，空队列时绑定
+公开 `derive()` 首先构造唯一 CPU 推导线路：模型必须恰有一个 sched_core 实例，
+线路从其 idle Task 预置只读 `CurrentTaskRef`。零个或多个 Scheduler 返回
+`invalid_derivation_line`，此时结果的 `current_task_ref` 为 null；有效线路中它始终
+是具体 Task。`switches name;` 在 Scheduler Action 中按 runq 顺序展开每个候选路径，空队列时绑定
 idle Task，且 switch 本身不出队，也不隐式执行 Suspend 或 Resume。`CurrentTaskRef`
-与 switches 绑定都是运行时 Task target。Suspend、Resume、Dequeue 以及 Scheduler
-handler 校验全部成功后才原子提交 current；Task Resume 的受控 TaskFlow 后置效果在
-提交之后执行，因此新 TaskFlow 观察到新的 current。任何失败都保留旧 current 且不进入
-新 TaskFlow。
+是任意 handler 可只读使用的线路 Task selector；switches 绑定也是运行时 Task target。
+Scheduler 不拥有 current。Schedule 先验证线路 current Task 为 OnCpu，再执行
+Suspend、候选选择和 Resume；Resume、Dequeue 以及 Scheduler handler 校验全部成功后，
+推导器在进入 TaskFlow 前原子提交线路 current。上述任一步失败都保留旧 current，且不
+进入新的 TaskFlow。
 结果总体状态在任一路径失败时为 `failed`，否则在存在 suspended 路径时为
 `yielded`，其余为 `passed`；CLI 对多路径按稳定顺序分段输出，并在总体失败时返回 1。
 
 默认 `make run` 输出完整推导，与结论空开一行。BootSetup 将 Scheduler 推进到
 Online 并启用 `KernelInitTask`；其 Enable 与 Resume 生命周期分别驱动隐藏 runq 的
-Enqueue 与 Dequeue。BootTask 是 idle Task；其引导 Resume 自迁移保持 OnCpu，调度
-Resume/Suspend override 避免队列动作。切换到 `KernelInitTask` 后，`UserRunPhase`
+Enqueue 与 Dequeue。BootTask 初始为 Online 且兼作 idle Task；Kernel 首次 Resume
+使其进入 OnCpu，首次/idle Resume 与 Suspend override 都避免队列动作。切换到
+`KernelInitTask` 后，`UserRunPhase`
 通过 `CurrentTaskRef.UserAppRuntimeRef` 同步完成推导器按需生成的
 `KernelInitTask.UserAppRuntime` 的 Preset、Setup、Enable，再 yield 到其
 `Action::Enter` 用户态黑盒入口。`user_runtime: true` 指示推导器为每个 episode 从该
@@ -186,5 +191,6 @@ BootHandoff 与 UserRunPhase continuation，以 `yielded` 结束；BootIdle 及�
 AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v10
 loader 严格拒绝旧版本、未知字段、重复声明、无效状态引用、重复 handler 和未知
 信号目标，并规范排序模块和声明。
-Derivation Result schema v8 同样严格拒绝旧 `selections` 字段与旧 schema，仅输出
+Derivation Result schema v9 同样严格拒绝旧 `selections`、Scheduler `current_task`
+字段与旧 schema，仅输出
 事务式 `switches` 记录。

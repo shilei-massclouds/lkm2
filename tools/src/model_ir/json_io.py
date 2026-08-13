@@ -350,7 +350,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v8 JSON document."""
+    """Load and strictly validate one Model IR schema-v10 JSON document."""
 
     try:
         raw = json.load(

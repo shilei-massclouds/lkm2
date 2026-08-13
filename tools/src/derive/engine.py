@@ -85,7 +85,6 @@ class _ContinuationRuntime:
 class _SchedulerRuntime:
     scheduler: tuple[str, ...]
     idle_task: tuple[str, ...]
-    current_task: tuple[str, ...]
     runq: list[tuple[str, ...]] = field(default_factory=list)
 
 
@@ -187,6 +186,7 @@ class _Context:
         self.object_names = _shortest_names(tuple(self.objects))
         self.predicate_names = _shortest_names(tuple(self.predicates))
         self.schedulers: dict[tuple[str, ...], _SchedulerRuntime] = {}
+        self.current_task_resolver = None
         self.user_runtime_type = next(
             (item for item in self.types.values() if item.user_runtime), None
         )
@@ -276,14 +276,9 @@ class _Context:
             if identifier == "self":
                 return source
             if identifier == "CurrentTaskRef":
-                schedulers = (
-                    (source,)
-                    if source in self.schedulers
-                    else tuple(self.schedulers)
-                )
-                if len(schedulers) != 1:
-                    raise _UnsupportedExpression("CurrentTaskRef:ambiguous_scheduler")
-                return self.schedulers[schedulers[0]].current_task
+                if self.current_task_resolver is None:
+                    raise _UnsupportedExpression("CurrentTaskRef:unavailable")
+                return self.current_task_resolver()
         flattened = _access(expression)
         if flattened == (
             ("CurrentTaskRef", "UserAppRuntimeRef"),
@@ -527,25 +522,6 @@ class _Execution:
         self.switch_cursor = 0
         self.cycle_closed = False
         self.seen_snapshots: set[tuple[object, ...]] = set()
-        for model_object in model.objects:
-            if model_object.base_type.name == ("Collection",):
-                self.collections[model_object.name] = []
-        for model_object in model.objects:
-            for model_field in model_object.attrs or ():
-                if model_field.default is None:
-                    continue
-                value = self.context.resolve_value(
-                    model_field.default,
-                    model_object.name[:-1],
-                    model_object.name,
-                    {},
-                    self.values,
-                )
-                if value is None:
-                    raise RuntimeError(
-                        f"compiled field default {model_field.name!r} is unresolved"
-                    )
-                self.values[(model_object.name, model_field.name)] = value
         self.schedulers: dict[tuple[str, ...], _SchedulerRuntime] = {}
         for model_object in model.objects:
             if model_object.idle_task is None:
@@ -556,9 +532,35 @@ class _Execution:
             if idle is None:
                 raise RuntimeError("compiled scheduler idle_task is unresolved")
             self.schedulers[model_object.name] = _SchedulerRuntime(
-                model_object.name, idle, idle
+                model_object.name, idle
             )
         self.context.schedulers = self.schedulers
+        self.current_task_ref = (
+            next(iter(self.schedulers.values())).idle_task
+            if len(self.schedulers) == 1
+            else None
+        )
+        self.context.current_task_resolver = self._current_task
+        for model_object in model.objects:
+            if model_object.base_type.name == ("Collection",):
+                self.collections[model_object.name] = []
+        if self.current_task_ref is not None:
+            for model_object in model.objects:
+                for model_field in model_object.attrs or ():
+                    if model_field.default is None:
+                        continue
+                    value = self.context.resolve_value(
+                        model_field.default,
+                        model_object.name[:-1],
+                        model_object.name,
+                        {},
+                        self.values,
+                    )
+                    if value is None:
+                        raise RuntimeError(
+                            f"compiled field default {model_field.name!r} is unresolved"
+                        )
+                    self.values[(model_object.name, model_field.name)] = value
         self.user_runtimes: dict[tuple[str, ...], tuple[str, ...]] = {}
         self.user_runtime_owners: dict[tuple[str, ...], tuple[str, ...]] = {}
         self.parked_user_tasks: dict[
@@ -587,12 +589,11 @@ class _Execution:
                     self.task_flows[parent] = model_object.name
 
     def _current_user_runtime(self) -> tuple[str, ...]:
-        schedulers = tuple(self.schedulers.values())
-        if len(schedulers) != 1 or self.context.user_runtime_type is None:
+        if self.current_task_ref is None or self.context.user_runtime_type is None:
             raise _UnsupportedExpression(
                 "CurrentTaskRef.UserAppRuntimeRef:ambiguous_runtime_context"
             )
-        task = schedulers[0].current_task
+        task = self.current_task_ref
         existing = self.user_runtimes.get(task)
         if existing is not None:
             return existing
@@ -650,16 +651,11 @@ class _Execution:
             )
 
         owner = self.user_runtime_owners[event.target]
-        matching = tuple(
-            runtime
-            for runtime in self.schedulers.values()
-            if runtime.current_task == owner
-        )
-        if len(matching) != 1:
+        if self.current_task_ref != owner or len(self.schedulers) != 1:
             failure = self._set_failure(
                 "invalid_current_task_ref",
                 f"{path}.handler",
-                "user_runtime owner is not current on exactly one Scheduler",
+                "user_runtime owner is not current on this CPU derivation line",
             )
             return self._unit(
                 kind=kind,
@@ -678,7 +674,7 @@ class _Execution:
                 failure=failure,
             )
 
-        scheduler = matching[0]
+        scheduler = next(iter(self.schedulers.values()))
         continuation = self.continuations.get(event.source)
         first_entry = owner not in self.parked_user_tasks
         if not first_entry:
@@ -801,11 +797,15 @@ class _Execution:
             DerivationScheduler(
                 runtime.scheduler,
                 runtime.idle_task,
-                runtime.current_task,
                 tuple(runtime.runq),
             )
             for runtime in self.schedulers.values()
         )
+
+    def _current_task(self) -> tuple[str, ...]:
+        if self.current_task_ref is None:
+            raise _UnsupportedExpression("CurrentTaskRef:unavailable")
+        return self.current_task_ref
 
     def _task_resume_target(self, task: tuple[str, ...]) -> tuple[str, ...]:
         parked = self.parked_user_tasks.get(task)
@@ -845,11 +845,11 @@ class _Execution:
                 (
                     name,
                     runtime.idle_task,
-                    runtime.current_task,
                     tuple(runtime.runq),
                 )
                 for name, runtime in sorted(self.schedulers.items())
             ),
+            self.current_task_ref,
             tuple(sorted(self.parked_user_tasks.items())),
             tuple(sorted(self.parked_user_continuations.items())),
             continuations,
@@ -1976,6 +1976,36 @@ class _Execution:
                 failure=failure,
             )
 
+        if (
+            event.target in self.schedulers
+            and event.signal == ("Action", "Schedule")
+            and (
+                self.current_task_ref is None
+                or self.states.get(self.current_task_ref) != ("State", "OnCpu")
+            )
+        ):
+            failure = self._set_failure(
+                "invalid_current_task_ref",
+                f"{path}.handler",
+                "Schedule requires CurrentTaskRef to identify a Task in State::OnCpu",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=handler.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=None,
+                emits=[],
+                status=failure.code,
+                failure=failure,
+            )
+
         module = model_object.name[:-1]
         try:
             bindings = self._bind_handler(event, handler)
@@ -2325,8 +2355,6 @@ class _Execution:
             self.states[event.target] = candidate_state
         self.facts.update(staged_facts)
         self.values = candidate_values
-        if switched_task is not None:
-            self.schedulers[event.target].current_task = switched_task
         for index, signal in enumerate(emit_signals):
             child_event = self._signal_event(signal, model_object.name, bindings)
             emits.append(self.run_unit(child_event, "emit", f"{path}.emits[{index}]"))
@@ -2343,6 +2371,7 @@ class _Execution:
                 if self.failure is not None:
                     break
         if self.failure is None and switched_task is not None:
+            self.current_task_ref = switched_task
             snapshot = self._runtime_snapshot(
                 (
                     "switched",
@@ -2437,7 +2466,13 @@ def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
         execution = _Execution(model, choices)
         unsupported = _unsupported_features(model)
         units: list[DerivationUnit] = []
-        if unsupported:
+        if len(execution.schedulers) != 1:
+            execution._set_failure(
+                "invalid_derivation_line",
+                "model",
+                "a CPU derivation line requires exactly one sched_core instance",
+            )
+        elif unsupported:
             execution._set_failure(
                 "unsupported_feature",
                 "model",
@@ -2498,7 +2533,10 @@ def derive(model: ModelIR, sequence: DerivationSequence) -> DerivationResult:
                 execution.failure,
                 execution.continuation_snapshots(),
                 execution.final_values(),
-                execution.scheduler_snapshots(),
+                ()
+                if outcome == "invalid_derivation_line"
+                else execution.scheduler_snapshots(),
+                execution.current_task_ref,
             )
         )
 

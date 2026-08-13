@@ -739,6 +739,24 @@ class ModelIR:
                 )
             return False
 
+        def type_is_task(model_type: ModelType) -> bool:
+            if len(task_types) != 1:
+                return False
+            task_name = task_types[0].name
+            current = model_type.name
+            seen: set[tuple[str, ...]] = set()
+            while current in type_items and current not in seen:
+                seen.add(current)
+                if current == task_name:
+                    return True
+                base = type_items[current].base_type
+                current = (
+                    None
+                    if base is None
+                    else resolve_type_name(base, current[:-1])
+                )
+            return False
+
         user_runtime_types = tuple(
             item for item in type_items.values() if item.user_runtime
         )
@@ -844,6 +862,19 @@ class ModelIR:
                         f"sched_core type {'.'.join(model_type.name)!r} must not "
                         "declare Action::Enqueue or Action::Dequeue"
                     )
+                if type_is_task(model_type):
+                    for state in model_type.states:
+                        for transition in state.transitions:
+                            if transition.signal != ("Transition", "Resume"):
+                                continue
+                            if (
+                                state.name != ("State", "Online")
+                                or transition.target_state != ("State", "OnCpu")
+                            ):
+                                raise ModelIRValidationError(
+                                    "Task Transition::Resume is only allowed from "
+                                    "State::Online to State::OnCpu"
+                                )
                 type_state_set = set(type_state_names)
                 for state in model_type.states:
                     for transition in state.transitions:
@@ -905,9 +936,31 @@ class ModelIR:
                         "user_runtime instances are inference-owned Task children and "
                         "must not be declared as model objects"
                     )
+                if any(
+                    (_expression_access(assignment.target) or ((), ()))[0][:1]
+                    == ("CurrentTaskRef",)
+                    for reference in model_object.references
+                    for assignment in reference.assignments
+                ):
+                    raise ModelIRValidationError(
+                        "CurrentTaskRef is a read-only runtime selector and cannot be assigned"
+                    )
                 state_names = tuple(state.name for state in model_object.states)
                 state_name_set = set(state_names)
                 sched_core = object_is_sched_core(model_object)
+                if object_has_type(model_object, "Task"):
+                    for state in model_object.states:
+                        for transition in state.transitions:
+                            if transition.signal != ("Transition", "Resume"):
+                                continue
+                            if (
+                                state.name != ("State", "Online")
+                                or transition.target_state != ("State", "OnCpu")
+                            ):
+                                raise ModelIRValidationError(
+                                    "Task Transition::Resume is only allowed from "
+                                    "State::Online to State::OnCpu"
+                                )
                 idle_name = (
                     None
                     if model_object.idle_task is None
@@ -1051,7 +1104,11 @@ class ModelIR:
                                     )
                                     valid_task = (
                                         not runtime_selector
-                                        and sched_core
+                                        and dynamic_name in {
+                                            "CurrentTaskRef",
+                                            *switched_bindings,
+                                        }
+                                        and len(task_types) == 1
                                         and not signal.arguments
                                     )
                                     if not (valid_runtime or valid_task):

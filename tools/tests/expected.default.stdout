@@ -45,7 +45,7 @@ QemuVirtPlatform -> OpenSBI: emits Transition::Enable
 OpenSBI -> Kernel: emits Transition::Enable
   current state: State::Ready
   Kernel -> BootTask: drives Transition::Resume
-    current state: State::OnCpu
+    current state: State::Online
     commit state: State::OnCpu
   BootTask -> BootInitFlow: resumes Action::Enter
     current state: State::Online

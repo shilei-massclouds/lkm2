@@ -12,6 +12,9 @@ import unittest
 REPOSITORY = Path(__file__).resolve().parents[2]
 SOURCE_DIRECTORY = REPOSITORY / "tools" / "src"
 sys.path.insert(0, str(SOURCE_DIRECTORY))
+sys.path.insert(0, str(REPOSITORY / "tools" / "tests"))
+
+from _derive_harness import with_cpu_line  # noqa: E402
 
 from derive import (  # noqa: E402
     DerivationDirective,
@@ -41,7 +44,7 @@ def _source_tree(body: str) -> tuple[tempfile.TemporaryDirectory, Path]:
     (root / "main.spec").write_text(
         "spec root;\norigin root.Human;\n", encoding="utf-8"
     )
-    (root / "root.spec").write_text(body, encoding="utf-8")
+    (root / "root.spec").write_text(with_cpu_line(body), encoding="utf-8")
     return directory, root / "main.spec"
 
 
@@ -216,7 +219,7 @@ class DerivationDirectiveTests(unittest.TestCase):
         serialized = StringIO()
         dump_derivation_result(result, serialized)
         document = json.loads(serialized.getvalue())
-        self.assertEqual(document["schema_version"], 8)
+        self.assertEqual(document["schema_version"], 9)
         self.assertEqual(load_derivation_result(StringIO(serialized.getvalue())), result)
 
         missing_directives = json.loads(serialized.getvalue())

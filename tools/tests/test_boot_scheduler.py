@@ -135,8 +135,16 @@ class BootSchedulerModelTests(unittest.TestCase):
             if unit.event.target == BOOT_TASK
             and unit.event.signal == ("Transition", "Resume")
         )
-        self.assertEqual(boot_resume.state_before, ("State", "OnCpu"))
+        self.assertEqual(boot_resume.state_before, ("State", "Online"))
         self.assertEqual(boot_resume.state_after, ("State", "OnCpu"))
+        self.assertFalse(
+            any(
+                unit.event.target == BOOT_TASK
+                and unit.event.signal == ("Transition", "Resume")
+                and unit.state_before == ("State", "OnCpu")
+                for unit in units
+            )
+        )
         self.assertEqual(tuple(unit.event.target for unit in boot_resume.resumes), (BOOT_FLOW,))
 
     def test_default_derivation_runs_full_task_switch_lifecycle(self) -> None:
@@ -201,7 +209,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         scheduler = path.schedulers[0]
         self.assertEqual(scheduler.scheduler, CPU0_SCHEDULER)
         self.assertEqual(scheduler.idle_task, BOOT_TASK)
-        self.assertEqual(scheduler.current_task, KERNEL_INIT_TASK)
+        self.assertEqual(path.current_task_ref, KERNEL_INIT_TASK)
         self.assertEqual(scheduler.runq, ())
         self.assertEqual(
             tuple(continuation.root for continuation in path.continuations),

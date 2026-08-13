@@ -4,11 +4,11 @@
 
 `UserAppRuntime` 是承载用户态执行坐标的运行对象，不是 TaskFlow 或 Scheduler
 成员。类型以 `user_runtime: true` 标记；模型不声明具名 Runtime 实例，推导器在
-完整复合选择器 `CurrentTaskRef.UserAppRuntimeRef` 首次求值时为当前 Scheduler Task
+完整复合选择器 `CurrentTaskRef.UserAppRuntimeRef` 首次求值时为当前 CPU 线路 Task
 按需生成一个 owned child。因此 KernelInitTask 的运行实例身份是
 `KernelInitTask.UserAppRuntime`，而不是全局的 `KernelInitUserAppRuntime`。裸
-`CurrentTaskRef` 仍只用于 `sched_core` handler；`UserAppRuntimeRef` 是推导器虚拟
-child selector，不是模型字段。
+裸 `CurrentTaskRef` 可在任意 handler 中只读使用；`UserAppRuntimeRef` 是推导器虚拟
+owned-child selector，不是模型字段，也不通过 Scheduler 或扫描 OnCpu Task 解析。
 
 本阶段不为 Runtime 声明 `ApplicationInstance`。具体应用、exec 与地址空间等语义在
 开始模拟应用执行时另行引入。

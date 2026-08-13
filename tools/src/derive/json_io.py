@@ -1,4 +1,4 @@
-"""Strict JSON boundaries for sequence schema v3 and result schema v8."""
+"""Strict JSON boundaries for sequence schema v3 and result schema v9."""
 
 from __future__ import annotations
 
@@ -336,13 +336,12 @@ def _switch(value: object, path: str) -> DerivationSwitch:
 def _scheduler(value: object, path: str) -> DerivationScheduler:
     data = _object(
         value,
-        frozenset({"scheduler", "idle_task", "current_task", "runq"}),
+        frozenset({"scheduler", "idle_task", "runq"}),
         path,
     )
     return DerivationScheduler(
         _name(data["scheduler"], f"{path}.scheduler"),
         _name(data["idle_task"], f"{path}.idle_task"),
-        _name(data["current_task"], f"{path}.current_task"),
         _array(data["runq"], f"{path}.runq", _name),
     )
 
@@ -359,6 +358,7 @@ def _path(value: object, path: str) -> DerivationPath:
                 "continuations",
                 "final_values",
                 "schedulers",
+                "current_task_ref",
             }
         ),
         path,
@@ -375,11 +375,14 @@ def _path(value: object, path: str) -> DerivationPath:
         continuations=_array(data["continuations"], f"{path}.continuations", _continuation),
         final_values=_array(data["final_values"], f"{path}.final_values", _value),
         schedulers=_array(data["schedulers"], f"{path}.schedulers", _scheduler),
+        current_task_ref=_optional_name(
+            data["current_task_ref"], f"{path}.current_task_ref"
+        ),
     )
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v8 result document."""
+    """Load and strictly validate one schema-v9 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -506,7 +509,7 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v8 derivation result followed by a newline."""
+    """Write one canonical schema-v9 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")
@@ -541,11 +544,13 @@ def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
                 {
                     "scheduler": list(item.scheduler),
                     "idle_task": list(item.idle_task),
-                    "current_task": list(item.current_task),
                     "runq": [list(task) for task in item.runq],
                 }
                 for item in path.schedulers
             ],
+            "current_task_ref": None
+            if path.current_task_ref is None
+            else list(path.current_task_ref),
         }
         if path.failure is not None:
             data["failure"] = _failure_data(path.failure)

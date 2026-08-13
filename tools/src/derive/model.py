@@ -1,4 +1,4 @@
-"""Data model for derivation root selection and schema-v8 path results."""
+"""Data model for derivation root selection and schema-v9 path results."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from model_ir import ModelExpression, canonicalize_signal_name
 
 
 SEQUENCE_SCHEMA_VERSION = 3
-RESULT_SCHEMA_VERSION = 8
+RESULT_SCHEMA_VERSION = 9
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MODES = frozenset({"drive", "emit", "yield", "resume"})
 _UNIT_KINDS = frozenset({"root", "drive", "emit", "yield", "resume"})
@@ -28,6 +28,7 @@ _FAILURE_CODES = frozenset(
         "panic",
         "duplicate_collection_item",
         "invalid_current_task_ref",
+        "invalid_derivation_line",
         "duplicate_runq_task",
         "task_not_queued",
     }
@@ -490,13 +491,11 @@ class DerivationValue:
 class DerivationScheduler:
     scheduler: tuple[str, ...]
     idle_task: tuple[str, ...]
-    current_task: tuple[str, ...]
     runq: tuple[tuple[str, ...], ...] = ()
 
     def __post_init__(self) -> None:
         _name(self.scheduler, "scheduler.scheduler")
         _name(self.idle_task, "scheduler.idle_task")
-        _name(self.current_task, "scheduler.current_task")
         if type(self.runq) is not tuple:
             raise DerivationValidationError("scheduler.runq must be a tuple")
         for index, task in enumerate(self.runq):
@@ -515,6 +514,7 @@ class DerivationPath:
     continuations: tuple[DerivationContinuation, ...] = ()
     final_values: tuple[DerivationValue, ...] = ()
     schedulers: tuple[DerivationScheduler, ...] = ()
+    current_task_ref: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {"passed", "yielded", "cycle_closed", *_FAILURE_CODES}:
@@ -525,6 +525,8 @@ class DerivationPath:
         _tuple_of(self.continuations, DerivationContinuation, "continuations")
         _tuple_of(self.final_values, DerivationValue, "final_values")
         _tuple_of(self.schedulers, DerivationScheduler, "schedulers")
+        if self.current_task_ref is not None:
+            _name(self.current_task_ref, "current_task_ref")
         value_keys = [(item.object, item.field) for item in self.final_values]
         if len(set(value_keys)) != len(value_keys):
             raise DerivationValidationError("final_values contains a duplicate target")
@@ -590,6 +592,23 @@ class DerivationPath:
         if self.status == "panic" and self.continuations:
             raise DerivationValidationError(
                 "panic result must not retain continuation frames"
+            )
+        if self.status == "invalid_derivation_line":
+            if self.current_task_ref is not None:
+                raise DerivationValidationError(
+                    "invalid_derivation_line requires a null current_task_ref"
+                )
+            if self.schedulers:
+                raise DerivationValidationError(
+                    "invalid_derivation_line must not expose scheduler snapshots"
+                )
+        elif self.current_task_ref is None:
+            raise DerivationValidationError(
+                "a valid derivation line requires a concrete current_task_ref"
+            )
+        if self.status != "invalid_derivation_line" and len(self.schedulers) != 1:
+            raise DerivationValidationError(
+                "a valid derivation line requires exactly one scheduler"
             )
 
 

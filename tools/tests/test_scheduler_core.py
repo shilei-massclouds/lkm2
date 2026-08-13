@@ -97,6 +97,70 @@ def _compile(body: str):
 
 
 class SchedulerCoreEngineTests(unittest.TestCase):
+    def test_derivation_line_requires_exactly_one_scheduler(self) -> None:
+        directory, no_scheduler = _compile(
+            "object Computer: T {} external Human {}"
+        )
+        self.addCleanup(directory.cleanup)
+        missing = derive(no_scheduler, default_derivation_sequence(no_scheduler))
+        self.assertEqual(missing.paths[0].status, "invalid_derivation_line")
+        self.assertIsNone(missing.paths[0].current_task_ref)
+        self.assertEqual(missing.paths[0].schedulers, ())
+
+        directory2, two_schedulers = _compile(
+            BASE.replace(
+                "object Scheduler0: Scheduler { idle_task: Boot; }",
+                """object Scheduler0: Scheduler { idle_task: Boot; }
+                object Scheduler1: Scheduler { idle_task: Boot; }""",
+            )
+            + "external Human {}"
+        )
+        self.addCleanup(directory2.cleanup)
+        multiple = derive(
+            two_schedulers, default_derivation_sequence(two_schedulers)
+        )
+        self.assertEqual(multiple.paths[0].status, "invalid_derivation_line")
+        self.assertIsNone(multiple.paths[0].current_task_ref)
+        self.assertEqual(multiple.paths[0].schedulers, ())
+
+    def test_schedule_requires_line_current_to_be_on_cpu(self) -> None:
+        directory, model = _compile(
+            BASE.replace("initial_state: State::OnCpu;", "initial_state: State::Online;", 1)
+            + "external Human { drives Scheduler0.Action::Schedule; }"
+        )
+        self.addCleanup(directory.cleanup)
+        path = derive(model, default_derivation_sequence(model)).paths[0]
+        self.assertEqual(path.status, "invalid_current_task_ref")
+        self.assertEqual(path.current_task_ref[-1], "Boot")
+        self.assertEqual(path.units[0].drives, ())
+
+    def test_current_task_ref_is_readable_from_any_handler_and_as_argument(self) -> None:
+        body = BASE.replace(
+            "state State::OnCpu { transitions {",
+            """state State::OnCpu { actions { on Action::Observe { print \"current\"; } }
+            transitions {""",
+            1,
+        ).replace(
+            "object B: Task {}",
+            """object B: Task {}
+            object Queue: Collection<Task> {}
+            object Controller: T { state State::Base { actions {
+                on Action::Read { drives {
+                    CurrentTaskRef.Action::Observe;
+                    Queue.Action::Enqueue(CurrentTaskRef);
+                } }
+            } } }""",
+        )
+        directory, model = _compile(
+            body + "external Human { drives Controller.Action::Read; }"
+        )
+        self.addCleanup(directory.cleanup)
+        path = derive(model, default_derivation_sequence(model)).paths[0]
+        self.assertEqual(path.status, "passed")
+        self.assertEqual(path.units[0].drives[0].event.target[-1], "Boot")
+        queue = next(value for value in path.final_values if value.collection)
+        self.assertEqual(queue.values[0][-1], "Boot")
+
     def test_fifo_candidates_expand_to_isolated_paths_without_dequeueing_switch(self) -> None:
         directory, model = _compile(
             BASE
@@ -114,7 +178,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.assertEqual(result.status, "passed")
         self.assertEqual(len(result.paths), 2)
         contexts = tuple(path.schedulers[0] for path in result.paths)
-        self.assertEqual(tuple(item.current_task[-1] for item in contexts), ("A", "B"))
+        self.assertEqual(tuple(path.current_task_ref[-1] for path in result.paths), ("A", "B"))
         self.assertEqual(
             tuple(tuple(task[-1] for task in item.runq) for item in contexts),
             (("B",), ("A",)),
@@ -147,7 +211,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         path = result.paths[0]
 
         self.assertEqual(result.status, "passed")
-        self.assertEqual(path.schedulers[0].current_task[-1], "Boot")
+        self.assertEqual(path.current_task_ref[-1], "Boot")
         self.assertEqual(path.schedulers[0].runq, ())
         self.assertTrue(path.units[0].switches[0].idle_fallback)
 
@@ -174,7 +238,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(path.status, "unhandled_signal")
-        self.assertEqual(path.schedulers[0].current_task[-1], "Boot")
+        self.assertEqual(path.current_task_ref[-1], "Boot")
         self.assertEqual(tuple(task[-1] for task in path.schedulers[0].runq), ("B",))
         self.assertFalse(
             any(unit.event.target[-1] == "BFlow" for unit in path.units[1].resumes)
@@ -197,7 +261,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         dequeue_failure = derive(model, default_derivation_sequence(model)).paths[0]
         self.assertEqual(dequeue_failure.status, "task_not_queued")
-        self.assertEqual(dequeue_failure.schedulers[0].current_task[-1], "Boot")
+        self.assertEqual(dequeue_failure.current_task_ref[-1], "Boot")
         self.assertFalse(
             any(unit.event.target[-1] == "AFlow" for unit in _all_units(dequeue_failure.units))
         )
@@ -215,7 +279,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.addCleanup(directory2.cleanup)
         handler_failure = derive(model2, default_derivation_sequence(model2)).paths[0]
         self.assertEqual(handler_failure.status, "ensures_failed")
-        self.assertEqual(handler_failure.schedulers[0].current_task[-1], "Boot")
+        self.assertEqual(handler_failure.current_task_ref[-1], "Boot")
         self.assertFalse(
             any(unit.event.target[-1] == "AFlow" for unit in _all_units(handler_failure.units))
         )
@@ -250,22 +314,20 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         probe = flow.drives[0]
 
         self.assertEqual(result.status, "passed")
-        self.assertEqual(result.paths[0].schedulers[0].current_task[-1], "A")
+        self.assertEqual(result.paths[0].current_task_ref[-1], "A")
         self.assertEqual(flow.event.target[-1], "AFlow")
         self.assertEqual(probe.event.target[-1], "Scheduler0")
         self.assertEqual(probe.drives[0].event.target[-1], "A")
 
     def test_task_resume_starts_and_recovers_its_unique_flow(self) -> None:
         body = BASE.replace(
-            "state State::OnCpu { transitions {\n        override on Transition::Suspend -> State::Online {}",
-            """state State::OnCpu { transitions {
-        on Transition::Resume -> State::OnCpu {}
-        override on Transition::Suspend -> State::Online {}""",
+            "initial_state: State::OnCpu;",
+            "initial_state: State::Online;",
+            1,
         ).replace(
             'override on Action::Enter { print "boot"; }',
             """override on Action::Enter {
                 yields Waiter.Action::Wait;
-                print "boot resumed";
             }""",
         ).replace(
             "object A: Task {}",
@@ -277,26 +339,16 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         directory, model = _compile(
             body + """external Human { drives {
                 Boot.Transition::Resume;
-                Boot.Transition::Resume;
             } }"""
         )
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
 
-        self.assertEqual(result.status, "passed")
-        self.assertEqual(tuple(unit.event.target[-1] for unit in result.units), ("Boot", "Boot"))
+        self.assertEqual(result.status, "yielded")
+        self.assertEqual(tuple(unit.event.target[-1] for unit in result.units), ("Boot",))
         self.assertEqual(
             tuple(unit.resumes[0].event.target[-1] for unit in result.units),
-            ("BootFlow", "BootFlow"),
-        )
-        self.assertEqual(
-            tuple(
-                directive.message
-                for unit in result.units
-                for flow in unit.resumes
-                for directive in flow.directives
-            ),
-            ("boot resumed",),
+            ("BootFlow",),
         )
 
     def test_runq_rejects_duplicate_enqueue_and_missing_dequeue(self) -> None:
@@ -371,8 +423,8 @@ class SchedulerCoreEngineTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(tuple(path.status for path in result.paths), ("passed", "unhandled_signal"))
-        self.assertEqual(result.paths[0].schedulers[0].current_task[-1], "A")
-        self.assertEqual(result.paths[1].schedulers[0].current_task[-1], "Boot")
+        self.assertEqual(result.paths[0].current_task_ref[-1], "A")
+        self.assertEqual(result.paths[1].current_task_ref[-1], "Boot")
 
 
 class SchedulerCoreCompilerTests(unittest.TestCase):
@@ -391,6 +443,42 @@ class SchedulerCoreCompilerTests(unittest.TestCase):
             BASE.replace("object Scheduler0: Scheduler { idle_task: Boot; }", "object Scheduler0: Scheduler {}")
             + "external Human {}",
             "requires idle_task",
+        )
+
+    def test_task_resume_is_only_online_to_on_cpu(self) -> None:
+        self._rejects(
+            BASE.replace(
+                "override on Transition::Suspend -> State::Online {}",
+                """override on Transition::Suspend -> State::Online {}
+                on Transition::Resume -> State::OnCpu {}""",
+            )
+            + "external Human {}",
+            "Resume is only allowed from State::Online",
+        )
+        self._rejects(
+            BASE.replace(
+                "on Transition::Resume -> State::OnCpu {",
+                "on Transition::Resume -> State::Online {",
+                1,
+            )
+            + "external Human {}",
+            "Resume is only allowed from State::Online",
+        )
+
+    def test_current_task_ref_cannot_be_declared_or_assigned(self) -> None:
+        self._rejects(
+            BASE + "object CurrentTaskRef: T {} external Human {}",
+            "reserved runtime selector",
+        )
+        self._rejects(
+            BASE.replace(
+                "object B: Task {}",
+                """object B: Task { reference Bad {
+                    CurrentTaskRef = Boot;
+                } }""",
+            )
+            + "external Human {}",
+            "read-only runtime selector",
         )
 
     def test_core_actions_cannot_be_declared_by_the_model(self) -> None:

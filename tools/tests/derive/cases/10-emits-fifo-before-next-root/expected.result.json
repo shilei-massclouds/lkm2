@@ -2,6 +2,10 @@
   "paths": [
     {
       "continuations": [],
+      "current_task_ref": [
+        "root",
+        "__HarnessBootTask"
+      ],
       "facts": [],
       "final_state": [
         {
@@ -43,10 +47,52 @@
             "State",
             "Done"
           ]
+        },
+        {
+          "object": [
+            "root",
+            "__HarnessBootTask"
+          ],
+          "state": [
+            "State",
+            "Online"
+          ]
+        },
+        {
+          "object": [
+            "root",
+            "__HarnessBootTaskFlow"
+          ],
+          "state": [
+            "State",
+            "Online"
+          ]
+        },
+        {
+          "object": [
+            "root",
+            "__HarnessCpu0Scheduler"
+          ],
+          "state": [
+            "State",
+            "Online"
+          ]
         }
       ],
       "final_values": [],
-      "schedulers": [],
+      "schedulers": [
+        {
+          "idle_task": [
+            "root",
+            "__HarnessBootTask"
+          ],
+          "runq": [],
+          "scheduler": [
+            "root",
+            "__HarnessCpu0Scheduler"
+          ]
+        }
+      ],
       "status": "passed",
       "units": [
         {
@@ -242,6 +288,6 @@
       ]
     }
   ],
-  "schema_version": 8,
+  "schema_version": 9,
   "status": "passed"
 }

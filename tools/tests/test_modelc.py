@@ -860,7 +860,7 @@ class ParserAndCompilerTests(unittest.TestCase):
             },
         )
         self.assertEqual(boot_task.name[-1], "BootTask")
-        self.assertEqual(boot_task.initial_state, ("State", "OnCpu"))
+        self.assertEqual(boot_task.initial_state, ("State", "Online"))
         self.assertEqual(kernel_init_task.name[-1], "KernelInitTask")
         self.assertEqual(kernel_init_task.initial_state, ("State", "Base"))
         self.assertNotIn(

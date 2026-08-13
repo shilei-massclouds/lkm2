@@ -24,7 +24,8 @@ make clean
 当前这些目标委托给 `tools/Makefile`；后续增加其他组件时，根 Makefile 将继续负责组合各组件目标。组件特有的安装、运行和测试方式不在根 README 重复说明。
 
 当前默认推导会完成 CPU0 Scheduler 初始化，把 `KernelInitTask` 放入推导器维护的
-隐藏 runq，并完整执行 Suspend、事务式 current 切换、Resume、Dequeue 与 TaskFlow 恢复。
+隐藏 runq；推导器从其 idle Task 建立唯一 CPU0 `CurrentTaskRef`，并完整执行
+Suspend、事务式线路 current 切换、Resume、Dequeue 与 TaskFlow 恢复。
 随后 `UserRunPhase` 通过 `CurrentTaskRef.UserAppRuntimeRef` 为 `KernelInitTask` 按需
 初始化带 `user_runtime: true` 标记的 `UserAppRuntime` child。推导器把它的 abstract
 `Action::Enter` 视为用户应用黑盒，每个 episode 默认触发一次普通调度。当前
