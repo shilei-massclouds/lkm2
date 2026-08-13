@@ -88,9 +88,6 @@ OpenSBI -> Kernel: emits Transition::Enable
       switches next_task_ref = KernelInitTask
       Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
         current state: State::Online
-        KernelInitTask -> Cpu0Scheduler: drives Action::Dequeue
-          current state: State::Online
-          commit state: unchanged
         commit state: State::OnCpu
       KernelInitTask -> KernelInitFlow: resumes Action::Enter
         current state: State::Online
@@ -116,16 +113,10 @@ OpenSBI -> Kernel: emits Transition::Enable
             current state: State::Online
             Cpu0Scheduler -> KernelInitTask: drives Transition::Suspend
               current state: State::OnCpu
-              KernelInitTask -> Cpu0Scheduler: drives Action::Enqueue
-                current state: State::Online
-                commit state: unchanged
               commit state: State::Online
             switches next_task_ref = KernelInitTask
             Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
               current state: State::Online
-              KernelInitTask -> Cpu0Scheduler: drives Action::Dequeue
-                current state: State::Online
-                commit state: unchanged
               commit state: State::OnCpu
             KernelInitTask -> UserAppRuntime: resumes Action::Enter
               current state: State::Online

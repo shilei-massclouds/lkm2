@@ -213,12 +213,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         )
         self.assertEqual(
             queue_actions,
-            (
-                ("Action", "Enqueue"),
-                ("Action", "Dequeue"),
-                ("Action", "Enqueue"),
-                ("Action", "Dequeue"),
-            ),
+            (("Action", "Enqueue"),),
         )
 
     def test_default_final_scheduler_context_and_continuation(self) -> None:
@@ -238,7 +233,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(scheduler.scheduler, CPU0_SCHEDULER)
         self.assertEqual(scheduler.idle_task, BOOT_TASK)
         self.assertEqual(path.current_task_ref, KERNEL_INIT_TASK)
-        self.assertEqual(scheduler.runq, ())
+        self.assertEqual(scheduler.runq, (KERNEL_INIT_TASK,))
         self.assertEqual(
             tuple(continuation.root for continuation in path.continuations),
             (BOOT_HANDOFF, USER_RUN_PHASE),

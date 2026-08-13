@@ -1464,6 +1464,23 @@ def _expand_inheritance(
                                 type_nodes[name],
                                 "TaskFlow Action::Enter must use a Task-owned TaskFlowRef or ResumeTargetRef selector",
                             )
+                        if (
+                            is_task_type(name)
+                            and isinstance(handler, ModelTransition)
+                            and handler.signal
+                            in {
+                                ("Transition", "Suspend"),
+                                ("Transition", "Resume"),
+                            }
+                            and target_name is not None
+                            and is_sched_core_object(target_name)
+                            and signal.signal in core_actions
+                        ):
+                            raise _semantic_error(
+                                loaded[name[:-1]],
+                                type_nodes[name],
+                                "Task Suspend/Resume handlers must not call sched_core Enqueue/Dequeue",
+                            )
                         if access not in task_owned_selectors:
                             continue
                         if not is_task_type(name):
@@ -1939,6 +1956,20 @@ def _expand_inheritance(
                             and is_sched_core_object(target_name)
                             and signal.signal in core_actions
                         ):
+                            if (
+                                is_task_object(name)
+                                and isinstance(handler, ModelTransition)
+                                and handler.signal
+                                in {
+                                    ("Transition", "Suspend"),
+                                    ("Transition", "Resume"),
+                                }
+                            ):
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "Task Suspend/Resume handlers must not call sched_core Enqueue/Dequeue",
+                                )
                             if signal.arguments:
                                 raise _semantic_error(
                                     loaded[module_name],

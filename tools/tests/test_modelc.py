@@ -2097,6 +2097,36 @@ class ModelIRJSONTests(unittest.TestCase):
                 with self.assertRaises(ModelIRValidationError):
                     load_model_ir(StringIO(json.dumps(document)))
 
+    def test_task_suspend_and_resume_cannot_change_runq_in_model_ir(self) -> None:
+        def transition(document: dict, signal: str) -> dict:
+            task = _json_module(document, "objects", "task")["types"][0]
+            return next(
+                item
+                for state in task["states"]
+                for item in state["transitions"]
+                if item["signal"] == ["Transition", signal]
+            )
+
+        template = json.loads(EXPECTED_JSON)
+        enable = transition(template, "Enable")
+        queue_action = next(
+            block for block in enable["blocks"] if block["kind"] == "drives"
+        )
+
+        for signal in ("Suspend", "Resume"):
+            for action in ("Enqueue", "Dequeue"):
+                with self.subTest(signal=signal, action=action):
+                    block = json.loads(json.dumps(queue_action))
+                    block["signals"][0]["signal"] = ["Action", action]
+                    document = json.loads(EXPECTED_JSON)
+                    target = transition(document, signal)
+                    target["blocks"].append(block)
+                    with self.assertRaisesRegex(
+                        ModelIRValidationError,
+                        "Suspend/Resume handlers must not call",
+                    ):
+                        load_model_ir(StringIO(json.dumps(document)))
+
     def test_loader_normalizes_module_order(self) -> None:
         document = json.loads(EXPECTED_JSON)
         document["modules"].reverse()

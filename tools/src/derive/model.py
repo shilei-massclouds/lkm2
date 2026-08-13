@@ -30,6 +30,7 @@ _FAILURE_CODES = frozenset(
         "invalid_current_task_ref",
         "invalid_derivation_line",
         "duplicate_runq_task",
+        "idle_task_not_queueable",
         "task_not_queued",
     }
 )
@@ -502,6 +503,10 @@ class DerivationScheduler:
             _name(task, f"scheduler.runq[{index}]")
         if len(set(self.runq)) != len(self.runq):
             raise DerivationValidationError("scheduler.runq contains a duplicate Task")
+        if self.idle_task in self.runq:
+            raise DerivationValidationError(
+                "scheduler.runq must not contain the idle Task"
+            )
 
 
 @dataclass(frozen=True, slots=True)

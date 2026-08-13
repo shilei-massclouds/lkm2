@@ -29,7 +29,6 @@ type Task {
     state State::Online {
         transitions {
             on Transition::Resume -> State::OnCpu {
-                drives Cpu0Scheduler.Action::Dequeue;
                 resumes self.ResumeTargetRef.Action::Enter;
             }
         }
@@ -38,7 +37,6 @@ type Task {
     state State::OnCpu {
         transitions {
             on Transition::Suspend -> State::Online {
-                drives Cpu0Scheduler.Action::Enqueue;
             }
         }
     }
@@ -47,13 +45,6 @@ type Task {
 object BootTask: Task {
     initial_state: State::Online;
     parent: Kernel;
-
-    state State::OnCpu {
-        transitions {
-            override on Transition::Suspend -> State::Online {
-            }
-        }
-    }
 
     state State::Online {
         transitions {

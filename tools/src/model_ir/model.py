@@ -909,6 +909,25 @@ class ModelIR:
                                     )
                                 target_name = static_target(signal.target)
                                 if (
+                                    type_is_task(model_type)
+                                    and isinstance(handler, ModelTransition)
+                                    and handler.signal
+                                    in {
+                                        ("Transition", "Suspend"),
+                                        ("Transition", "Resume"),
+                                    }
+                                    and target_name is not None
+                                    and object_is_sched_core(object_items[target_name])
+                                    and signal.signal
+                                    in {
+                                        ("Action", "Enqueue"),
+                                        ("Action", "Dequeue"),
+                                    }
+                                ):
+                                    raise ModelIRValidationError(
+                                        "Task Suspend/Resume handlers must not call sched_core Enqueue/Dequeue"
+                                    )
+                                if (
                                     target_name is not None
                                     and object_has_type(
                                         object_items[target_name], "TaskFlow"
@@ -1234,6 +1253,24 @@ class ModelIR:
                                         "signal targets unknown object"
                                     )
                                 target = object_items[target_name]
+                                if (
+                                    object_has_type(model_object, "Task")
+                                    and isinstance(handler, ModelTransition)
+                                    and handler.signal
+                                    in {
+                                        ("Transition", "Suspend"),
+                                        ("Transition", "Resume"),
+                                    }
+                                    and object_is_sched_core(target)
+                                    and signal.signal
+                                    in {
+                                        ("Action", "Enqueue"),
+                                        ("Action", "Dequeue"),
+                                    }
+                                ):
+                                    raise ModelIRValidationError(
+                                        "Task Suspend/Resume handlers must not call sched_core Enqueue/Dequeue"
+                                    )
                                 if (
                                     object_has_type(target, "TaskFlow")
                                     and signal.signal == ("Action", "Enter")

@@ -14,7 +14,7 @@
 
 2. 推导工具内置的推导机制
 
-   推导工具产生若干独立的推导线路，每条线路对应于实际环境中的一个**CPU**；每条线路恰有一个 CPU-owned **Scheduler** 和一个线路级只读 `CurrentTaskRef`。Scheduler 只维护 idle/runq 和调度策略，推导器负责 current、候选分支隔离和切换提交。当前实现仅构造 CPU0 单线路，要求模型恰有一个 sched_core 实例；未来 SMP 必须按 CPU 建立独立线路和独立 Scheduler。推导的起点是外部信号，包括开机启动信号和环境信号，前者是推导的原始推动力，后者将以中断信号的形式触发推导的临时分支路径。
+   推导工具产生若干独立的推导线路，每条线路对应于实际环境中的一个**CPU**；每条线路恰有一个 CPU-owned **Scheduler** 和一个线路级只读 `CurrentTaskRef`。推导器为 Scheduler 维护 model 不可见的 idle 上下文和 runq 集合，并负责 current、全候选分支隔离和切换提交。runq 无顺序，`switches` 对其全部成员各展开一条推导线路；model 不能观测 runq，也不提供可以排除 current 或缩小候选集的策略数据结构。当前实现仅构造 CPU0 单线路，要求模型恰有一个 sched_core 实例；未来 SMP 必须按 CPU 建立独立线路和独立 Scheduler。推导的起点是外部信号，包括开机启动信号和环境信号，前者是推导的原始推动力，后者将以中断信号的形式触发推导的临时分支路径。
 
 
 
@@ -23,3 +23,8 @@
 ![调度器模型和机制](pic/调度器推导模型.svg)
 
 XXX
+
+详细边界以 [Scheduler 章程](../../charter/objects/scheduler.md) 为准。特别是，
+图中的 runq 表示推导器隐藏的 runnable Task 集合，不是 model 层队列；
+任何绘图顺序都不赋予它 FIFO 语义。runq 非空时 `switches` 只展开
+集合中的全部 Task；runq 为空时才唯一切换到 idle，idle 始终不进入 runq。

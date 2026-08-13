@@ -10,7 +10,9 @@ Online --Resume--> OnCpu --Suspend--> Online
 
 `Transition::Resume` 只能在 `State::Online` 声明或 override，且目标只能是
 `State::OnCpu`。Task 不得在 `OnCpu` 或其他状态处理 Resume，也不得用 Resume
-自迁移。普通 Task 的 Enable 与 Suspend 会 Enqueue，Resume 会 Dequeue。
+自迁移。`Online` 和 `OnCpu` 均表示 runnable；两者的区别只是是否当前在 CPU
+上运行。因此普通 Task 的 Enable 会 Enqueue，Suspend 与 Resume 均不改变隐藏
+runq membership，也不得触发 Enqueue 或 Dequeue。
 
 ## BootTask
 
@@ -26,11 +28,9 @@ episode 时等于 TaskFlowRef，有 parked `UserAppRuntime` 时指向该 Runtime
 以无参数 `resumes ...Action::Enter` 使用，不是字段，也不能声明、赋值或更新。
 Task 派生对象可以 override Resume 并省略 resumes，以显式选择 Resume 后不进入恢复点。
 
-BootTask 兼作 idle Task，因此对生命周期有两处 override：
-
-- `Online --Resume--> OnCpu` 不 Dequeue，适用于首次启动和 idle 恢复；
-- Resume override 仍显式声明 `resumes self.ResumeTargetRef.Action::Enter`；
-- `OnCpu --Suspend--> Online` 不 Enqueue。
+BootTask 兼作 runq 为空时的 idle fallback，不是普通 runq 成员。它的 Resume
+仍显式声明 `resumes self.ResumeTargetRef.Action::Enter`。“Resume 不 Dequeue、
+Suspend 不 Enqueue”不是 BootTask 的特例，而是所有 Task 的通用规则。
 
 临时模型映射：[model/objects/task.spec](../../model/objects/task.spec)
 

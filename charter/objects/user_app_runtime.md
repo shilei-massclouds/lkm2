@@ -28,15 +28,18 @@ Online 状态；只有 `Action::Enter` 表示控制到达用户态执行坐标�
 
 `Action::Enter` 在类型中是 abstract 入口，model 层不提供实现。推导器将带
 `user_runtime` 标记的实例视为内核外黑盒：每个用户态执行 episode 默认触发一次普通
-`Scheduler.Action::Schedule`，完全遵循 runq 策略。Task 被切走时，恢复点保留在
+`Scheduler.Action::Schedule`。其 `switches` 由推导器对隐藏 runq 集合的全部成员展开，
+不依赖 model 可见的调度队列或候选策略。Task 被切走时，恢复点保留在
 Runtime 入口；Task 再次被调度时回到同一用户态坐标，只确认该 episode 已恢复，不再
 触发 Schedule，也不重启 TaskFlow 或从 `UserRunPhase` 的 yield 后方继续执行。这个
 parked 坐标由 Task Resume 中 model-declared 的 `self.ResumeTargetRef` 解析得到；episode
 结束后 selector 回退到 TaskFlow（当前尚无 Runtime exit，因此默认 episode 持续 parked）。未来的
 syscall、中断或异常才会开启新的用户态 episode。
 
-当前默认启动推导中，KernelInitTask Suspend 时将自己重新加入 runq，Scheduler 因而
-再次选择 KernelInitTask，并完成 Resume 与 Dequeue。推导停在用户态黑盒边界，保留
+当前默认启动语义中，KernelInitTask 始终 runnable，因而在 Suspend 前后都是 runq
+成员。runq 中只有它时，Scheduler 的全候选展开只产生再次选择
+KernelInitTask 的线路；Suspend 和 Resume 都不改变其 membership。推导停在用户态
+黑盒边界，保留
 BootHandoff 和 UserRunPhase continuation；StartKernel 不会恢复到 BootIdle，
 `panic "boot idle repeated!"` 不可达。Runtime 在整个过程中保持 `State::Online`。
 

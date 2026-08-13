@@ -30,14 +30,11 @@ type Task {
     }
     state State::Online {
         transitions { on Transition::Resume -> State::OnCpu {
-            drives Scheduler0.Action::Dequeue;
             resumes self.ResumeTargetRef.Action::Enter;
         } }
     }
     state State::OnCpu {
-        transitions { on Transition::Suspend -> State::Online {
-            drives Scheduler0.Action::Enqueue;
-        } }
+        transitions { on Transition::Suspend -> State::Online {} }
     }
 }
 type TaskFlow {
@@ -51,9 +48,6 @@ object Boot: Task {
         override on Transition::Resume -> State::OnCpu {
             resumes self.ResumeTargetRef.Action::Enter;
         }
-    } }
-    state State::OnCpu { transitions {
-        override on Transition::Suspend -> State::Online {}
     } }
 }
 object A: Task {}
@@ -139,7 +133,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
 
     def test_current_task_ref_is_readable_from_any_handler_and_as_argument(self) -> None:
         body = BASE.replace(
-            "state State::OnCpu { transitions {",
+            "state State::OnCpu {\n        transitions {",
             """state State::OnCpu { actions { on Action::Observe { print \"current\"; } }
             transitions {""",
             1,
@@ -164,7 +158,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         queue = next(value for value in path.final_values if value.collection)
         self.assertEqual(queue.values[0][-1], "Boot")
 
-    def test_fifo_candidates_expand_to_isolated_paths_without_dequeueing_switch(self) -> None:
+    def test_runq_members_expand_once_to_isolated_paths_without_membership_change(self) -> None:
         directory, model = _compile(
             BASE
             + """
@@ -184,7 +178,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.assertEqual(tuple(path.current_task_ref[-1] for path in result.paths), ("A", "B"))
         self.assertEqual(
             tuple(tuple(task[-1] for task in item.runq) for item in contexts),
-            (("B",), ("A",)),
+            (("A", "B"), ("A", "B")),
         )
         switches = tuple(
             unit.switches[0]
@@ -218,6 +212,23 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.assertEqual(path.schedulers[0].runq, ())
         self.assertTrue(path.units[0].switches[0].idle_fallback)
 
+    def test_idle_task_cannot_be_enqueued(self) -> None:
+        body = BASE.replace(
+            "object Boot: Task {",
+            """object Boot: Task {
+            state State::OnCpu { actions { on Action::Queue {
+                drives Scheduler0.Action::Enqueue;
+            } } }""",
+        )
+        directory, model = _compile(
+            body + "external Human { drives Boot.Action::Queue; }"
+        )
+        self.addCleanup(directory.cleanup)
+        path = derive(model, default_derivation_sequence(model)).paths[0]
+
+        self.assertEqual(path.status, "idle_task_not_queueable")
+        self.assertEqual(path.schedulers[0].runq, ())
+
     def test_failed_resume_does_not_commit_current(self) -> None:
         body = BASE.replace(
             "object B: Task {}",
@@ -247,26 +258,32 @@ class SchedulerCoreEngineTests(unittest.TestCase):
             any(unit.event.target[-1] == "BFlow" for unit in path.units[1].resumes)
         )
 
-    def test_failed_dequeue_or_scheduler_validation_never_enters_flow(self) -> None:
-        double_dequeue = BASE.replace(
-            "drives Scheduler0.Action::Dequeue;",
-            """drives {
-                Scheduler0.Action::Dequeue;
-                Scheduler0.Action::Dequeue;
-            }""",
+    def test_failed_resume_or_scheduler_validation_preserves_current_and_runq(self) -> None:
+        invalid_resume = BASE.replace(
+            "object A: Task {}",
+            """object A: Task { state State::Online { transitions {
+                override on Transition::Resume -> State::OnCpu {
+                    ensures { false; }
+                    resumes self.ResumeTargetRef.Action::Enter;
+                }
+            } } }""",
         )
         directory, model = _compile(
-            double_dequeue + """external Human { drives {
+            invalid_resume + """external Human { drives {
                 A.Transition::Enable;
                 Scheduler0.Action::Schedule;
             } }"""
         )
         self.addCleanup(directory.cleanup)
-        dequeue_failure = derive(model, default_derivation_sequence(model)).paths[0]
-        self.assertEqual(dequeue_failure.status, "task_not_queued")
-        self.assertEqual(dequeue_failure.current_task_ref[-1], "Boot")
+        resume_failure = derive(model, default_derivation_sequence(model)).paths[0]
+        self.assertEqual(resume_failure.status, "ensures_failed")
+        self.assertEqual(resume_failure.current_task_ref[-1], "Boot")
+        self.assertEqual(
+            tuple(task[-1] for task in resume_failure.schedulers[0].runq),
+            ("A",),
+        )
         self.assertFalse(
-            any(unit.event.target[-1] == "AFlow" for unit in _all_units(dequeue_failure.units))
+            any(unit.event.target[-1] == "AFlow" for unit in _all_units(resume_failure.units))
         )
 
         invalid_handler = BASE.replace(
@@ -283,6 +300,10 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         handler_failure = derive(model2, default_derivation_sequence(model2)).paths[0]
         self.assertEqual(handler_failure.status, "ensures_failed")
         self.assertEqual(handler_failure.current_task_ref[-1], "Boot")
+        self.assertEqual(
+            tuple(task[-1] for task in handler_failure.schedulers[0].runq),
+            ("A",),
+        )
         self.assertFalse(
             any(unit.event.target[-1] == "AFlow" for unit in _all_units(handler_failure.units))
         )
@@ -305,7 +326,10 @@ class SchedulerCoreEngineTests(unittest.TestCase):
 
         self.assertEqual(path.status, "ensures_failed")
         self.assertEqual(path.current_task_ref[-1], "A")
-        self.assertEqual(path.schedulers[0].runq, ())
+        self.assertEqual(
+            tuple(task[-1] for task in path.schedulers[0].runq),
+            ("A",),
+        )
         self.assertEqual(resume.resumes[0].event.target[-1], "AFlow")
         self.assertEqual(resume.resumes[0].status, "ensures_failed")
 
@@ -381,7 +405,6 @@ class SchedulerCoreEngineTests(unittest.TestCase):
             "object A: Task {}",
             """object A: Task { state State::Online { transitions {
                 override on Transition::Resume -> State::OnCpu {
-                    drives Scheduler0.Action::Dequeue;
                 }
             } } }""",
         )
@@ -540,13 +563,39 @@ class SchedulerCoreCompilerTests(unittest.TestCase):
     def test_task_resume_is_only_online_to_on_cpu(self) -> None:
         self._rejects(
             BASE.replace(
-                "override on Transition::Suspend -> State::Online {}",
-                """override on Transition::Suspend -> State::Online {}
-                on Transition::Resume -> State::OnCpu {}""",
+                "state State::OnCpu {",
+                """state State::OnCpu {
+                transitions { on Transition::Resume -> State::OnCpu {} }""",
+                1,
             )
             + "external Human {}",
             "Resume is only allowed from State::Online",
         )
+
+    def test_task_suspend_and_resume_cannot_change_runq(self) -> None:
+        for transition, action in (
+            ("Suspend", "Enqueue"),
+            ("Suspend", "Dequeue"),
+            ("Resume", "Enqueue"),
+            ("Resume", "Dequeue"),
+        ):
+            with self.subTest(transition=transition, action=action):
+                marker = (
+                    "on Transition::Suspend -> State::Online {}"
+                    if transition == "Suspend"
+                    else "on Transition::Resume -> State::OnCpu {"
+                )
+                replacement = (
+                    f"on Transition::Suspend -> State::Online {{ "
+                    f"drives Scheduler0.Action::{action}; }}"
+                    if transition == "Suspend"
+                    else f"on Transition::Resume -> State::OnCpu {{ "
+                    f"drives Scheduler0.Action::{action};"
+                )
+                self._rejects(
+                    BASE.replace(marker, replacement, 1) + "external Human {}",
+                    "Suspend/Resume handlers must not call",
+                )
         self._rejects(
             BASE.replace(
                 "on Transition::Resume -> State::OnCpu {",

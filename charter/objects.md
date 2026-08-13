@@ -17,9 +17,10 @@ Scheduler 的 `idle_task` 预置 current；缺少 Scheduler 或存在多个 Sche
 把它作为 signal target 或参数读取，但 model 不得声明、赋值、更新或以其他方式改变
 它。每条候选推导路径独立维护 current；推导器只在完整调度切换成功后原子提交。
 
-model 负责声明对象生命周期、信号关系和调度策略；推导器负责 CPU 线路 current、
-候选分支隔离、切换提交以及 Task-owned 恢复 selector 的动态解析；成功 Resume 后是否
-进入恢复点由 model handler 显式声明。两层职责不得互相替代。
+model 负责声明对象生命周期、信号因果和何时发生调度切换；推导器负责
+CPU 线路 current、Scheduler 的隐藏 runnable 集合、全候选分支展开、切换提交以及
+Task-owned 恢复 selector 的动态解析。model 不声明调度优先级或候选队列；
+成功 Resume 后是否进入恢复点由 model handler 显式声明。两层职责不得互相替代。
 
 未来 SMP 必须为每个 CPU 建立独立线路及 CPU-owned Scheduler。禁止在同一线路维护多个
 current，也禁止多个 CPU 共享一个 Scheduler runtime。

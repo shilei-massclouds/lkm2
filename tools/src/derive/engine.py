@@ -1857,6 +1857,28 @@ class _Execution:
             )
         task = event.source
         if event.signal == ("Action", "Enqueue"):
+            if task == runtime.idle_task:
+                failure = self._set_failure(
+                    "idle_task_not_queueable",
+                    f"{path}.handler",
+                    "The scheduler idle Task cannot be added to the runq",
+                )
+                return self._unit(
+                    kind=kind,
+                    event=event,
+                    before=before,
+                    handler=event.signal,
+                    candidate=None,
+                    depends_on=[],
+                    drives=[],
+                    ensures=[],
+                    establishes=[],
+                    invariants=[],
+                    state_after=None,
+                    emits=[],
+                    status=failure.code,
+                    failure=failure,
+                )
             if task in runtime.runq:
                 failure = self._set_failure(
                     "duplicate_runq_task",
