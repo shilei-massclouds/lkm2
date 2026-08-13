@@ -2029,6 +2029,74 @@ class ModelIRJSONTests(unittest.TestCase):
                 ):
                     load_model_ir(StringIO(json.dumps(document)))
 
+    def test_task_owned_resume_selectors_are_strict_in_model_ir(self) -> None:
+        def resume_signal(document: dict) -> dict:
+            task = _json_module(document, "objects", "task")["types"][0]
+            online = next(
+                state
+                for state in task["states"]
+                if state["name"] == ["State", "Online"]
+            )
+            resume = next(
+                transition
+                for transition in online["transitions"]
+                if transition["signal"] == ["Transition", "Resume"]
+            )
+            return next(
+                block for block in resume["blocks"] if block["kind"] == "resumes"
+            )["signals"][0]
+
+        wrong_owner = json.loads(EXPECTED_JSON)
+        scheduler = _json_module(wrong_owner, "objects", "scheduler")["objects"][0]
+        schedule = scheduler["states"][0]["actions"][0]
+        selector_signal = json.loads(json.dumps(resume_signal(wrong_owner)))
+        selector_signal["source"] = scheduler["name"]
+        schedule["blocks"].append(
+            {
+                "kind": "resumes",
+                "expressions": [],
+                "signals": [selector_signal],
+                "deferred": None,
+                "updates": [],
+                "switches": None,
+            }
+        )
+
+        wrong_mode = json.loads(EXPECTED_JSON)
+        signal = resume_signal(wrong_mode)
+        signal["mode"] = "drive"
+        task = _json_module(wrong_mode, "objects", "task")["types"][0]
+        online = next(s for s in task["states"] if s["name"] == ["State", "Online"])
+        block = next(b for b in online["transitions"][0]["blocks"] if b["kind"] == "resumes")
+        block["kind"] = "drives"
+
+        wrong_signal = json.loads(EXPECTED_JSON)
+        resume_signal(wrong_signal)["signal"] = ["Action", "Observe"]
+
+        arguments = json.loads(EXPECTED_JSON)
+        resume_signal(arguments)["arguments"] = [
+            {
+                "kind": "identifier",
+                "value": "BootTask",
+                "children": [],
+            }
+        ]
+
+        current_task_composite = json.loads(EXPECTED_JSON)
+        target = resume_signal(current_task_composite)["target"]
+        target["children"][0]["value"] = "CurrentTaskRef"
+
+        for document in (
+            wrong_owner,
+            wrong_mode,
+            wrong_signal,
+            arguments,
+            current_task_composite,
+        ):
+            with self.subTest(document=document):
+                with self.assertRaises(ModelIRValidationError):
+                    load_model_ir(StringIO(json.dumps(document)))
+
     def test_loader_normalizes_module_order(self) -> None:
         document = json.loads(EXPECTED_JSON)
         document["modules"].reverse()

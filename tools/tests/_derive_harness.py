@@ -11,7 +11,9 @@ CPU_LINE_SCAFFOLD = r"""
 type Task {
     initial_state: State::Online;
     state State::Online { transitions {
-        on Transition::Resume -> State::OnCpu {}
+        on Transition::Resume -> State::OnCpu {
+            resumes self.ResumeTargetRef.Action::Enter;
+        }
     } }
     state State::OnCpu { transitions {
         on Transition::Suspend -> State::Online {}

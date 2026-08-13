@@ -146,8 +146,10 @@ continuation 的 `yields` 目标立即深度优先执行；未启动时 `resumes
 reference、may_change、deferred 及其它未实现表达式会明确返回
 `unsupported_feature`。当前 Computer 按顺序处理 `Preset`、`Setup` 和 `Enable`，
 依次提交到 `State::Prepared`、`State::Ready` 和 `State::Online`；Kernel 的
-Enable 提交后只驱动 `BootTask.Transition::Resume`，成功的 Task Resume 再由
-推导器启动或恢复该 Task 唯一的 parent TaskFlow。模型不得直接进入 TaskFlow。
+Enable 提交后只驱动 `BootTask.Transition::Resume`。Task Resume handler 可用
+`resumes self.ResumeTargetRef.Action::Enter` 显式决定是否进入恢复点；推导器把该动态
+selector 解析为唯一 parent TaskFlow 或 parked UserAppRuntime。`self.TaskFlowRef` 始终
+指向初始 TaskFlow；模型不得通过具名 TaskFlow 直接进入。
 `sched_core: true` 类型为实例隐式提供无参数 `Action::Enqueue` 和
 `Action::Dequeue`。这两个信号只能由 Task 对象发出，分别把 source Task 加入或
 移出实例私有的唯一 FIFO runq；重复入队和不存在的出队会产生明确失败码。
@@ -159,8 +161,8 @@ idle Task，且 switch 本身不出队，也不隐式执行 Suspend 或 Resume�
 是任意 handler 可只读使用的线路 Task selector；switches 绑定也是运行时 Task target。
 Scheduler 不拥有 current。Schedule 先验证线路 current Task 为 OnCpu，再执行
 Suspend、候选选择和 Resume；Resume、Dequeue 以及 Scheduler handler 校验全部成功后，
-推导器在进入 TaskFlow 前原子提交线路 current。上述任一步失败都保留旧 current，且不
-进入新的 TaskFlow。
+推导器先原子提交线路 current，再执行所选 Resume handler 的 model-declared deferred
+resumes。提交前失败会丢弃这些 resumes 并保留旧 current；恢复入口自身失败不回滚切换。
 结果总体状态在任一路径失败时为 `failed`，否则在存在 suspended 路径时为
 `yielded`，其余为 `passed`；CLI 对多路径按稳定顺序分段输出，并在总体失败时返回 1。
 

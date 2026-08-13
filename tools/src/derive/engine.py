@@ -191,6 +191,8 @@ class _Context:
             (item for item in self.types.values() if item.user_runtime), None
         )
         self.user_runtime_resolver = None
+        self.task_flow_resolver = None
+        self.resume_target_resolver = None
 
     def _type_name(
         self, raw: tuple[str, ...], module: tuple[str, ...]
@@ -280,6 +282,14 @@ class _Context:
                     raise _UnsupportedExpression("CurrentTaskRef:unavailable")
                 return self.current_task_resolver()
         flattened = _access(expression)
+        if flattened == (("self", "TaskFlowRef"), ("member",)):
+            if source is None or self.task_flow_resolver is None:
+                raise _UnsupportedExpression("self.TaskFlowRef:unavailable")
+            return self.task_flow_resolver(source)
+        if flattened == (("self", "ResumeTargetRef"), ("member",)):
+            if source is None or self.resume_target_resolver is None:
+                raise _UnsupportedExpression("self.ResumeTargetRef:unavailable")
+            return self.resume_target_resolver(source)
         if flattened == (
             ("CurrentTaskRef", "UserAppRuntimeRef"),
             ("member",),
@@ -587,6 +597,8 @@ class _Execution:
                 parent_object = self.context.objects[parent]
                 if self.context.object_has_type(parent_object.name, "Task"):
                     self.task_flows[parent] = model_object.name
+        self.context.task_flow_resolver = self._task_flow
+        self.context.resume_target_resolver = self._task_resume_target
 
     def _current_user_runtime(self) -> tuple[str, ...]:
         if self.current_task_ref is None or self.context.user_runtime_type is None:
@@ -811,7 +823,13 @@ class _Execution:
         parked = self.parked_user_tasks.get(task)
         if parked is not None:
             return parked
-        return self.task_flows[task]
+        return self._task_flow(task)
+
+    def _task_flow(self, task: tuple[str, ...]) -> tuple[str, ...]:
+        try:
+            return self.task_flows[task]
+        except KeyError as exc:
+            raise _UnsupportedExpression("self.TaskFlowRef:unavailable") from exc
 
     def _runtime_snapshot(self, position: tuple[object, ...]) -> tuple[object, ...]:
         continuations = tuple(
@@ -1909,7 +1927,7 @@ class _Execution:
         kind: str,
         path: str,
         *,
-        defer_task_flow: bool = False,
+        defer_resumes: bool = False,
     ) -> DerivationUnit:
         if (
             event.target in self.user_runtime_owners
@@ -1951,7 +1969,13 @@ class _Execution:
         directives: list[DerivationDirective] = []
         switches: list[DerivationSwitch] = []
         switched_task: tuple[str, ...] | None = None
-        deferred_task_resumes: list[int] = []
+        deferred_resume_units: list[
+            tuple[
+                int,
+                tuple[ModelSignal, ...],
+                dict[str, tuple[str, ...]],
+            ]
+        ] = []
         if handler is None:
             signal_kind = event.signal[0].lower()
             failure = self._set_failure(
@@ -2180,22 +2204,38 @@ class _Execution:
                         (exc.feature,),
                     )
                 )
-            defer_child_task_flow = (
+            defer_child_resumes = (
                 switched_task is not None
                 and child_event.target == switched_task
                 and child_event.signal == ("Transition", "Resume")
             )
             drive_index = len(drives)
+            deferred_signals: tuple[ModelSignal, ...] = ()
+            deferred_bindings: dict[str, tuple[str, ...]] = {}
+            if defer_child_resumes:
+                _, child_handler = self._find_handler(child_event)
+                if child_handler is not None:
+                    deferred_signals = tuple(
+                        signal
+                        for block in child_handler.blocks
+                        if block.kind == "resumes"
+                        for signal in block.signals
+                    )
+                    deferred_bindings = self._bind_handler(
+                        child_event, child_handler
+                    )
             drives.append(
                 self.run_unit(
                     child_event,
                     "drive",
                     f"{path}.drives[{drive_index}]",
-                    defer_task_flow=defer_child_task_flow,
+                    defer_resumes=defer_child_resumes,
                 )
             )
-            if defer_child_task_flow:
-                deferred_task_resumes.append(drive_index)
+            if defer_child_resumes:
+                deferred_resume_units.append(
+                    (drive_index, deferred_signals, deferred_bindings)
+                )
             if self.failure is not None:
                 return self._unit(
                     kind=kind,
@@ -2360,7 +2400,7 @@ class _Execution:
             emits.append(self.run_unit(child_event, "emit", f"{path}.emits[{index}]"))
             if self.failure is not None:
                 break
-        if self.failure is None:
+        if self.failure is None and not defer_resumes:
             for index, signal in enumerate(resume_signals):
                 child_event = self._signal_event(signal, model_object.name, bindings)
                 resumes.append(
@@ -2393,43 +2433,34 @@ class _Execution:
                 )
             else:
                 self.seen_snapshots.add(snapshot)
-                for drive_index in deferred_task_resumes:
-                    flow = self._task_resume_target(switched_task)
-                    flow_unit = self.run_unit(
-                        DerivationEvent(
-                            switched_task,
-                            flow,
-                            ("Action", "Enter"),
-                            "resume",
-                        ),
-                        "resume",
-                        f"{path}.drives[{drive_index}].resumes[0]",
-                    )
+                for (
+                    drive_index,
+                    deferred_signals,
+                    deferred_bindings,
+                ) in deferred_resume_units:
+                    resume_unit = drives[drive_index]
+                    resumed_units = list(resume_unit.resumes)
+                    for resume_index, signal in enumerate(deferred_signals):
+                        child_event = self._signal_event(
+                            signal,
+                            resume_unit.event.target,
+                            deferred_bindings,
+                        )
+                        resumed_units.append(
+                            self.run_unit(
+                                child_event,
+                                "resume",
+                                f"{path}.drives[{drive_index}].resumes[{resume_index}]",
+                            )
+                        )
+                        if self.failure is not None:
+                            break
                     drives[drive_index] = replace(
-                        drives[drive_index],
-                        resumes=drives[drive_index].resumes + (flow_unit,),
+                        resume_unit,
+                        resumes=tuple(resumed_units),
                     )
                     if self.failure is not None:
                         break
-        if (
-            self.failure is None
-            and not defer_task_flow
-            and event.signal == ("Transition", "Resume")
-            and self.context.object_has_type(event.target, "Task")
-        ):
-            flow = self._task_resume_target(event.target)
-            resumes.append(
-                self.run_unit(
-                    DerivationEvent(
-                        event.target,
-                        flow,
-                        ("Action", "Enter"),
-                        "resume",
-                    ),
-                    "resume",
-                    f"{path}.resumes[{len(resumes)}]",
-                )
-            )
         return self._unit(
             kind=kind,
             event=event,

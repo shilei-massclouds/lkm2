@@ -69,6 +69,34 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(blocks[1].switches, "next_task_ref")
         self.assertEqual(blocks[2].signals[0].target.value, "next_task_ref")
 
+    def test_task_resume_declares_its_resume_target_entry(self) -> None:
+        task_module = next(
+            item for item in self.model.modules if item.name == ("objects", "task")
+        )
+        task_type = next(item for item in task_module.types if item.name[-1] == "Task")
+        boot_task = next(item for item in task_module.objects if item.name == BOOT_TASK)
+
+        for owner in (task_type, boot_task):
+            resume = next(
+                transition
+                for state in owner.states
+                for transition in state.transitions
+                if transition.signal == ("Transition", "Resume")
+            )
+            signals = tuple(
+                signal
+                for block in resume.blocks
+                if block.kind == "resumes"
+                for signal in block.signals
+            )
+            self.assertEqual(len(signals), 1)
+            self.assertEqual(
+                _target_name(signals[0].target),
+                ("self", "ResumeTargetRef"),
+            )
+            self.assertEqual(signals[0].signal, ("Action", "Enter"))
+            self.assertEqual(signals[0].mode, "resume")
+
     def test_boot_handoff_yields_to_the_scheduler(self) -> None:
         phase = next(item for item in self.model.objects if item.name == BOOT_HANDOFF)
         signal = next(

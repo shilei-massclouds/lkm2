@@ -28,12 +28,13 @@ Online --Schedule--> validate line current → Suspend(current) → switches nex
 - `CurrentTaskRef` 是 CPU 推导线路上下文的动态只读 Task selector，不属于
   Scheduler。Schedule 使用它之前必须确认其指向的 Task 为 `State::OnCpu`；否则返回
   `invalid_current_task_ref`，不得执行 Suspend、switches 或 TaskFlow。
-- 每个 Task 必须有且仅有一个以它为 `parent` 的 TaskFlow。模型不得直接进入
-  TaskFlow；任何成功的 `Task.Transition::Resume` 都由推导器启动或恢复该唯一
-  TaskFlow。Scheduler 内的这个后置效果延迟到 current 原子提交之后执行。
+- 每个 Task 必须有且仅有一个以它为 `parent` 的 TaskFlow。具名 TaskFlow 不得被直接
+  Enter；Task handler 通过 `self.TaskFlowRef` 或 `self.ResumeTargetRef` 表达 ownership。
+  是否在 Resume 后进入恢复点由 Resume handler 的 model-declared `resumes` 决定。
 - `switches` 不隐式执行 Suspend 或 Resume。Suspend、Resume、Dequeue 以及 Schedule
-  handler 校验全部成功后才提交 current；任一失败均保留旧 current，且不进入新的
-  TaskFlow。
+  handler 校验全部成功后才提交 current；任一失败均保留旧 current，并丢弃该 Resume
+  handler 延迟的 resumes。提交后才执行这些 resumes；恢复入口失败不回滚已提交的
+  current 和调度切换。
 - `Task.Enable` 和 `Task.Suspend` 触发 Enqueue，`Task.Resume` 触发 Dequeue；
   `BootTask` 作为 idle Task，首次/idle Resume 与 Suspend override 均不操作 runq。
 - `BootSetup` 只把 Scheduler 推进 Online，并完成 `KernelInitTask` 的 Preset、Setup

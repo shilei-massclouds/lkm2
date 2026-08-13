@@ -827,6 +827,17 @@ class ModelIR:
             )
         for module in ordered:
             for model_type in module.types:
+                if model_type.name[-1] in {"TaskFlowRef", "ResumeTargetRef"}:
+                    raise ModelIRValidationError(
+                        "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared"
+                    )
+                if any(
+                    field.name in {"TaskFlowRef", "ResumeTargetRef"}
+                    for field in model_type.fields or ()
+                ):
+                    raise ModelIRValidationError(
+                        "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared"
+                    )
                 type_state_names = tuple(state.name for state in model_type.states)
                 if model_type.states and model_type.initial_state is None:
                     raise ModelIRValidationError(
@@ -875,6 +886,64 @@ class ModelIR:
                                     "Task Transition::Resume is only allowed from "
                                     "State::Online to State::OnCpu"
                                 )
+                for state in model_type.states:
+                    for handler in (*state.transitions, *state.actions):
+                        for block in handler.blocks:
+                            for signal in block.signals:
+                                target_access = _expression_access(signal.target)
+                                task_owned_selector = target_access in {
+                                    (("self", "TaskFlowRef"), ("member",)),
+                                    (("self", "ResumeTargetRef"), ("member",)),
+                                }
+                                mentions_task_selector = (
+                                    target_access is not None
+                                    and any(
+                                        segment
+                                        in {"TaskFlowRef", "ResumeTargetRef"}
+                                        for segment in target_access[0]
+                                    )
+                                )
+                                if mentions_task_selector and not task_owned_selector:
+                                    raise ModelIRValidationError(
+                                        "TaskFlowRef and ResumeTargetRef require the exact self-owned selector form"
+                                    )
+                                target_name = static_target(signal.target)
+                                if (
+                                    target_name is not None
+                                    and object_has_type(
+                                        object_items[target_name], "TaskFlow"
+                                    )
+                                    and signal.signal == ("Action", "Enter")
+                                ):
+                                    raise ModelIRValidationError(
+                                        "TaskFlow Action::Enter must use a Task-owned TaskFlowRef or ResumeTargetRef selector"
+                                    )
+                                if not task_owned_selector:
+                                    continue
+                                if not type_is_task(model_type):
+                                    raise ModelIRValidationError(
+                                        "TaskFlowRef and ResumeTargetRef are only available in Task handlers"
+                                    )
+                                if (
+                                    signal.arguments
+                                    or signal.signal != ("Action", "Enter")
+                                ):
+                                    raise ModelIRValidationError(
+                                        "Task-owned resume selectors only accept parameterless Action::Enter"
+                                    )
+                                if signal.mode != "resume" or block.kind != "resumes":
+                                    raise ModelIRValidationError(
+                                        "Task-owned resume selector Action::Enter must use resumes"
+                                    )
+                            for update in block.updates:
+                                access = _expression_access(update.target)
+                                if access is not None and any(
+                                    segment in {"TaskFlowRef", "ResumeTargetRef"}
+                                    for segment in access[0]
+                                ):
+                                    raise ModelIRValidationError(
+                                        "TaskFlowRef and ResumeTargetRef are read-only and cannot be updated"
+                                    )
                 type_state_set = set(type_state_names)
                 for state in model_type.states:
                     for transition in state.transitions:
@@ -901,7 +970,7 @@ class ModelIR:
                         and signal.signal == ("Action", "Enter")
                     ):
                         raise ModelIRValidationError(
-                            "TaskFlow Action::Enter is derived exclusively from its parent Task Transition::Resume"
+                            "TaskFlow Action::Enter must use a Task-owned TaskFlowRef or ResumeTargetRef selector"
                         )
                     if (
                         object_is_sched_core(target)
@@ -926,7 +995,11 @@ class ModelIR:
                             "external continuation entry must use resumes Action::Enter"
                         )
             for model_object in module.objects:
-                if model_object.name[-1] == "CurrentTaskRef":
+                if model_object.name[-1] in {
+                    "CurrentTaskRef",
+                    "TaskFlowRef",
+                    "ResumeTargetRef",
+                }:
                     raise ModelIRValidationError(
                         f"{model_object.name[-1]} is a reserved runtime selector and must not be "
                         "declared as an object"
@@ -937,13 +1010,31 @@ class ModelIR:
                         "must not be declared as model objects"
                     )
                 if any(
-                    (_expression_access(assignment.target) or ((), ()))[0][:1]
-                    == ("CurrentTaskRef",)
+                    any(
+                        segment in {
+                            "CurrentTaskRef",
+                            "TaskFlowRef",
+                            "ResumeTargetRef",
+                        }
+                        for segment in (
+                            _expression_access(assignment.target) or ((), ())
+                        )[0]
+                    )
                     for reference in model_object.references
                     for assignment in reference.assignments
                 ):
                     raise ModelIRValidationError(
-                        "CurrentTaskRef is a read-only runtime selector and cannot be assigned"
+                        "runtime selectors are read-only and cannot be assigned"
+                    )
+                if any(
+                    field.name in {"TaskFlowRef", "ResumeTargetRef"}
+                    for field in model_object.attrs or ()
+                ) or any(
+                    reference.name in {"TaskFlowRef", "ResumeTargetRef"}
+                    for reference in model_object.references
+                ):
+                    raise ModelIRValidationError(
+                        "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared"
                     )
                 state_names = tuple(state.name for state in model_object.states)
                 state_name_set = set(state_names)
@@ -1087,6 +1178,27 @@ class ModelIR:
                                     ("CurrentTaskRef", "UserAppRuntimeRef"),
                                     ("member",),
                                 )
+                                task_owned_selector = target_access in {
+                                    (("self", "TaskFlowRef"), ("member",)),
+                                    (("self", "ResumeTargetRef"), ("member",)),
+                                }
+                                if task_owned_selector:
+                                    if not object_has_type(model_object, "Task"):
+                                        raise ModelIRValidationError(
+                                            "TaskFlowRef and ResumeTargetRef are only available in Task handlers"
+                                        )
+                                    if (
+                                        signal.arguments
+                                        or signal.signal != ("Action", "Enter")
+                                    ):
+                                        raise ModelIRValidationError(
+                                            "Task-owned resume selectors only accept parameterless Action::Enter"
+                                        )
+                                    if signal.mode != "resume":
+                                        raise ModelIRValidationError(
+                                            "Task-owned resume selector Action::Enter must use resumes"
+                                        )
+                                    continue
                                 dynamic = runtime_selector or dynamic_name in {
                                     "CurrentTaskRef",
                                     *switched_bindings,
@@ -1127,7 +1239,7 @@ class ModelIR:
                                     and signal.signal == ("Action", "Enter")
                                 ):
                                     raise ModelIRValidationError(
-                                        "TaskFlow Action::Enter is derived exclusively from its parent Task Transition::Resume"
+                                        "TaskFlow Action::Enter must use a Task-owned TaskFlowRef or ResumeTargetRef selector"
                                     )
                                 if (
                                     object_is_sched_core(target)
@@ -1173,6 +1285,15 @@ class ModelIR:
                                     raise ModelIRValidationError(
                                         "yields is only allowed in a continuation "
                                         "Action handler"
+                                    )
+                            for update in block.updates:
+                                access = _expression_access(update.target)
+                                if access is not None and any(
+                                    segment in {"TaskFlowRef", "ResumeTargetRef"}
+                                    for segment in access[0]
+                                ):
+                                    raise ModelIRValidationError(
+                                        "TaskFlowRef and ResumeTargetRef are read-only and cannot be updated"
                                     )
         tasks = tuple(
             item for item in object_items.values() if object_has_type(item, "Task")

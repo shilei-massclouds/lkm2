@@ -30,7 +30,9 @@ Online 状态；只有 `Action::Enter` 表示控制到达用户态执行坐标�
 `user_runtime` 标记的实例视为内核外黑盒：每个用户态执行 episode 默认触发一次普通
 `Scheduler.Action::Schedule`，完全遵循 runq 策略。Task 被切走时，恢复点保留在
 Runtime 入口；Task 再次被调度时回到同一用户态坐标，只确认该 episode 已恢复，不再
-触发 Schedule，也不重启 TaskFlow 或从 `UserRunPhase` 的 yield 后方继续执行。未来的
+触发 Schedule，也不重启 TaskFlow 或从 `UserRunPhase` 的 yield 后方继续执行。这个
+parked 坐标由 Task Resume 中 model-declared 的 `self.ResumeTargetRef` 解析得到；episode
+结束后 selector 回退到 TaskFlow（当前尚无 Runtime exit，因此默认 episode 持续 parked）。未来的
 syscall、中断或异常才会开启新的用户态 episode。
 
 当前默认启动推导中，KernelInitTask Suspend 时将自己重新加入 runq，Scheduler 因而

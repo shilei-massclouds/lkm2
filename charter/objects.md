@@ -18,7 +18,8 @@ Scheduler 的 `idle_task` 预置 current；缺少 Scheduler 或存在多个 Sche
 它。每条候选推导路径独立维护 current；推导器只在完整调度切换成功后原子提交。
 
 model 负责声明对象生命周期、信号关系和调度策略；推导器负责 CPU 线路 current、
-候选分支隔离、切换提交以及成功 Resume 后进入 TaskFlow。两层职责不得互相替代。
+候选分支隔离、切换提交以及 Task-owned 恢复 selector 的动态解析；成功 Resume 后是否
+进入恢复点由 model handler 显式声明。两层职责不得互相替代。
 
 未来 SMP 必须为每个 CPU 建立独立线路及 CPU-owned Scheduler。禁止在同一线路维护多个
 current，也禁止多个 CPU 共享一个 Scheduler runtime。

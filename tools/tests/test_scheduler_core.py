@@ -31,6 +31,7 @@ type Task {
     state State::Online {
         transitions { on Transition::Resume -> State::OnCpu {
             drives Scheduler0.Action::Dequeue;
+            resumes self.ResumeTargetRef.Action::Enter;
         } }
     }
     state State::OnCpu {
@@ -47,7 +48,9 @@ type TaskFlow {
 object Boot: Task {
     initial_state: State::OnCpu;
     state State::Online { transitions {
-        override on Transition::Resume -> State::OnCpu {}
+        override on Transition::Resume -> State::OnCpu {
+            resumes self.ResumeTargetRef.Action::Enter;
+        }
     } }
     state State::OnCpu { transitions {
         override on Transition::Suspend -> State::Online {}
@@ -284,6 +287,28 @@ class SchedulerCoreEngineTests(unittest.TestCase):
             any(unit.event.target[-1] == "AFlow" for unit in _all_units(handler_failure.units))
         )
 
+    def test_failed_resume_target_entry_keeps_committed_current(self) -> None:
+        body = BASE.replace(
+            'override on Action::Enter { print "a"; }',
+            'override on Action::Enter { ensures { false; } }',
+        )
+        directory, model = _compile(
+            body + """external Human { drives {
+                A.Transition::Enable;
+                Scheduler0.Action::Schedule;
+            } }"""
+        )
+        self.addCleanup(directory.cleanup)
+        path = derive(model, default_derivation_sequence(model)).paths[0]
+        schedule = path.units[-1]
+        resume = schedule.drives[-1]
+
+        self.assertEqual(path.status, "ensures_failed")
+        self.assertEqual(path.current_task_ref[-1], "A")
+        self.assertEqual(path.schedulers[0].runq, ())
+        self.assertEqual(resume.resumes[0].event.target[-1], "AFlow")
+        self.assertEqual(resume.resumes[0].status, "ensures_failed")
+
     def test_task_resume_enters_flow_after_current_switch_commits(self) -> None:
         body = BASE.replace(
             "object A: Task {}",
@@ -349,6 +374,52 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.assertEqual(
             tuple(unit.resumes[0].event.target[-1] for unit in result.units),
             ("BootFlow",),
+        )
+
+    def test_task_resume_without_model_declared_resumes_does_not_enter_flow(self) -> None:
+        body = BASE.replace(
+            "object A: Task {}",
+            """object A: Task { state State::Online { transitions {
+                override on Transition::Resume -> State::OnCpu {
+                    drives Scheduler0.Action::Dequeue;
+                }
+            } } }""",
+        )
+        directory, model = _compile(
+            body + """external Human { drives {
+                A.Transition::Enable;
+                Scheduler0.Action::Schedule;
+            } }"""
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+        resume = result.units[-1].drives[-1]
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.paths[0].current_task_ref[-1], "A")
+        self.assertEqual(resume.resumes, ())
+        self.assertFalse(
+            any(unit.event.target[-1] == "AFlow" for unit in _all_units(result.units))
+        )
+
+    def test_task_flow_ref_is_a_static_initial_entry_selector(self) -> None:
+        body = BASE.replace(
+            "self.ResumeTargetRef.Action::Enter",
+            "self.TaskFlowRef.Action::Enter",
+        )
+        directory, model = _compile(
+            body + """external Human { drives {
+                A.Transition::Enable;
+                Scheduler0.Action::Schedule;
+            } }"""
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(
+            result.units[-1].drives[-1].resumes[0].event.target[-1],
+            "AFlow",
         )
 
     def test_runq_rejects_duplicate_enqueue_and_missing_dequeue(self) -> None:
@@ -426,6 +497,27 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.assertEqual(result.paths[0].current_task_ref[-1], "A")
         self.assertEqual(result.paths[1].current_task_ref[-1], "Boot")
 
+    def test_each_scheduler_candidate_resolves_its_own_resume_target(self) -> None:
+        directory, model = _compile(
+            BASE + """external Human { drives {
+                A.Transition::Enable;
+                B.Transition::Enable;
+                Scheduler0.Action::Schedule;
+            } }"""
+        )
+        self.addCleanup(directory.cleanup)
+        result = derive(model, default_derivation_sequence(model))
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(
+            tuple(path.current_task_ref[-1] for path in result.paths),
+            ("A", "B"),
+        )
+        self.assertEqual(
+            tuple(path.units[-1].drives[-1].resumes[0].event.target[-1] for path in result.paths),
+            ("AFlow", "BFlow"),
+        )
+
 
 class SchedulerCoreCompilerTests(unittest.TestCase):
     def _rejects(self, body: str, message: str) -> None:
@@ -478,7 +570,7 @@ class SchedulerCoreCompilerTests(unittest.TestCase):
                 } }""",
             )
             + "external Human {}",
-            "read-only runtime selector",
+            "read-only",
         )
 
     def test_core_actions_cannot_be_declared_by_the_model(self) -> None:
@@ -545,7 +637,7 @@ class SchedulerCoreCompilerTests(unittest.TestCase):
             "unexpected token 'selects'",
         )
 
-    def test_model_authored_task_flow_entry_is_always_rejected(self) -> None:
+    def test_named_task_flow_entry_is_always_rejected(self) -> None:
         for mode in ("drives", "emits", "resumes"):
             with self.subTest(source="handler", mode=mode):
                 controller = BASE.replace(
@@ -557,13 +649,103 @@ class SchedulerCoreCompilerTests(unittest.TestCase):
                 )
                 self._rejects(
                     controller + "external Human { drives Controller.Action::Enter; }",
-                    "TaskFlow Action::Enter is derived exclusively|continuation entry|resumes must",
+                    "TaskFlow Action::Enter|continuation entry|resumes must",
                 )
 
             with self.subTest(source="external", mode=mode):
                 self._rejects(
                     BASE + f"external Human {{ {mode} AFlow.Action::Enter; }}",
-                    "TaskFlow Action::Enter is derived exclusively|continuation entry|resumes must",
+                    "TaskFlow Action::Enter|continuation entry|resumes must",
+                )
+
+    def test_task_owned_resume_selectors_are_strict(self) -> None:
+        valid = BASE + "external Human {}"
+        for selector in ("TaskFlowRef", "ResumeTargetRef"):
+            with self.subTest(selector=selector, case="non_task"):
+                self._rejects(
+                    valid.replace(
+                        "object B: Task {}",
+                        f"""object B: Task {{}}
+                        object Controller: T {{ state State::Base {{ actions {{
+                            on Action::Bad {{ resumes self.{selector}.Action::Enter; }}
+                        }} }} }}""",
+                    ),
+                    "only available in Task handlers",
+                )
+            for mode in ("drives", "emits", "yields"):
+                with self.subTest(selector=selector, mode=mode):
+                    self._rejects(
+                        valid.replace(
+                            "resumes self.ResumeTargetRef.Action::Enter;",
+                            f"{mode} self.{selector}.Action::Enter;",
+                            1,
+                        ),
+                        "must use resumes|yields is only allowed",
+                    )
+            for suffix in (
+                "Transition::Resume",
+                "Action::Observe",
+                "Action::Enter(Boot)",
+            ):
+                with self.subTest(selector=selector, suffix=suffix):
+                    self._rejects(
+                        valid.replace(
+                            "self.ResumeTargetRef.Action::Enter",
+                            f"self.{selector}.{suffix}",
+                            1,
+                        ),
+                        "only accept parameterless Action::Enter|do not accept arguments",
+                    )
+
+        self._rejects(
+            valid.replace(
+                "self.ResumeTargetRef.Action::Enter",
+                "CurrentTaskRef.ResumeTargetRef.Action::Enter",
+                1,
+            ),
+            "not in scope|unknown object|dynamic signal target|resolvable",
+        )
+
+    def test_task_owned_resume_selectors_cannot_be_declared_or_written(self) -> None:
+        valid = BASE + "external Human {}"
+        for selector in ("TaskFlowRef", "ResumeTargetRef"):
+            with self.subTest(selector=selector, case="object"):
+                self._rejects(
+                    valid + f"object {selector}: T {{}}",
+                    "reserved read-only Task selectors|reserved runtime selector",
+                )
+            with self.subTest(selector=selector, case="field"):
+                self._rejects(
+                    valid.replace(
+                        "object B: Task {}",
+                        f"object B: Task {{ attrs {{ {selector}: Task; }} }}",
+                    ),
+                    "cannot be declared",
+                )
+            with self.subTest(selector=selector, case="reference"):
+                self._rejects(
+                    valid.replace(
+                        "object B: Task {}",
+                        f"object B: Task {{ reference {selector} {{ self.bad = Boot; }} }}",
+                    ),
+                    "cannot be declared",
+                )
+            with self.subTest(selector=selector, case="assignment"):
+                self._rejects(
+                    valid.replace(
+                        "object B: Task {}",
+                        f"object B: Task {{ reference Bad {{ self.{selector} = Boot; }} }}",
+                    ),
+                    "read-only",
+                )
+            with self.subTest(selector=selector, case="update"):
+                self._rejects(
+                    valid.replace(
+                        "resumes self.ResumeTargetRef.Action::Enter;",
+                        f"updates {{ self.{selector} = Boot; }}",
+                        1,
+                    ),
+                    "read-only",
                 )
 
 

@@ -249,11 +249,24 @@ def _signal(
             node,
             f"switches binding {raw_target[0]!r} is not in scope before its declaration",
         )
+    task_owned_selector = (
+        raw_target in {
+            ("self", "TaskFlowRef"),
+            ("self", "ResumeTargetRef"),
+        }
+        and operations[:-2] == ["member"]
+    )
     if len(raw_target) == 1 and raw_target[0] in {
         *bindings,
         "CurrentTaskRef",
     }:
         target = ModelExpression("identifier", raw_target[0])
+    elif task_owned_selector:
+        target = ModelExpression(
+            "member",
+            raw_target[1],
+            (ModelExpression("identifier", "self"),),
+        )
     elif (
         raw_target == ("CurrentTaskRef", "UserAppRuntimeRef")
         and operations[:-2] == ["member"]
@@ -1087,7 +1100,11 @@ def _expand_inheritance(
         module = loaded[source_module.name]
         for raw in source_module.objects:
             node = object_nodes[raw.name]
-            if raw.name[-1] == "CurrentTaskRef":
+            if raw.name[-1] in {
+                "CurrentTaskRef",
+                "TaskFlowRef",
+                "ResumeTargetRef",
+            }:
                 raise _semantic_error(
                     module,
                     node,
@@ -1190,6 +1207,11 @@ def _expand_inheritance(
         name for name, model_object in expanded_objects.items() if model_object.continuation
     }
 
+    task_owned_selectors = (
+        (["self", "TaskFlowRef"], ["member"]),
+        (["self", "ResumeTargetRef"], ["member"]),
+    )
+
     object_names = set(expanded_objects)
 
     def resolve_object_expression(
@@ -1213,6 +1235,8 @@ def _expand_inheritance(
     def validate_continuation_target(
         module: LoadedModule, owner: Tree, signal: ModelSignal
     ) -> None:
+        if _flatten_access(signal.target) in task_owned_selectors:
+            return
         target_name = resolve_object_expression(signal.target, module.name)
         if target_name is None:
             if signal.mode == "resume":
@@ -1409,6 +1433,68 @@ def _expand_inheritance(
 
     core_actions = {("Action", "Enqueue"), ("Action", "Dequeue")}
     for name, model_type in expanded_types.items():
+        for state in model_type.states:
+            for handler in (*state.transitions, *state.actions):
+                for block in handler.blocks:
+                    for signal in block.signals:
+                        access = _flatten_access(signal.target)
+                        mentions_task_selector = (
+                            access is not None
+                            and any(
+                                segment in {"TaskFlowRef", "ResumeTargetRef"}
+                                for segment in access[0]
+                            )
+                        )
+                        if mentions_task_selector and access not in task_owned_selectors:
+                            raise _semantic_error(
+                                loaded[name[:-1]],
+                                type_nodes[name],
+                                "TaskFlowRef and ResumeTargetRef require the exact self-owned selector form",
+                            )
+                        target_name = resolve_object_expression(
+                            signal.target, name[:-1]
+                        )
+                        if (
+                            target_name is not None
+                            and is_task_flow_object(target_name)
+                            and signal.signal == ("Action", "Enter")
+                        ):
+                            raise _semantic_error(
+                                loaded[name[:-1]],
+                                type_nodes[name],
+                                "TaskFlow Action::Enter must use a Task-owned TaskFlowRef or ResumeTargetRef selector",
+                            )
+                        if access not in task_owned_selectors:
+                            continue
+                        if not is_task_type(name):
+                            raise _semantic_error(
+                                loaded[name[:-1]],
+                                type_nodes[name],
+                                "TaskFlowRef and ResumeTargetRef are only available in Task handlers",
+                            )
+                        if signal.arguments or signal.signal != ("Action", "Enter"):
+                            raise _semantic_error(
+                                loaded[name[:-1]],
+                                type_nodes[name],
+                                "Task-owned resume selectors only accept parameterless Action::Enter",
+                            )
+                        if signal.mode != "resume" or block.kind != "resumes":
+                            raise _semantic_error(
+                                loaded[name[:-1]],
+                                type_nodes[name],
+                                "Task-owned resume selector Action::Enter must use resumes",
+                            )
+                    for update in block.updates:
+                        access = _flatten_access(update.target)
+                        if access is not None and any(
+                            segment in {"TaskFlowRef", "ResumeTargetRef"}
+                            for segment in access[0]
+                        ):
+                            raise _semantic_error(
+                                loaded[name[:-1]],
+                                type_nodes[name],
+                                "TaskFlowRef and ResumeTargetRef are read-only and cannot be updated",
+                            )
         if not is_task_type(name):
             continue
         for state in model_type.states:
@@ -1427,6 +1513,21 @@ def _expand_inheritance(
                     )
     for name, model_type in raw_types.items():
         effective = expanded_types[name]
+        if name[-1] in {"TaskFlowRef", "ResumeTargetRef"}:
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared",
+            )
+        if any(
+            field.name in {"TaskFlowRef", "ResumeTargetRef"}
+            for field in model_type.fields or ()
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared",
+            )
         if not effective.sched_core:
             continue
         if any(
@@ -1444,15 +1545,31 @@ def _expand_inheritance(
         owner = object_nodes[name]
         sched_core = is_sched_core_object(name)
         if any(
+            field.name in {"TaskFlowRef", "ResumeTargetRef"}
+            for field in model_object.attrs or ()
+        ) or any(
+            reference.name in {"TaskFlowRef", "ResumeTargetRef"}
+            for reference in model_object.references
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                owner,
+                "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared",
+            )
+        if any(
             (_flatten_access(assignment.target) or ([], []))[0][:1]
-            == ["CurrentTaskRef"]
+            in (["CurrentTaskRef"], ["TaskFlowRef"], ["ResumeTargetRef"], ["self"])
+            and any(
+                segment in {"CurrentTaskRef", "TaskFlowRef", "ResumeTargetRef"}
+                for segment in (_flatten_access(assignment.target) or ([], []))[0]
+            )
             for reference in model_object.references
             for assignment in reference.assignments
         ):
             raise _semantic_error(
                 loaded[name[:-1]],
                 owner,
-                "CurrentTaskRef is a read-only runtime selector and cannot be assigned",
+                "runtime selectors are read-only and cannot be assigned",
             )
         if is_task_object(name):
             for state in model_object.states:
@@ -1540,6 +1657,18 @@ def _expand_inheritance(
         fields: dict[str, ModelField],
     ) -> TypeKey | None:
         access = _flatten_access(expression)
+        if access in task_owned_selectors:
+            if source is None or not is_task_object(source):
+                raise _semantic_error(
+                    loaded[module_name],
+                    loaded[module_name].tree,
+                    "TaskFlowRef and ResumeTargetRef are only available in Task handlers",
+                )
+            if access[0][-1] == "TaskFlowRef":
+                return (task_flow_types[0], ())
+            # ResumeTargetRef may dynamically denote either the TaskFlow or a
+            # parked user_runtime. Its signal surface is validated specially.
+            return (task_flow_types[0], ())
         if access == (
             ["CurrentTaskRef", "UserAppRuntimeRef"],
             ["member"],
@@ -1626,6 +1755,14 @@ def _expand_inheritance(
         fields: dict[str, ModelField],
         owner: Tree,
     ) -> None:
+        if _flatten_access(signal.target) in task_owned_selectors:
+            if signal.arguments:
+                raise _semantic_error(
+                    loaded[module_name],
+                    owner,
+                    "Task-owned resume selectors do not accept arguments",
+                )
+            return
         target_name = resolve_object_expression(signal.target, module_name)
         if target_name is None:
             if signal.arguments:
@@ -1733,6 +1870,26 @@ def _expand_inheritance(
                         continue
                     for signal in block.signals:
                         flattened_target = _flatten_access(signal.target)
+                        task_selector = flattened_target in task_owned_selectors
+                        if task_selector:
+                            if not is_task_object(name):
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "TaskFlowRef and ResumeTargetRef are only available in Task handlers",
+                                )
+                            if signal.arguments or signal.signal != ("Action", "Enter"):
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "Task-owned resume selectors only accept parameterless Action::Enter",
+                                )
+                            if signal.mode != "resume":
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "Task-owned resume selector Action::Enter must use resumes",
+                                )
                         runtime_selector = flattened_target == (
                             ["CurrentTaskRef", "UserAppRuntimeRef"],
                             ["member"],
@@ -1775,7 +1932,7 @@ def _expand_inheritance(
                             raise _semantic_error(
                                 loaded[module_name],
                                 owner,
-                                "TaskFlow Action::Enter is derived exclusively from its parent Task Transition::Resume",
+                                "TaskFlow Action::Enter must use a Task-owned TaskFlowRef or ResumeTargetRef selector",
                             )
                         if (
                             target_name is not None
@@ -1799,6 +1956,15 @@ def _expand_inheritance(
                         )
                     for update in block.updates:
                         access = _flatten_access(update.target)
+                        if access is not None and any(
+                            segment in {"TaskFlowRef", "ResumeTargetRef"}
+                            for segment in access[0]
+                        ):
+                            raise _semantic_error(
+                                loaded[module_name],
+                                owner,
+                                "TaskFlowRef and ResumeTargetRef are read-only and cannot be updated",
+                            )
                         if (
                             access is None
                             or access[0][:1] != ["self"]
@@ -1839,6 +2005,12 @@ def _expand_inheritance(
                 and str(item.children[0]) == external.name[-1]
             )
             for signal in external.signals:
+                if _flatten_access(signal.target) in task_owned_selectors:
+                    raise _semantic_error(
+                        owner_module,
+                        owner,
+                        "TaskFlowRef and ResumeTargetRef are only available in Task handlers",
+                    )
                 target_name = resolve_object_expression(signal.target, module.name)
                 if (
                     target_name is not None
@@ -1848,7 +2020,7 @@ def _expand_inheritance(
                     raise _semantic_error(
                         owner_module,
                         owner,
-                        "TaskFlow Action::Enter is derived exclusively from its parent Task Transition::Resume",
+                        "TaskFlow Action::Enter must use a Task-owned TaskFlowRef or ResumeTargetRef selector",
                     )
                 if (
                     target_name is not None
