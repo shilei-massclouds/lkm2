@@ -32,6 +32,21 @@ BootTask 兼作 runq 为空时的 idle fallback，不是普通 runq 成员。它
 仍显式声明 `resumes self.ResumeTargetRef.Action::Enter`。“Resume 不 Dequeue、
 Suspend 不 Enqueue”不是 BootTask 的特例，而是所有 Task 的通用规则。
 
+## CPU 绑定与 Exit
+
+每个 TaskFlow 保存当前 CPU 的 mutable `cpu_ref`。BootInitFlow 在最初入口显式绑定
+BootCPU；后续调度切换提交时由推导器绑定 next TaskFlow。`CurrentCPU` 只能通过当前
+TaskFlow 解引用，不扫描 `OnCpu` Task。
+
+`Task.Action::Exit(status)` 是不返回的终端接口。Task 类型提供明确的默认未实现
+终端；`KernelInitTask` override Linux 全局 init 保护并 panic：
+
+```text
+Attempted to kill init!
+```
+
+panic 前 Runtime、TaskFlow 与 Task 保持真实状态，不伪造销毁、Suspend 或 runq 变化。
+
 临时模型映射：[model/objects/task.spec](../../model/objects/task.spec)
 
 章程与模型的关系见[Objects 章程](../objects.md)。

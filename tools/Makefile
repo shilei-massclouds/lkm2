@@ -14,7 +14,7 @@ RUN_TARGET_QUIET :=
 endif
 
 repo_path = $(if $(filter /%,$(strip $(1))),$(strip $(1)),$(REPOSITORY)/$(strip $(1)))
-DERIVE_ARGS = $(if $(strip $(MODEL)),--model "$(call repo_path,$(MODEL))",$(if $(strip $(SEQUENCE)),--sequence "$(call repo_path,$(SEQUENCE))",))
+DERIVE_ARGS = $(if $(strip $(MODEL)),--model "$(call repo_path,$(MODEL))",$(if $(strip $(SEQUENCE)),--sequence "$(call repo_path,$(SEQUENCE))",)) $(if $(strip $(USER_RUNTIME_SIGNALS)),--user-runtime-signals "$(call repo_path,$(USER_RUNTIME_SIGNALS))",)
 
 PATH := $(PYTHON_BIN_DIR):$(PATH)
 export PATH
@@ -68,7 +68,7 @@ help:
 	@echo "  all    Compile-check the Python tools (default)"
 	@echo "  setup  Create tools/.venv and install tools editable"
 	@echo "  build  Compile-check tools and cache Model IR"
-	@echo "  run    Run tools/bin/derive (MODEL=... or SEQUENCE=..., not both)"
+	@echo "  run    Run tools/bin/derive (MODEL=... or SEQUENCE=..., USER_RUNTIME_SIGNALS=...)"
 	@echo "  test   Run the unittest suite"
 	@echo "  test-derive  Run derive unit and golden smoke tests"
 	@echo "  test-smoke   Run only derive golden smoke cases"

@@ -27,29 +27,24 @@ Online --Enter--> 用户态执行断点
 Online 状态；只有 `Action::Enter` 表示控制到达用户态执行坐标。
 
 `Action::Enter` 在类型中是 abstract 入口，model 层不提供实现。推导器将带
-`user_runtime` 标记的实例视为内核外黑盒：每个用户态执行 episode 默认触发一次普通
-`Scheduler.Action::Schedule`。其 `switches` 由推导器对隐藏 runq 集合的全部成员展开，
-不依赖 model 可见的调度队列或候选策略。Task 被切走时，恢复点保留在
-Runtime 入口；Task 再次被调度时回到同一用户态坐标，只确认该 episode 已恢复，不再
-触发 Schedule，也不重启 TaskFlow 或从 `UserRunPhase` 的 yield 后方继续执行。这个
-parked 坐标由 Task Resume 中 model-declared 的 `self.ResumeTargetRef` 解析得到；episode
-结束后 selector 回退到 TaskFlow（当前尚无 Runtime exit，因此默认 episode 持续 parked）。未来的
-syscall、中断或异常才会开启新的用户态 episode。
+`user_runtime` 标记的实例视为内核外黑盒，并在该入口消费实例私有 signal cursor 的
+下一行。没有信号或程序耗尽时不调用 CPU 或 Scheduler，用户态坐标保持 parked，路径
+结果为 `yielded`。可返回 EventFlow 完成后仍恢复同一 Runtime 坐标；terminal exit
+不恢复。
 
-当前默认启动语义中，KernelInitTask 始终 runnable，因而在 Suspend 前后都是 runq
-成员。runq 中只有它时，Scheduler 的全候选展开只产生再次选择
-KernelInitTask 的线路；Suspend 和 Resume 都不改变其 membership。推导停在用户态
-黑盒边界，保留
-BootHandoff 和 UserRunPhase continuation；StartKernel 不会恢复到 BootIdle，
-`panic "boot idle repeated!"` 不可达。Runtime 在整个过程中保持 `State::Online`。
+当前默认内存程序是 `syscall.exit <local> 0`。KernelInitTask 在进入用户态前已经是
+`OnCpu` 且仍在 runq；exit EventFlow 不执行 Task Suspend/Resume 或 Schedule，因而
+这两个事实保持不变。PID 1 路径最终 panic，Runtime 仍保持 `State::Online`。
 
 ## trap 与 exit 边界
 
-未来由推导器为该黑盒入口增加 syscall、异常和中断分支，并从用户态坐标进入对应
-trap 入口。普通 syscall 可以在处理完成后返回同一用户态坐标；exit 将终止 Runtime，
-并由异常或中断入口进入 Flow/Task 回收链。
+输入信号分为并列的 `interrupt.*`、`exception.*` 与 `syscall.*`。首版只执行
+`syscall.exit(status)`；其他合法信号在消费时返回 `unsupported_runtime_signal`。
+信号先路由到目标 CPU，再由 CPU 创建 owned `SyscallExitFlow<N>` 并进入
+`CurrentTaskRef.Action::Exit(status)`。syscall 只能投递到 Runtime 所属 TaskFlow
+`cpu_ref` 指向的本地 CPU。
 
-当前模型不实现用户指令、syscall、exit、Runtime Disable/Cleanup 或 Task 回收。
+当前不实现用户指令、普通 syscall 返回、Runtime Disable/Cleanup 或 Task 回收。
 
 临时模型映射：[model/objects/user_app_runtime.spec](../../model/objects/user_app_runtime.spec)
 

@@ -517,7 +517,7 @@ boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
 EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.spec"))(
-    schema_version=10,
+    schema_version=11,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -2135,8 +2135,10 @@ class ModelIRJSONTests(unittest.TestCase):
             tuple(module.name for module in model.modules),
             (
                 ("flows",),
+                ("flows", "syscall_exit_flow"),
                 ("flows", "task_flow"),
                 ("objects",),
+                ("objects", "cpu"),
                 ("objects", "scheduler"),
                 ("objects", "task"),
                 ("objects", "user_app_runtime"),
@@ -2196,9 +2198,9 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
             legacy_selects_field,
-            EXPECTED_JSON.replace('"schema_version": 10', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 11', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":10,"schema_version":10}',
+            '{"schema_version":11,"schema_version":11}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -2207,7 +2209,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=10,
+            schema_version=11,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -2215,14 +2217,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=10,
+                schema_version=11,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=10,
+                schema_version=11,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

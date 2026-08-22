@@ -4,12 +4,14 @@
 
 `objects` 表达内核执行期间可寻址、具有独立生命周期的运行对象。对象类型可以定义共同协议，但具体运行状态必须属于明确的对象实例，不能因为推导器使用中央事件循环而退化成隐含的全局内核单例。
 
-当前模型只覆盖 BootCPU/逻辑 CPU0 所需的最小对象切片。后续增加 CPU 与拓扑模型时，必须保持每 CPU 对象的独立身份和状态。
+当前模型只覆盖 BootCPU/逻辑 CPU0 所需的最小对象切片。CPU 已具有明确对象身份和
+逻辑编号；后续增加拓扑时必须保持每 CPU 对象的独立身份和状态。
 
 ## CPU 推导线路
 
 公开推导执行必须先建立一条 CPU 推导线路。当前单 CPU 阶段中，一条有效线路恰有一个
-逻辑 CPU、一个 `sched_core` Scheduler 和一个推导器 owned `CurrentTaskRef`。线路从
+逻辑 CPU、一个 CPU-owned `sched_core` Scheduler 和一个推导器 owned
+`CurrentTaskRef`。线路从
 Scheduler 的 `idle_task` 预置 current；缺少 Scheduler 或存在多个 Scheduler 都是
 线路构造失败，而不是合法运行状态。
 
@@ -28,6 +30,7 @@ current，也禁止多个 CPU 共享一个 Scheduler runtime。
 ## 当前映射
 
 - [Scheduler 章程](objects/scheduler.md)
+- [CPU 与 EventFlow 章程](objects/cpu.md)
 - [Task 与 BootTask 章程](objects/task.md)
 - [UserAppRuntime 章程](objects/user_app_runtime.md)
 - 临时模型映射：[model/objects.spec](../model/objects.spec)

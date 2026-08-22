@@ -1,0 +1,2 @@
+# Equivalent to the in-memory default program.
+syscall.exit <local> 0

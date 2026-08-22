@@ -1534,7 +1534,7 @@ class DerivationJSONTests(unittest.TestCase):
         dump_derivation_result(result, output)
         self.assertEqual(load_derivation_result(StringIO(output.getvalue())), result)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 9)
+        self.assertEqual(document["schema_version"], 10)
         self.assertNotIn("failure", document)
 
         startup_event = json.loads(output.getvalue())
@@ -1567,7 +1567,7 @@ class DerivationJSONTests(unittest.TestCase):
         missing = dict(document)
         del missing["paths"]
         invalid_documents.append(json.dumps(missing))
-        invalid_documents.append('{"schema_version":9,"status":"passed","status":"passed"}')
+        invalid_documents.append('{"schema_version":10,"status":"passed","status":"passed"}')
         old_result = dict(document)
         old_result["schema_version"] = 8
         invalid_documents.append(json.dumps(old_result))
@@ -1646,7 +1646,7 @@ class CLITests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 1)
         for signal in (
             "Transition::Preset",
             "Transition::Setup",
@@ -1654,7 +1654,7 @@ class CLITests(unittest.TestCase):
         ):
             with self.subTest(signal=signal):
                 self.assertIn(signal, completed.stdout)
-        self.assertTrue(completed.stdout.endswith("Derivation yielded!\n"))
+        self.assertTrue(completed.stdout.endswith("stopped: panic\n"))
         self.assertEqual(completed.stderr, "")
 
     def test_model_and_sequence_options_are_mutually_exclusive(self) -> None:

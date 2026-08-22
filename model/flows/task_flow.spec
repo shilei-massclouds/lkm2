@@ -2,12 +2,15 @@
 
 use model::objects::task::BootTask;
 use model::objects::task::KernelInitTask;
+use model::objects::cpu::BootCPU;
+use model::objects::cpu::CPU;
 use model::phases::arch_head::ArchHead;
 use model::phases::kernel_init::KernelInitPhase;
 use model::phases::user_run::UserRunPhase;
 
 type TaskFlow {
     continuation: true;
+    mutable cpu_ref: CPU;
     initial_state: State::Online;
 
     state State::Online {
@@ -23,6 +26,9 @@ object BootInitFlow: TaskFlow {
     state State::Online {
         actions {
             override on Action::Enter {
+                updates {
+                    self.cpu_ref = BootCPU;
+                }
                 resumes ArchHead.Action::Enter;
             }
         }

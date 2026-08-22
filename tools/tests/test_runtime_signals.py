@@ -1,0 +1,202 @@
+from __future__ import annotations
+
+from contextlib import redirect_stderr
+from io import StringIO
+from pathlib import Path
+import sys
+import shutil
+import tempfile
+import unittest
+
+
+REPOSITORY = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPOSITORY / "tools" / "src"))
+
+from derive import (  # noqa: E402
+    UserRuntimeSignalValidationError,
+    default_derivation_sequence,
+    derive,
+    load_user_runtime_signals,
+)
+from derive.cli import main as derive_main  # noqa: E402
+from modelc import compile_spec  # noqa: E402
+
+
+BOOT_CPU = ("objects", "cpu", "BootCPU")
+KERNEL_INIT_TASK = ("objects", "task", "KernelInitTask")
+CPU0_SCHEDULER = ("objects", "scheduler", "Cpu0Scheduler")
+
+
+def _all_units(units):
+    for unit in units:
+        yield unit
+        yield from _all_units(unit.drives)
+        yield from _all_units(unit.yields)
+        yield from _all_units(unit.emits)
+        yield from _all_units(unit.resumes)
+
+
+class UserRuntimeSignalParserTests(unittest.TestCase):
+    def test_repository_signal_programs_are_valid(self) -> None:
+        signals_directory = REPOSITORY / "tools" / "signals"
+        with (signals_directory / "default.signals").open(encoding="utf-8") as stream:
+            default_program = load_user_runtime_signals(stream)
+        with (signals_directory / "parked.signals").open(encoding="utf-8") as stream:
+            parked_program = load_user_runtime_signals(stream)
+
+        self.assertEqual(
+            tuple(item.qualified_name for item in default_program.signals),
+            ("syscall.exit",),
+        )
+        self.assertEqual(default_program.signals[0].arguments, (0,))
+        self.assertEqual(parked_program.signals, ())
+
+    def test_comments_empty_lines_and_all_families_parse(self) -> None:
+        program = load_user_runtime_signals(
+            StringIO(
+                "# signals\n\ninterrupt.timer <local> # tick\n"
+                "exception.page_fault 0 -1 +2\n"
+            )
+        )
+        self.assertEqual(
+            tuple(item.qualified_name for item in program.signals),
+            ("interrupt.timer", "exception.page_fault"),
+        )
+        self.assertEqual(program.signals[1].arguments, (-1, 2))
+
+    def test_exit_requires_one_i32_and_must_be_last(self) -> None:
+        invalid = (
+            "syscall.exit <local>\n",
+            "syscall.exit <local> 2147483648\n",
+            "syscall.exit <local> 0\ninterrupt.timer <local>\n",
+        )
+        for source in invalid:
+            with self.subTest(source=source):
+                with self.assertRaises(UserRuntimeSignalValidationError):
+                    load_user_runtime_signals(StringIO(source))
+
+    def test_diagnostics_include_stream_line_and_column(self) -> None:
+        stream = StringIO("\n  syscall.Exit <local> 0\n")
+        stream.name = "signals.txt"
+        with self.assertRaisesRegex(
+            UserRuntimeSignalValidationError,
+            r"signals\.txt:2:11: signal name must be a lowercase identifier",
+        ):
+            load_user_runtime_signals(stream)
+
+
+class UserRuntimeSignalEngineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.model = compile_spec(REPOSITORY / "model" / "main.spec")
+        cls.sequence = default_derivation_sequence(cls.model)
+
+    def _derive(self, text: str):
+        return derive(
+            self.model,
+            self.sequence,
+            user_runtime_signals=load_user_runtime_signals(StringIO(text)),
+        )
+
+    def test_empty_program_parks_without_cpu_or_scheduler_entry(self) -> None:
+        path = self._derive("").paths[0]
+        self.assertEqual(path.status, "yielded")
+        self.assertEqual(path.current_cpu_ref, BOOT_CPU)
+        self.assertEqual(path.event_flows, ())
+        units = tuple(_all_units(path.units))
+        self.assertEqual(
+            sum(
+                unit.event.target == CPU0_SCHEDULER
+                and unit.event.signal == ("Action", "Schedule")
+                for unit in units
+            ),
+            1,
+        )
+
+    def test_explicit_cpu_and_status_are_preserved_through_exit_chain(self) -> None:
+        path = self._derive("syscall.exit 0 7\n").paths[0]
+        self.assertEqual(path.status, "panic")
+        units = tuple(_all_units(path.units))
+        chain = tuple(
+            unit
+            for unit in units
+            if unit.event.signal
+            in {
+                ("Action", "OnSyscallExit"),
+                ("Action", "Exit"),
+            }
+            or unit.event.target[-1].startswith("SyscallExitFlow")
+        )
+        self.assertEqual(
+            tuple(unit.event.arguments[0].value for unit in chain),
+            (7, 7, 7),
+        )
+        self.assertEqual(path.event_flows[0].cpu, BOOT_CPU)
+        self.assertEqual(path.event_flows[0].outcome, "terminal")
+        states = {item.object: item.state for item in path.final_state}
+        self.assertEqual(states[KERNEL_INIT_TASK], ("State", "OnCpu"))
+        self.assertEqual(path.schedulers[0].runq, (KERNEL_INIT_TASK,))
+
+    def test_unknown_and_unsupported_signals_fail_at_consumption(self) -> None:
+        cases = (
+            ("syscall.exit 9 0\n", "unknown_cpu_target"),
+            ("interrupt.timer <local>\n", "unsupported_runtime_signal"),
+            ("exception.page_fault <local>\n", "unsupported_runtime_signal"),
+            ("syscall.write <local> 1\n", "unsupported_runtime_signal"),
+        )
+        for source, code in cases:
+            with self.subTest(source=source):
+                path = self._derive(source).paths[0]
+                self.assertEqual(path.status, code)
+                self.assertEqual(path.event_flows, ())
+
+    def test_existing_nonlocal_cpu_is_rejected_for_syscall(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_root = Path(directory) / "model"
+            shutil.copytree(REPOSITORY / "model", model_root)
+            cpu_spec = model_root / "objects" / "cpu.spec"
+            cpu_spec.write_text(
+                cpu_spec.read_text(encoding="utf-8")
+                + "\nobject SecondaryCPU: CPU { logical_id: 1; parent: Kernel; }\n",
+                encoding="utf-8",
+            )
+            model = compile_spec(model_root / "main.spec")
+        result = derive(
+            model,
+            default_derivation_sequence(model),
+            user_runtime_signals=load_user_runtime_signals(
+                StringIO("syscall.exit 1 0\n")
+            ),
+        )
+        self.assertEqual(result.paths[0].status, "invalid_syscall_cpu_target")
+
+    def test_repeated_derivations_restart_cursor_and_flow_number(self) -> None:
+        program = load_user_runtime_signals(StringIO("syscall.exit <local> -7\n"))
+        first = derive(
+            self.model,
+            self.sequence,
+            user_runtime_signals=program,
+        )
+        second = derive(
+            self.model,
+            self.sequence,
+            user_runtime_signals=program,
+        )
+        self.assertEqual(first, second)
+        self.assertEqual(first.event_flows[0].flow[-1], "SyscallExitFlow0")
+
+    def test_cli_reports_unreadable_signal_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "missing.signals"
+            stderr = StringIO()
+            with redirect_stderr(stderr):
+                status = derive_main(
+                    ["--user-runtime-signals", str(missing)],
+                    default_model=REPOSITORY / "model" / "main.spec",
+                )
+            self.assertEqual(status, 1)
+            self.assertIn("missing.signals", stderr.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -109,21 +109,18 @@ OpenSBI -> Kernel: emits Transition::Enable
           commit state: State::Online
         UserRunPhase -> UserAppRuntime: yields Action::Enter
           current state: State::Online
-          UserAppRuntime -> Cpu0Scheduler: drives Action::Schedule
+          UserAppRuntime -> BootCPU: drives Action::OnSyscallExit(0)
             current state: State::Online
-            Cpu0Scheduler -> KernelInitTask: drives Transition::Suspend
-              current state: State::OnCpu
-              commit state: State::Online
-            switches next_task_ref = KernelInitTask
-            Cpu0Scheduler -> KernelInitTask: drives Transition::Resume
-              current state: State::Online
-              commit state: State::OnCpu
-            KernelInitTask -> UserAppRuntime: resumes Action::Enter
-              current state: State::Online
-              commit state: unchanged
             commit state: unchanged
-          commit state: unchanged
+          BootCPU -> SyscallExitFlow0: resumes Action::Enter(0)
+            current state: State::Online
+            SyscallExitFlow0 -> KernelInitTask: drives Action::Exit(0)
+              current state: State::OnCpu
+              panic: Attempted to kill init! ✗
+              commit state: not committed ✗
+            commit state: not committed ✗
+          commit state: not committed ✗
       commit state: unchanged
-  commit state: State::Online
+  commit state: not committed ✗
 
-Derivation yielded!
+stopped: panic

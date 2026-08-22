@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v10."""
+"""Strict JSON loading and canonical JSON output for Model IR v11."""
 
 from __future__ import annotations
 
@@ -145,6 +145,8 @@ def _type(value: object, path: str) -> ModelType:
                 "continuation",
                 "sched_core",
                 "user_runtime",
+                "cpu_core",
+                "syscall_exit_flow",
                 "initial_state",
                 "states",
             }
@@ -167,6 +169,8 @@ def _type(value: object, path: str) -> ModelType:
         states=_array(data["states"], f"{path}.states", _state),
         sched_core=data["sched_core"],
         user_runtime=data["user_runtime"],
+        cpu_core=data["cpu_core"],
+        syscall_exit_flow=data["syscall_exit_flow"],
     )
 
 
@@ -300,7 +304,7 @@ def _object(value: object, path: str) -> ModelObject:
     data = _require_object(
         value,
         frozenset(
-            {"name", "base_type", "initial_state", "parent", "source", "attrs", "states", "references", "continuation", "idle_task"}
+            {"name", "base_type", "initial_state", "parent", "source", "attrs", "states", "references", "continuation", "idle_task", "logical_id"}
         ),
         path,
     )
@@ -321,6 +325,7 @@ def _object(value: object, path: str) -> ModelObject:
         idle_task=None
         if idle_task is None
         else _expression(idle_task, f"{path}.idle_task"),
+        logical_id=data["logical_id"],
     )
 
 
@@ -350,7 +355,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v10 JSON document."""
+    """Load and strictly validate one Model IR schema-v11 JSON document."""
 
     try:
         raw = json.load(
@@ -500,6 +505,8 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
                 "continuation": item.continuation,
                 "sched_core": item.sched_core,
                 "user_runtime": item.user_runtime,
+                "cpu_core": item.cpu_core,
+                "syscall_exit_flow": item.syscall_exit_flow,
                 "initial_state": None
                 if item.initial_state is None
                 else list(item.initial_state),
@@ -530,6 +537,7 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
                 "idle_task": None
                 if item.idle_task is None
                 else _expr_data(item.idle_task),
+                "logical_id": item.logical_id,
             }
             for item in module.objects
         ],

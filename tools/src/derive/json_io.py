@@ -1,4 +1,4 @@
-"""Strict JSON boundaries for sequence schema v3 and result schema v9."""
+"""Strict JSON boundaries for sequence schema v3 and result schema v10."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from .model import (
     DerivationContinuation,
     DerivationDirective,
     DerivationEvent,
+    DerivationEventFlow,
     DerivationFact,
     DerivationFailure,
     DerivationFrame,
@@ -346,6 +347,31 @@ def _scheduler(value: object, path: str) -> DerivationScheduler:
     )
 
 
+def _event_flow(value: object, path: str) -> DerivationEventFlow:
+    data = _object(
+        value,
+        frozenset(
+            {
+                "flow",
+                "cpu",
+                "suspended_task_flow",
+                "user_runtime",
+                "signal",
+                "outcome",
+            }
+        ),
+        path,
+    )
+    return DerivationEventFlow(
+        _name(data["flow"], f"{path}.flow"),
+        _name(data["cpu"], f"{path}.cpu"),
+        _name(data["suspended_task_flow"], f"{path}.suspended_task_flow"),
+        _name(data["user_runtime"], f"{path}.user_runtime"),
+        _string(data["signal"], f"{path}.signal"),
+        _string(data["outcome"], f"{path}.outcome"),
+    )
+
+
 def _path(value: object, path: str) -> DerivationPath:
     data = _object(
         value,
@@ -359,6 +385,8 @@ def _path(value: object, path: str) -> DerivationPath:
                 "final_values",
                 "schedulers",
                 "current_task_ref",
+                "current_cpu_ref",
+                "event_flows",
             }
         ),
         path,
@@ -378,11 +406,15 @@ def _path(value: object, path: str) -> DerivationPath:
         current_task_ref=_optional_name(
             data["current_task_ref"], f"{path}.current_task_ref"
         ),
+        current_cpu_ref=_optional_name(
+            data["current_cpu_ref"], f"{path}.current_cpu_ref"
+        ),
+        event_flows=_array(data["event_flows"], f"{path}.event_flows", _event_flow),
     )
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v9 result document."""
+    """Load and strictly validate one schema-v10 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -509,7 +541,7 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v9 derivation result followed by a newline."""
+    """Write one canonical schema-v10 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")
@@ -551,6 +583,20 @@ def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
             "current_task_ref": None
             if path.current_task_ref is None
             else list(path.current_task_ref),
+            "current_cpu_ref": None
+            if path.current_cpu_ref is None
+            else list(path.current_cpu_ref),
+            "event_flows": [
+                {
+                    "flow": list(item.flow),
+                    "cpu": list(item.cpu),
+                    "suspended_task_flow": list(item.suspended_task_flow),
+                    "user_runtime": list(item.user_runtime),
+                    "signal": item.signal,
+                    "outcome": item.outcome,
+                }
+                for item in path.event_flows
+            ],
         }
         if path.failure is not None:
             data["failure"] = _failure_data(path.failure)

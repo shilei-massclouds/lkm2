@@ -39,6 +39,12 @@ type Task {
             on Transition::Suspend -> State::Online {
             }
         }
+
+        actions {
+            on Action::Exit(status: i32) {
+                panic "Task.Action::Exit is not implemented";
+            }
+        }
     }
 }
 
@@ -58,4 +64,12 @@ object BootTask: Task {
 
 object KernelInitTask: Task {
     parent: Kernel;
+
+    state State::OnCpu {
+        actions {
+            override on Action::Exit(status: i32) {
+                panic "Attempted to kill init!";
+            }
+        }
+    }
 }

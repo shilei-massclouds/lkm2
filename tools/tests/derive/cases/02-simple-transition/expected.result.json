@@ -2,10 +2,12 @@
   "paths": [
     {
       "continuations": [],
+      "current_cpu_ref": null,
       "current_task_ref": [
         "root",
         "__HarnessBootTask"
       ],
+      "event_flows": [],
       "facts": [],
       "final_state": [
         {
@@ -114,6 +116,6 @@
       ]
     }
   ],
-  "schema_version": 9,
+  "schema_version": 10,
   "status": "passed"
 }

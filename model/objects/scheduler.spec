@@ -7,6 +7,7 @@
  * CpuGroup.cpus[0], and every other CPU must own a distinct Scheduler.
  */
 
+use model::objects::cpu::BootCPU;
 use model::objects::task::BootTask;
 
 type Scheduler {
@@ -32,5 +33,6 @@ type Scheduler {
 }
 
 object Cpu0Scheduler: Scheduler {
+    parent: BootCPU;
     idle_task: BootTask;
 }

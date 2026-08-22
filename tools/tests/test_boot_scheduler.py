@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from io import StringIO
 import sys
 import unittest
 
@@ -9,7 +10,11 @@ REPOSITORY = Path(__file__).resolve().parents[2]
 SOURCE_DIRECTORY = REPOSITORY / "tools" / "src"
 sys.path.insert(0, str(SOURCE_DIRECTORY))
 
-from derive import default_derivation_sequence, derive
+from derive import (
+    default_derivation_sequence,
+    derive,
+    load_user_runtime_signals,
+)
 from modelc import compile_spec
 
 
@@ -25,6 +30,7 @@ USER_APP_RUNTIME = (
 KERNEL = ("systems", "kernel", "Kernel")
 BOOT_HANDOFF = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
 USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
+BOOT_CPU = ("objects", "cpu", "BootCPU")
 
 
 def _all_units(units):
@@ -68,6 +74,51 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(blocks[0].signals[0].target.value, "CurrentTaskRef")
         self.assertEqual(blocks[1].switches, "next_task_ref")
         self.assertEqual(blocks[2].signals[0].target.value, "next_task_ref")
+
+    def test_cpu_and_syscall_exit_flow_protocols_are_explicit(self) -> None:
+        cpu_module = next(
+            item for item in self.model.modules if item.name == ("objects", "cpu")
+        )
+        cpu_type = next(item for item in cpu_module.types if item.name[-1] == "CPU")
+        boot_cpu = next(item for item in cpu_module.objects if item.name == BOOT_CPU)
+        scheduler = next(item for item in self.model.objects if item.name == CPU0_SCHEDULER)
+
+        self.assertTrue(cpu_type.cpu_core)
+        self.assertEqual(boot_cpu.logical_id, 0)
+        self.assertEqual(_target_name(scheduler.parent), ("BootCPU",))
+        syscall_action = next(
+            action
+            for state in cpu_type.states
+            for action in state.actions
+            if action.signal == ("Action", "OnSyscallExit")
+        )
+        self.assertEqual(syscall_action.parameters[0].name, "status")
+        self.assertEqual(
+            _target_name(syscall_action.blocks[0].signals[0].target),
+            ("self", "SyscallExitFlowRef"),
+        )
+
+        flow_module = next(
+            item
+            for item in self.model.modules
+            if item.name == ("flows", "syscall_exit_flow")
+        )
+        flow_type = flow_module.types[0]
+        self.assertTrue(flow_type.continuation)
+        self.assertTrue(flow_type.syscall_exit_flow)
+        self.assertEqual(flow_module.objects, ())
+
+        task_flow_module = next(
+            item
+            for item in self.model.modules
+            if item.name == ("flows", "task_flow")
+        )
+        cpu_ref = next(
+            field
+            for field in task_flow_module.types[0].fields
+            if field.name == "cpu_ref"
+        )
+        self.assertTrue(cpu_ref.mutable)
 
     def test_task_resume_declares_its_resume_target_entry(self) -> None:
         task_module = next(
@@ -175,11 +226,13 @@ class BootSchedulerModelTests(unittest.TestCase):
         )
         self.assertEqual(tuple(unit.event.target for unit in boot_resume.resumes), (BOOT_FLOW,))
 
-    def test_default_derivation_runs_full_task_switch_lifecycle(self) -> None:
+    def test_default_derivation_delivers_exit_without_rescheduling(self) -> None:
         result = derive(self.model, default_derivation_sequence(self.model))
-        self.assertEqual(result.status, "yielded")
+        self.assertEqual(result.status, "failed")
         self.assertEqual(len(result.paths), 1)
         path = result.paths[0]
+        self.assertEqual(path.status, "panic")
+        self.assertEqual(path.failure.message, "Attempted to kill init!")
         units = tuple(_all_units(path.units))
         schedules = tuple(
             unit
@@ -188,11 +241,11 @@ class BootSchedulerModelTests(unittest.TestCase):
             and unit.event.signal == ("Action", "Schedule")
         )
 
-        self.assertEqual(len(schedules), 2)
+        self.assertEqual(len(schedules), 1)
         self.assertTrue(all(unit.status == "passed" for unit in schedules))
         self.assertEqual(
             tuple(switch.task for unit in schedules for switch in unit.switches),
-            (KERNEL_INIT_TASK, KERNEL_INIT_TASK),
+            (KERNEL_INIT_TASK,),
         )
         self.assertEqual(
             tuple(
@@ -200,7 +253,7 @@ class BootSchedulerModelTests(unittest.TestCase):
                 for unit in schedules
                 for switch in unit.switches
             ),
-            (False, False),
+            (False,),
         )
         queue_actions = tuple(
             unit.event.signal
@@ -215,10 +268,30 @@ class BootSchedulerModelTests(unittest.TestCase):
             queue_actions,
             (("Action", "Enqueue"),),
         )
+        cpu_exit = next(
+            unit
+            for unit in units
+            if unit.event.target == BOOT_CPU
+            and unit.event.signal == ("Action", "OnSyscallExit")
+        )
+        flow_units = tuple(_all_units((cpu_exit,)))
+        self.assertFalse(
+            any(
+                unit.event.signal
+                in {
+                    ("Transition", "Suspend"),
+                    ("Action", "Schedule"),
+                }
+                for unit in flow_units
+            )
+        )
 
     def test_default_final_scheduler_context_and_continuation(self) -> None:
+        program = load_user_runtime_signals(StringIO(""))
         path = derive(
-            self.model, default_derivation_sequence(self.model)
+            self.model,
+            default_derivation_sequence(self.model),
+            user_runtime_signals=program,
         ).paths[0]
         states = {item.object: item.state for item in path.final_state}
 
@@ -233,6 +306,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(scheduler.scheduler, CPU0_SCHEDULER)
         self.assertEqual(scheduler.idle_task, BOOT_TASK)
         self.assertEqual(path.current_task_ref, KERNEL_INIT_TASK)
+        self.assertEqual(path.current_cpu_ref, BOOT_CPU)
         self.assertEqual(scheduler.runq, (KERNEL_INIT_TASK,))
         self.assertEqual(
             tuple(continuation.root for continuation in path.continuations),
@@ -246,16 +320,9 @@ class BootSchedulerModelTests(unittest.TestCase):
             if unit.event.target == USER_APP_RUNTIME
             and unit.event.signal == ("Action", "Enter")
         )
-        self.assertEqual(len(runtime_entries), 2)
+        self.assertEqual(len(runtime_entries), 1)
         self.assertEqual(runtime_entries[0].event.mode, "yield")
-        self.assertEqual(runtime_entries[1].event.mode, "resume")
-        self.assertEqual(len(runtime_entries[0].drives), 1)
-        self.assertEqual(runtime_entries[0].drives[0].event.target, CPU0_SCHEDULER)
-        self.assertEqual(
-            runtime_entries[0].drives[0].event.signal,
-            ("Action", "Schedule"),
-        )
-        self.assertEqual(runtime_entries[1].drives, ())
+        self.assertEqual(runtime_entries[0].drives, ())
         self.assertFalse(
             any(unit.event.target[-1] == "BootIdle" for unit in units)
         )

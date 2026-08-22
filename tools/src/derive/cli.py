@@ -15,6 +15,10 @@ from .defaults import default_derivation_sequence
 from .json_io import load_derivation_sequence
 from .model import DerivationValidationError
 from .renderer import render_derivation_result
+from .runtime_signals import (
+    UserRuntimeSignalValidationError,
+    load_user_runtime_signals,
+)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -24,6 +28,12 @@ def _parser() -> argparse.ArgumentParser:
     inputs = parser.add_mutually_exclusive_group()
     inputs.add_argument("--model", type=Path, metavar="MODEL")
     inputs.add_argument("--sequence", type=Path, metavar="SEQUENCE")
+    parser.add_argument(
+        "--user-runtime-signals",
+        type=Path,
+        metavar="PATH",
+        help="replace the default user-runtime signal program",
+    )
     return parser
 
 
@@ -47,14 +57,28 @@ def main(
         else:
             with args.sequence.open("r", encoding="utf-8") as stream:
                 sequence = load_derivation_sequence(stream)
+        user_runtime_signals = None
+        if args.user_runtime_signals is not None:
+            with args.user_runtime_signals.open("r", encoding="utf-8") as stream:
+                user_runtime_signals = load_user_runtime_signals(stream)
     except CompilationError as exc:
         print(exc.diagnostic.format(), file=sys.stderr)
         return 1
-    except (ModelIRValidationError, DerivationValidationError, OSError, UnicodeError) as exc:
+    except (
+        ModelIRValidationError,
+        DerivationValidationError,
+        UserRuntimeSignalValidationError,
+        OSError,
+        UnicodeError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    result = derive(model, sequence)
+    result = derive(
+        model,
+        sequence,
+        user_runtime_signals=user_runtime_signals,
+    )
     try:
         render_derivation_result(result, sys.stdout)
     except (OSError, UnicodeError) as exc:

@@ -16,6 +16,7 @@ from .model import (
     DerivationContinuation,
     DerivationDirective,
     DerivationEvent,
+    DerivationEventFlow,
     DerivationFact,
     DerivationFailure,
     DerivationFrame,
@@ -30,6 +31,12 @@ from .model import (
     DerivationValidationError,
 )
 from .renderer import render_derivation_result
+from .runtime_signals import (
+    UserRuntimeSignal,
+    UserRuntimeSignalProgram,
+    UserRuntimeSignalValidationError,
+    load_user_runtime_signals,
+)
 
 __all__ = [
     "RESULT_SCHEMA_VERSION",
@@ -39,6 +46,7 @@ __all__ = [
     "DerivationContinuation",
     "DerivationDirective",
     "DerivationEvent",
+    "DerivationEventFlow",
     "DerivationFact",
     "DerivationFailure",
     "DerivationFrame",
@@ -51,11 +59,15 @@ __all__ = [
     "DerivationUnit",
     "DerivationValue",
     "DerivationValidationError",
+    "UserRuntimeSignal",
+    "UserRuntimeSignalProgram",
+    "UserRuntimeSignalValidationError",
     "derive",
     "default_derivation_sequence",
     "dump_derivation_result",
     "dump_derivation_sequence",
     "load_derivation_result",
     "load_derivation_sequence",
+    "load_user_runtime_signals",
     "render_derivation_result",
 ]

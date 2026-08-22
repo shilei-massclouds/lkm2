@@ -1,4 +1,4 @@
-"""Data model for derivation root selection and schema-v9 path results."""
+"""Data model for derivation root selection and schema-v10 path results."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from model_ir import ModelExpression, canonicalize_signal_name
 
 
 SEQUENCE_SCHEMA_VERSION = 3
-RESULT_SCHEMA_VERSION = 9
+RESULT_SCHEMA_VERSION = 10
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MODES = frozenset({"drive", "emit", "yield", "resume"})
 _UNIT_KINDS = frozenset({"root", "drive", "emit", "yield", "resume"})
@@ -28,6 +28,11 @@ _FAILURE_CODES = frozenset(
         "panic",
         "duplicate_collection_item",
         "invalid_current_task_ref",
+        "invalid_current_cpu_ref",
+        "invalid_syscall_cpu_target",
+        "unknown_cpu_target",
+        "unsupported_runtime_signal",
+        "unimplemented_task_exit",
         "invalid_derivation_line",
         "duplicate_runq_task",
         "idle_task_not_queueable",
@@ -510,6 +515,30 @@ class DerivationScheduler:
 
 
 @dataclass(frozen=True, slots=True)
+class DerivationEventFlow:
+    flow: tuple[str, ...]
+    cpu: tuple[str, ...]
+    suspended_task_flow: tuple[str, ...]
+    user_runtime: tuple[str, ...]
+    signal: str
+    outcome: str
+
+    def __post_init__(self) -> None:
+        _name(self.flow, "event_flow.flow")
+        _name(self.cpu, "event_flow.cpu")
+        _name(self.suspended_task_flow, "event_flow.suspended_task_flow")
+        _name(self.user_runtime, "event_flow.user_runtime")
+        if type(self.signal) is not str or not self.signal:
+            raise DerivationValidationError(
+                "event_flow.signal must be a non-empty string"
+            )
+        if self.outcome not in {"returned", "terminal"}:
+            raise DerivationValidationError(
+                "event_flow.outcome must be 'returned' or 'terminal'"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class DerivationPath:
     status: str
     units: tuple[DerivationUnit, ...]
@@ -520,6 +549,8 @@ class DerivationPath:
     final_values: tuple[DerivationValue, ...] = ()
     schedulers: tuple[DerivationScheduler, ...] = ()
     current_task_ref: tuple[str, ...] | None = None
+    current_cpu_ref: tuple[str, ...] | None = None
+    event_flows: tuple[DerivationEventFlow, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in {"passed", "yielded", "cycle_closed", *_FAILURE_CODES}:
@@ -530,8 +561,11 @@ class DerivationPath:
         _tuple_of(self.continuations, DerivationContinuation, "continuations")
         _tuple_of(self.final_values, DerivationValue, "final_values")
         _tuple_of(self.schedulers, DerivationScheduler, "schedulers")
+        _tuple_of(self.event_flows, DerivationEventFlow, "event_flows")
         if self.current_task_ref is not None:
             _name(self.current_task_ref, "current_task_ref")
+        if self.current_cpu_ref is not None:
+            _name(self.current_cpu_ref, "current_cpu_ref")
         value_keys = [(item.object, item.field) for item in self.final_values]
         if len(set(value_keys)) != len(value_keys):
             raise DerivationValidationError("final_values contains a duplicate target")
@@ -603,6 +637,10 @@ class DerivationPath:
                 raise DerivationValidationError(
                     "invalid_derivation_line requires a null current_task_ref"
                 )
+            if self.current_cpu_ref is not None:
+                raise DerivationValidationError(
+                    "invalid_derivation_line requires a null current_cpu_ref"
+                )
             if self.schedulers:
                 raise DerivationValidationError(
                     "invalid_derivation_line must not expose scheduler snapshots"
@@ -672,3 +710,11 @@ class DerivationResult:
     @property
     def schedulers(self) -> tuple[DerivationScheduler, ...]:
         return self.paths[0].schedulers
+
+    @property
+    def current_cpu_ref(self) -> tuple[str, ...] | None:
+        return self.paths[0].current_cpu_ref
+
+    @property
+    def event_flows(self) -> tuple[DerivationEventFlow, ...]:
+        return self.paths[0].event_flows

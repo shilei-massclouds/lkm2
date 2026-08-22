@@ -25,6 +25,8 @@ type_base: ":" type_expression
           | continuation_property
           | sched_core_property
           | user_runtime_property
+          | cpu_core_property
+          | syscall_exit_flow_property
           | initial_state_property
           | state_declaration
 field_declaration: mutable_marker? IDENTIFIER ":" type_expression field_default? ";"
@@ -38,6 +40,7 @@ object_declaration: "object" IDENTIFIER ":" type_expression "{" object_item* "}"
             | parent_property
             | source_property
             | idle_task_property
+            | logical_id_property
             | attrs_declaration
             | state_declaration
             | reference_declaration
@@ -45,9 +48,12 @@ initial_state_property: "initial_state" ":" expression ";"
 continuation_property: "continuation" ":" IDENTIFIER ";"
 sched_core_property: "sched_core" ":" IDENTIFIER ";"
 user_runtime_property: "user_runtime" ":" IDENTIFIER ";"
+cpu_core_property: "cpu_core" ":" IDENTIFIER ";"
+syscall_exit_flow_property: "syscall_exit_flow" ":" IDENTIFIER ";"
 parent_property: "parent" ":" expression ";"
 source_property: "source" ":" expression ";"
 idle_task_property: "idle_task" ":" expression ";"
+logical_id_property: "logical_id" ":" DECIMAL_INTEGER ";"
 attrs_declaration: "attrs" "{" field_declaration* "}"
 reference_declaration: "reference" IDENTIFIER "{" reference_assignment* "}"
 reference_assignment: assignable_expression "=" expression ";"

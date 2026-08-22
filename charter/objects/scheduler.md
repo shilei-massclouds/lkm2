@@ -6,7 +6,9 @@ Scheduler 是 per-CPU 运行对象，不是整个内核共享的全局单例。�
 
 ## 当前 CPU0-only 切片
 
-当前只物化 `Cpu0Scheduler`，表示 BootCPU/逻辑 CPU0 的 Scheduler。CPU 与 `CpuGroup` 尚未进入模型，因此本轮不为它声明临时 `parent`，也不把缺失的 ownership 错写成全局所有权。
+当前只物化 `Cpu0Scheduler`，表示 BootCPU/逻辑 CPU0 的 Scheduler，并以
+`parent: BootCPU` 明确 ownership。CPU 拥有唯一非负 `logical_id`；未来每个 AP
+必须拥有独立 Scheduler。
 
 `Cpu0Scheduler` 的最小生命周期是：
 
@@ -67,6 +69,8 @@ Online --Schedule--> validate line current → Suspend(current) → switches nex
   handler 校验全部成功后才提交 current；任一失败均保留旧 current，并丢弃该 Resume
   handler 延迟的 resumes。提交后才执行这些 resumes；恢复入口失败不回滚已提交的
   current 和调度切换。
+- TaskFlow 保存 mutable `cpu_ref`。切换提交时，推导器先把 next TaskFlow 绑定到当前
+  CPU，再执行延迟的 ResumeTarget；EventFlow 进入不改变该绑定。
 - `Task.Enable` 使普通 Task 首次进入 runnable 集合，因而触发 Enqueue。
   Suspend/Resume 不触发 Enqueue/Dequeue；未来的 Block、Exit 或其他离开 runnable
   语义才触发 Dequeue，对应的 Wakeup/Enable 语义触发 Enqueue。
@@ -76,7 +80,9 @@ Online --Schedule--> validate line current → Suspend(current) → switches nex
 
 ## 后续 ownership
 
-引入 `CpuGroup` 与 CPU 对象后，必须把当前实例物化并绑定为 `CpuGroup.cpus[0]` owned 的 Scheduler；新增的每个 CPU 必须分别拥有独立 Scheduler，不得复用 `Cpu0Scheduler`，也不得把 `Scheduler` 类型当作实例。
+引入 `CpuGroup` 后，必须把 `BootCPU` 纳入 `CpuGroup.cpus[0]`；新增的每个 CPU
+必须分别拥有独立 Scheduler，不得复用 `Cpu0Scheduler`，也不得把 `Scheduler` 类型
+当作实例。
 
 临时模型映射：[model/objects/scheduler.spec](../../model/objects/scheduler.spec)
 

@@ -5,27 +5,27 @@
 当前工具链处理流程为：
 
 ```text
-model/main.spec → entry AST → recursive module graph → Model IR v10 → canonical JSON
+model/main.spec → entry AST → recursive module graph → Model IR v11 → canonical JSON
 entry external signals → tools/build/derive/main.sequence.json
-Model IR v10 + external-root sequence v3 → derive → result JSON v9 / human stdout
+Model IR v11 + external-root sequence v3 → derive → result JSON v10 / human stdout
 ```
 
 有状态对象可以省略 `initial_state`；modelc 会将其规范化为
 `State::Base`。因此这类对象必须声明 `state State::Base`。显式指定的初始状态保持
-不变，无状态对象仍没有初始状态。Model IR v10 的严格 JSON schema 中：
+不变，无状态对象仍没有初始状态。Model IR v11 的严格 JSON schema 中：
 `initial_state` 字段始终必需，有状态对象的默认值会明确写成
 `["State", "Base"]`，无状态对象写成 `null`。
 
 入口接受一条或多条简单的 `spec IDENT;`，然后是一条点分
 `origin <qualified-name>;`。每条入口 `spec` 都声明一个并列根模块；第一条是
-Model IR v10 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
+Model IR v11 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
 `phases`、`flows` 四个并列根模块组成。`spec` 与 Rust 的 `mod` 类似：入口根
 声明 `spec systems;` 装载同目录的 `systems.spec`，其中的
 `spec human;` 再装载 `systems/human.spec`。只有显式声明会进入模块图，
 不自动发现目录，也不使用 `<module>/main.spec`。
 
 模块文件必须完整符合 [`module_grammar.lark`](src/modelc/module_grammar.lark)
-定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v10 lowering
+定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v11 lowering
 保留 predicate、type、object、external、state、handler、deferred 和通用表达式树。
 绝对 `use` 路径使用 `model::`，相对路径使用 `self::` 或连续的
 `super::`；不带根关键字的裸路径也从 model root 开始。`crate::` 不再受支持。
@@ -92,8 +92,10 @@ tools/bin/derive                         # 默认 --model model/main.spec
 tools/bin/derive --model model/main.spec
 tools/bin/derive --model tools/build/modelc/model.ir.json
 tools/bin/derive --sequence tools/build/derive/main.sequence.json
+tools/bin/derive --user-runtime-signals tools/signals/default.signals
 make run MODEL=model/main.spec
 make run SEQUENCE=tools/build/derive/main.sequence.json
+make run USER_RUNTIME_SIGNALS=tools/signals/parked.signals
 ```
 
 激活虚拟环境后，也可以直接使用安装生成的 `modelc` 和 `derive` 命令。
@@ -107,6 +109,17 @@ derive 命令行，只保留推导输出或错误诊断；只有 `VERBOSE` 严�
 全部命令回显。这个静默行为只作用于 `run` 的构建前置步骤，独立的 `make build`
 和 `make test` 保持原有输出。
 
+`--user-runtime-signals` 使用逐行文本文件完全替换内存默认程序。每个非空、非注释行
+格式为 `<family>.<name> <local|logical-id> [signed-integer ...]`，支持 `#` 行尾注释。
+当前可执行信号只有恰好带一个 signed 32-bit status 的 `syscall.exit`；其他合法信号
+可解析，但消费时明确失败。未指定文件时默认程序为
+`syscall.exit <local> 0`，因此默认 CLI 走 PID 1 panic 并返回 1；空文件会把用户态
+episode parked，推导结果为 `yielded` 并返回 0。
+
+仓库将可复用的信号程序持久保存在 [`signals/`](signals/)：`default.signals` 显式表示
+内存默认程序，`parked.signals` 是只有注释的空程序。该目录是输入样例集合，不是
+隐式搜索路径；命令行仍须传入所选文件，未传时也不会读取磁盘。
+
 ## Model IR、推导和缓存
 
 `make build` 原子更新 `tools/build/modelc/model.ir.json` 和 `manifest.json`，并从
@@ -119,9 +132,10 @@ IR schema 版本；完全命中并能严格加载缓存 IR 时不会改写文件
 
 推导序列 schema v3 的每个事件显式指定 `source`、`target`、`signal`、`mode` 和
 实参，但 sequence 只选择外部根信号；drives、emits 与 resumes 由引擎按因果关系
-自动调度。结果 JSON schema v9 顶层记录有序路径集合；每条路径保留嵌套推导单元、
+自动调度。结果 JSON schema v10 顶层记录有序路径集合；每条路径保留嵌套推导单元、
 逐项条件、最终状态、运行时字段/Collection 值、predicate facts、continuation
-frame、参数绑定快照、线路 `current_task_ref`，以及 Scheduler 的 idle/runq 上下文；
+frame、参数绑定快照、线路 `current_task_ref`/`current_cpu_ref`、CPU EventFlow 的
+suspend/enter/returned-or-terminal 记录，以及 Scheduler 的 idle/runq 上下文；
 `dump_derivation_result()` 提供包含完整检查细节的规范 JSON，CLI 默认使用精简的
 人类因果 renderer。当前支持
 Transition 与 Action 信号、对象状态比较、布尔组合、depends_on、drives、ensures、
@@ -175,11 +189,12 @@ idle Task，始终位于 runq 之外；Kernel 首次 Resume 使其进入 OnCpu�
 `KernelInitTask` 后，`UserRunPhase`
 通过 `CurrentTaskRef.UserAppRuntimeRef` 同步完成推导器按需生成的
 `KernelInitTask.UserAppRuntime` 的 Preset、Setup、Enable，再 yield 到其
-`Action::Enter` 用户态黑盒入口。`user_runtime: true` 指示推导器为每个 episode 从该
-入口触发一次普通 Schedule；KernelInitTask Suspend 前后都留在 runq 中，并在唯一候选
-线路中再次选中；Resume 回到同一 Runtime 坐标时只确认 episode 已恢复，不再递归调度。推导保留
-BootHandoff 与 UserRunPhase continuation，以 `yielded` 结束；BootIdle 及其 panic
-不可达，CLI 返回 0。Model IR schema 仍为 v10。
+`Action::Enter` 用户态黑盒入口。`user_runtime: true` 指示推导器在此消费实例私有的
+运行时 signal cursor。默认 exit 先送达由 `cpu_ref` 解析出的 `BootCPU`，CPU 创建 fresh
+`SyscallExitFlow0`，再驱动 `KernelInitTask.Action::Exit(0)`。该 EventFlow 不调用
+Scheduler、不改变 Task `OnCpu` 状态或 runq；PID 1 保护最终以
+`Attempted to kill init!` panic，CLI 返回 1。指定空信号文件时入口保持 parked，结果
+为 `yielded`，CLI 返回 0。Model IR schema 为 v11。
 
 公共库接口为：
 
@@ -187,14 +202,15 @@ BootHandoff 与 UserRunPhase continuation，以 `yielded` 结束；BootIdle 及�
 - `model_ir.load_model_ir()`
 - `model_ir.dump_model_ir()`
 - `derive.derive()`
+- `derive.load_user_runtime_signals()`
 - `derive.load_derivation_sequence()`
 - `derive.dump_derivation_result()`
 - `derive.load_derivation_result()`
 - `derive.render_derivation_result()`
 
-AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v10
+AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v11
 loader 严格拒绝旧版本、未知字段、重复声明、无效状态引用、重复 handler 和未知
 信号目标，并规范排序模块和声明。
-Derivation Result schema v9 同样严格拒绝旧 `selections`、Scheduler `current_task`
+Derivation Result schema v10 同样严格拒绝旧 `selections`、Scheduler `current_task`
 字段与旧 schema，仅输出
 事务式 `switches` 记录。

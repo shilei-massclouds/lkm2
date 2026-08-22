@@ -1,4 +1,4 @@
-"""Compilation pipeline from a model-root specification to Model IR v10."""
+"""Compilation pipeline from a model-root specification to Model IR v11."""
 
 from __future__ import annotations
 
@@ -256,12 +256,17 @@ def _signal(
         }
         and operations[:-2] == ["member"]
     )
+    syscall_flow_selector = (
+        raw_target == ("self", "SyscallExitFlowRef")
+        and operations[:-2] == ["member"]
+    )
     if len(raw_target) == 1 and raw_target[0] in {
         *bindings,
         "CurrentTaskRef",
+        "CurrentCPU",
     }:
         target = ModelExpression("identifier", raw_target[0])
-    elif task_owned_selector:
+    elif task_owned_selector or syscall_flow_selector:
         target = ModelExpression(
             "member",
             raw_target[1],
@@ -610,6 +615,7 @@ def _object(
     parent_node = _only(module, node, "parent_property", "parent")
     source_node = _only(module, node, "source_property", "source")
     idle_task_node = _only(module, node, "idle_task_property", "idle_task")
+    logical_id_node = _only(module, node, "logical_id_property", "logical_id")
     continuation_node = _only(module, node, "continuation_property", "continuation")
     if continuation_node is not None:
         raise _semantic_error(
@@ -661,6 +667,9 @@ def _object(
         idle_task=None
         if idle_task_node is None
         else _lower_expression(idle_task_node.children[0]),
+        logical_id=None
+        if logical_id_node is None
+        else int(str(logical_id_node.children[0]), 10),
     )
 
 
@@ -755,6 +764,40 @@ def _model_type(
                 "user_runtime can only be declared as true and cannot be cancelled",
             )
         user_runtime = True
+    cpu_core_nodes = tuple(
+        item for item in items if item.data == "cpu_core_property"
+    )
+    if len(cpu_core_nodes) > 1:
+        raise _semantic_error(module, cpu_core_nodes[1], "duplicate cpu_core")
+    cpu_core = False
+    if cpu_core_nodes:
+        value = str(cpu_core_nodes[0].children[0])
+        if value != "true":
+            raise _semantic_error(
+                module,
+                cpu_core_nodes[0],
+                "cpu_core can only be declared as true and cannot be cancelled",
+            )
+        cpu_core = True
+    syscall_exit_flow_nodes = tuple(
+        item for item in items if item.data == "syscall_exit_flow_property"
+    )
+    if len(syscall_exit_flow_nodes) > 1:
+        raise _semantic_error(
+            module,
+            syscall_exit_flow_nodes[1],
+            "duplicate syscall_exit_flow",
+        )
+    syscall_exit_flow = False
+    if syscall_exit_flow_nodes:
+        value = str(syscall_exit_flow_nodes[0].children[0])
+        if value != "true":
+            raise _semantic_error(
+                module,
+                syscall_exit_flow_nodes[0],
+                "syscall_exit_flow can only be declared as true and cannot be cancelled",
+            )
+        syscall_exit_flow = True
     base_node = next(
         (
             child
@@ -788,6 +831,8 @@ def _model_type(
         states=states,
         sched_core=sched_core,
         user_runtime=user_runtime,
+        cpu_core=cpu_core,
+        syscall_exit_flow=syscall_exit_flow,
     )
 
 
@@ -1060,6 +1105,10 @@ def _expand_inheritance(
         continuation = raw.continuation or (base is not None and base.continuation)
         sched_core = raw.sched_core or (base is not None and base.sched_core)
         user_runtime = raw.user_runtime or (base is not None and base.user_runtime)
+        cpu_core = raw.cpu_core or (base is not None and base.cpu_core)
+        syscall_exit_flow = raw.syscall_exit_flow or (
+            base is not None and base.syscall_exit_flow
+        )
         expanded = ModelType(
             raw.name,
             fields,
@@ -1069,6 +1118,8 @@ def _expand_inheritance(
             states,
             sched_core,
             user_runtime,
+            cpu_core,
+            syscall_exit_flow,
         )
         state_names = {state.name for state in states}
         if initial_state is not None and initial_state not in state_names:
@@ -1102,8 +1153,10 @@ def _expand_inheritance(
             node = object_nodes[raw.name]
             if raw.name[-1] in {
                 "CurrentTaskRef",
+                "CurrentCPU",
                 "TaskFlowRef",
                 "ResumeTargetRef",
+                "SyscallExitFlowRef",
             }:
                 raise _semantic_error(
                     module,
@@ -1134,6 +1187,7 @@ def _expand_inheritance(
                 if handler.abstract
             )
             user_runtime = base is not None and base.user_runtime
+            syscall_exit_flow = base is not None and base.syscall_exit_flow
             if abstract and not user_runtime:
                 state_name, signal = abstract[0]
                 raise _semantic_error(
@@ -1168,6 +1222,12 @@ def _expand_inheritance(
                     node,
                     "user_runtime instances are inference-owned Task children and must not be declared as model objects",
                 )
+            if syscall_exit_flow:
+                raise _semantic_error(
+                    module,
+                    node,
+                    "syscall_exit_flow instances are inference-owned CPU children and must not be declared as model objects",
+                )
             for state in states:
                 for transition in state.transitions:
                     if transition.target_state not in {item.name for item in states}:
@@ -1201,6 +1261,7 @@ def _expand_inheritance(
                 raw.references,
                 continuation,
                 raw.idle_task,
+                raw.logical_id,
             )
 
     continuation_names = {
@@ -1211,6 +1272,7 @@ def _expand_inheritance(
         (["self", "TaskFlowRef"], ["member"]),
         (["self", "ResumeTargetRef"], ["member"]),
     )
+    syscall_flow_selector = (["self", "SyscallExitFlowRef"], ["member"])
 
     object_names = set(expanded_objects)
 
@@ -1235,7 +1297,10 @@ def _expand_inheritance(
     def validate_continuation_target(
         module: LoadedModule, owner: Tree, signal: ModelSignal
     ) -> None:
-        if _flatten_access(signal.target) in task_owned_selectors:
+        if _flatten_access(signal.target) in (
+            *task_owned_selectors,
+            syscall_flow_selector,
+        ):
             return
         target_name = resolve_object_expression(signal.target, module.name)
         if target_name is None:
@@ -1351,6 +1416,115 @@ def _expand_inheritance(
     user_runtime_types = tuple(
         name for name, model_type in expanded_types.items() if model_type.user_runtime
     )
+    cpu_core_types = tuple(
+        name for name, model_type in expanded_types.items() if model_type.cpu_core
+    )
+    syscall_exit_flow_types = tuple(
+        name
+        for name, model_type in expanded_types.items()
+        if model_type.syscall_exit_flow
+    )
+
+    if len(cpu_core_types) > 1:
+        name = cpu_core_types[1]
+        raise _semantic_error(
+            loaded[name[:-1]],
+            type_nodes[name],
+            "the model may declare at most one cpu_core type",
+        )
+    if len(syscall_exit_flow_types) > 1:
+        name = syscall_exit_flow_types[1]
+        raise _semantic_error(
+            loaded[name[:-1]],
+            type_nodes[name],
+            "the model may declare at most one syscall_exit_flow type",
+        )
+
+    def protocol_action(
+        model_type: ModelType, signal: tuple[str, ...]
+    ) -> ModelAction | None:
+        online = next(
+            (state for state in model_type.states if state.name == ("State", "Online")),
+            None,
+        )
+        return None if online is None else next(
+            (action for action in online.actions if action.signal == signal),
+            None,
+        )
+
+    def one_i32_parameter(action: ModelAction | None, name: str) -> bool:
+        return bool(
+            action is not None
+            and not action.abstract
+            and len(action.parameters) == 1
+            and action.parameters[0].name == name
+            and action.parameters[0].type == ModelTypeExpression(("i32",))
+        )
+
+    for name in cpu_core_types:
+        action = protocol_action(
+            expanded_types[name], ("Action", "OnSyscallExit")
+        )
+        signals = () if action is None else tuple(
+            signal
+            for block in action.blocks
+            if block.kind == "resumes"
+            for signal in block.signals
+        )
+        if (
+            not one_i32_parameter(action, "status")
+            or len(signals) != 1
+            or _flatten_access(signals[0].target) != syscall_flow_selector
+            or signals[0].signal != ("Action", "Enter")
+            or signals[0].mode != "resume"
+            or signals[0].arguments != (ModelExpression("identifier", "status"),)
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "cpu_core requires Online Action::OnSyscallExit(status: i32) forwarding to self.SyscallExitFlowRef.Action::Enter(status)",
+            )
+
+    for name in syscall_exit_flow_types:
+        action = protocol_action(expanded_types[name], ("Action", "Enter"))
+        signals = () if action is None else tuple(
+            signal
+            for block in action.blocks
+            if block.kind == "drives"
+            for signal in block.signals
+        )
+        if (
+            not one_i32_parameter(action, "status")
+            or len(signals) != 1
+            or signals[0].target != ModelExpression("identifier", "CurrentTaskRef")
+            or signals[0].signal != ("Action", "Exit")
+            or signals[0].mode != "drive"
+            or signals[0].arguments != (ModelExpression("identifier", "status"),)
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "syscall_exit_flow requires Online Action::Enter(status: i32) driving CurrentTaskRef.Action::Exit(status)",
+            )
+
+    if cpu_core_types and task_flow_types:
+        fields = {
+            field.name: field
+            for field in expanded_types[task_flow_types[0]].fields or ()
+        }
+        cpu_ref = fields.get("cpu_ref")
+        if (
+            cpu_ref is None
+            or not cpu_ref.mutable
+            or resolve_base(cpu_ref.type, task_flow_types[0][:-1])
+            != cpu_core_types[0]
+        ):
+            name = task_flow_types[0]
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "TaskFlow requires mutable cpu_ref: CPU when cpu_core is modeled",
+            )
 
     if len(user_runtime_types) > 1:
         name = user_runtime_types[1]
@@ -1430,6 +1604,10 @@ def _expand_inheritance(
     def is_sched_core_object(name: tuple[str, ...]) -> bool:
         type_name = object_type(name)[0]
         return type_name in expanded_types and expanded_types[type_name].sched_core
+
+    def is_cpu_core_object(name: tuple[str, ...]) -> bool:
+        type_name = object_type(name)[0]
+        return type_name in expanded_types and expanded_types[type_name].cpu_core
 
     core_actions = {("Action", "Enqueue"), ("Action", "Dequeue")}
     for name, model_type in expanded_types.items():
@@ -1530,20 +1708,47 @@ def _expand_inheritance(
                     )
     for name, model_type in raw_types.items():
         effective = expanded_types[name]
-        if name[-1] in {"TaskFlowRef", "ResumeTargetRef"}:
+        if name[-1] in {
+            "CurrentCPU",
+            "TaskFlowRef",
+            "ResumeTargetRef",
+            "SyscallExitFlowRef",
+        }:
             raise _semantic_error(
                 loaded[name[:-1]],
                 type_nodes[name],
                 "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared",
             )
         if any(
-            field.name in {"TaskFlowRef", "ResumeTargetRef"}
+            field.name
+            in {
+                "CurrentCPU",
+                "TaskFlowRef",
+                "ResumeTargetRef",
+                "SyscallExitFlowRef",
+            }
             for field in model_type.fields or ()
         ):
             raise _semantic_error(
                 loaded[name[:-1]],
                 type_nodes[name],
                 "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared",
+            )
+        if effective.cpu_core and (
+            effective.continuation
+            or effective.sched_core
+            or effective.user_runtime
+        ):
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "cpu_core cannot also be a continuation, sched_core, or user_runtime",
+            )
+        if effective.syscall_exit_flow and not effective.continuation:
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "syscall_exit_flow types must also be continuations",
             )
         if not effective.sched_core:
             continue
@@ -1561,11 +1766,18 @@ def _expand_inheritance(
     for name, model_object in expanded_objects.items():
         owner = object_nodes[name]
         sched_core = is_sched_core_object(name)
+        cpu_core = is_cpu_core_object(name)
         if any(
-            field.name in {"TaskFlowRef", "ResumeTargetRef"}
+            field.name
+            in {
+                "CurrentCPU",
+                "TaskFlowRef",
+                "ResumeTargetRef",
+                "SyscallExitFlowRef",
+            }
             for field in model_object.attrs or ()
         ) or any(
-            reference.name in {"TaskFlowRef", "ResumeTargetRef"}
+            reference.name in {"TaskFlowRef", "ResumeTargetRef", "SyscallExitFlowRef"}
             for reference in model_object.references
         ):
             raise _semantic_error(
@@ -1575,9 +1787,23 @@ def _expand_inheritance(
             )
         if any(
             (_flatten_access(assignment.target) or ([], []))[0][:1]
-            in (["CurrentTaskRef"], ["TaskFlowRef"], ["ResumeTargetRef"], ["self"])
+            in (
+                ["CurrentTaskRef"],
+                ["CurrentCPU"],
+                ["TaskFlowRef"],
+                ["ResumeTargetRef"],
+                ["SyscallExitFlowRef"],
+                ["self"],
+            )
             and any(
-                segment in {"CurrentTaskRef", "TaskFlowRef", "ResumeTargetRef"}
+                segment
+                in {
+                    "CurrentTaskRef",
+                    "CurrentCPU",
+                    "TaskFlowRef",
+                    "ResumeTargetRef",
+                    "SyscallExitFlowRef",
+                }
                 for segment in (_flatten_access(assignment.target) or ([], []))[0]
             )
             for reference in model_object.references
@@ -1603,10 +1829,30 @@ def _expand_inheritance(
                             "Task Transition::Resume is only allowed from State::Online "
                             "to State::OnCpu",
                         )
+        if cpu_core and model_object.logical_id is None:
+            raise _semantic_error(
+                loaded[name[:-1]], owner, "cpu_core object requires logical_id"
+            )
+        if not cpu_core and model_object.logical_id is not None:
+            raise _semantic_error(
+                loaded[name[:-1]], owner, "logical_id is only allowed on cpu_core objects"
+            )
         if sched_core and model_object.idle_task is None:
             raise _semantic_error(
                 loaded[name[:-1]], owner, "sched_core object requires idle_task"
             )
+        if sched_core and cpu_core_types:
+            parent = (
+                None
+                if model_object.parent is None
+                else resolve_object_expression(model_object.parent, name[:-1])
+            )
+            if parent is None or not is_cpu_core_object(parent):
+                raise _semantic_error(
+                    loaded[name[:-1]],
+                    owner,
+                    "sched_core object must be owned by a cpu_core parent",
+                )
         if not sched_core and model_object.idle_task is not None:
             raise _semantic_error(
                 loaded[name[:-1]], owner, "idle_task is only allowed on sched_core objects"
@@ -1639,6 +1885,24 @@ def _expand_inheritance(
             raise _semantic_error(
                 loaded[name[:-1]], owner, "sched_core object requires State::Online"
             )
+
+    logical_ids = tuple(
+        model_object.logical_id
+        for name, model_object in expanded_objects.items()
+        if is_cpu_core_object(name)
+    )
+    if len(set(logical_ids)) != len(logical_ids):
+        duplicate = next(item for item in logical_ids if logical_ids.count(item) > 1)
+        name = next(
+            name
+            for name, item in expanded_objects.items()
+            if is_cpu_core_object(name) and item.logical_id == duplicate
+        )
+        raise _semantic_error(
+            loaded[name[:-1]],
+            object_nodes[name],
+            f"duplicate CPU logical_id {duplicate}",
+        )
 
     concrete_tasks = tuple(
         name for name in expanded_objects if is_task_object(name)
@@ -1686,6 +1950,14 @@ def _expand_inheritance(
             # ResumeTargetRef may dynamically denote either the TaskFlow or a
             # parked user_runtime. Its signal surface is validated specially.
             return (task_flow_types[0], ())
+        if access == syscall_flow_selector:
+            if len(syscall_exit_flow_types) != 1:
+                raise _semantic_error(
+                    loaded[module_name],
+                    loaded[module_name].tree,
+                    "self.SyscallExitFlowRef requires exactly one syscall_exit_flow type",
+                )
+            return (syscall_exit_flow_types[0], ())
         if access == (
             ["CurrentTaskRef", "UserAppRuntimeRef"],
             ["member"],
@@ -1717,6 +1989,14 @@ def _expand_inheritance(
                         "CurrentTaskRef requires exactly one declared Task type",
                     )
                 return (task_types[0], ())
+            if identifier == "CurrentCPU":
+                if len(cpu_core_types) != 1:
+                    raise _semantic_error(
+                        loaded[module_name],
+                        loaded[module_name].tree,
+                        "CurrentCPU requires exactly one declared cpu_core type",
+                    )
+                return (cpu_core_types[0], ())
         if (
             access is not None
             and source is not None
@@ -1772,7 +2052,8 @@ def _expand_inheritance(
         fields: dict[str, ModelField],
         owner: Tree,
     ) -> None:
-        if _flatten_access(signal.target) in task_owned_selectors:
+        flattened = _flatten_access(signal.target)
+        if flattened in task_owned_selectors:
             if signal.arguments:
                 raise _semantic_error(
                     loaded[module_name],
@@ -1780,9 +2061,14 @@ def _expand_inheritance(
                     "Task-owned resume selectors do not accept arguments",
                 )
             return
+        if flattened == syscall_flow_selector:
+            return
         target_name = resolve_object_expression(signal.target, module_name)
         if target_name is None:
-            if signal.arguments:
+            if signal.arguments and flattened not in (
+                (["CurrentTaskRef"], []),
+                (["CurrentCPU"], []),
+            ):
                 raise _semantic_error(
                     loaded[module_name],
                     owner,
@@ -1798,12 +2084,14 @@ def _expand_inheritance(
                     and compatible(target_type, (task_types[0], ()))
                     or len(user_runtime_types) == 1
                     and compatible(target_type, (user_runtime_types[0], ()))
+                    or len(cpu_core_types) == 1
+                    and compatible(target_type, (cpu_core_types[0], ()))
                 )
             ):
                 raise _semantic_error(
                     loaded[module_name],
                     owner,
-                    "dynamic signal target must have Task or user_runtime type",
+                    "dynamic signal target must have Task, CPU, or user_runtime type",
                 )
             return
         signature = signatures.get((target_name, signal.signal))
@@ -1907,6 +2195,17 @@ def _expand_inheritance(
                                     owner,
                                     "Task-owned resume selector Action::Enter must use resumes",
                                 )
+                        if flattened_target == syscall_flow_selector:
+                            if (
+                                not is_cpu_core_object(name)
+                                or signal.mode != "resume"
+                                or signal.signal != ("Action", "Enter")
+                            ):
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "SyscallExitFlowRef is only available as resumes Action::Enter in CPU handlers",
+                                )
                         runtime_selector = flattened_target == (
                             ["CurrentTaskRef", "UserAppRuntimeRef"],
                             ["member"],
@@ -1930,7 +2229,7 @@ def _expand_inheritance(
                             and not flattened_target[1]
                         ):
                             dynamic = flattened_target[0][0]
-                            if dynamic == "CurrentTaskRef":
+                            if dynamic in {"CurrentTaskRef", "CurrentCPU"}:
                                 pass
                             elif dynamic not in environment:
                                 raise _semantic_error(
@@ -1988,7 +2287,13 @@ def _expand_inheritance(
                     for update in block.updates:
                         access = _flatten_access(update.target)
                         if access is not None and any(
-                            segment in {"TaskFlowRef", "ResumeTargetRef"}
+                            segment
+                            in {
+                                "CurrentCPU",
+                                "TaskFlowRef",
+                                "ResumeTargetRef",
+                                "SyscallExitFlowRef",
+                            }
                             for segment in access[0]
                         ):
                             raise _semantic_error(
