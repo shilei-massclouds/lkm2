@@ -12,4 +12,6 @@ make run USER_RUNTIME_SIGNALS=tools/signals/default.signals
 - `parked.signals`：只有注释，没有有效信号；使 UserAppRuntime 保持 parked，推导结果为
   `yielded`。
 
-未指定信号文件时，推导器仍使用内存默认程序，不会隐式读取本目录中的文件。
+`make run`（包括 `make -C tools run`）默认显式传入 `parked.signals`。直接调用
+`tools/bin/derive` 而不指定信号文件时，推导器仍使用内存默认程序，不会隐式读取本目录；
+`make run USER_RUNTIME_SIGNALS=` 会省略参数并恢复这一行为。

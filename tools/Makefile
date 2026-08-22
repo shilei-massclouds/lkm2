@@ -6,6 +6,7 @@ BOOTSTRAP_PYTHON ?= python3
 PYTHON ?= $(VENV_DIR)/bin/python
 PYTHON_BIN_DIR := $(dir $(abspath $(PYTHON)))
 DEFAULT_SEQUENCE := $(CURDIR)/build/derive/main.sequence.json
+USER_RUNTIME_SIGNALS ?= tools/signals/parked.signals
 RUN_QUIET :=
 RUN_TARGET_QUIET := @
 

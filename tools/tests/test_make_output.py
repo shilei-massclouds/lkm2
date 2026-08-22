@@ -37,42 +37,55 @@ class MakeRunOutputTests(unittest.TestCase):
     def test_default_run_only_prints_derivation_output(self) -> None:
         completed = self._run()
 
-        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, EXPECTED_DERIVATION_OUTPUT)
-        self.assertIn("Error 1", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
     def test_verbose_run_prints_all_commands_and_derivation_output(self) -> None:
         completed = self._run("VERBOSE=1")
 
-        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 0)
         for command in (
             "make --no-print-directory -C tools run",
             "-m compileall -q src tests",
             "-m modelc.build_cache --repository",
             "-m derive.sequence_builder",
             "/tools/bin/derive ",
+            '--user-runtime-signals "'
+            + str(REPOSITORY / "tools/signals/parked.signals")
+            + '"',
         ):
             with self.subTest(command=command):
                 self.assertIn(command, completed.stdout)
         self.assertTrue(completed.stdout.endswith(EXPECTED_DERIVATION_OUTPUT))
-        self.assertIn("Error 1", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
     def test_only_exact_verbose_one_enables_command_echo(self) -> None:
         completed = self._run("VERBOSE=1 0")
 
-        self.assertNotEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, EXPECTED_DERIVATION_OUTPUT)
-        self.assertIn("Error 1", completed.stderr)
+        self.assertEqual(completed.stderr, "")
 
-    def test_empty_user_runtime_signal_program_yields_successfully(self) -> None:
+    def test_absolute_custom_signal_program_overrides_default(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            signals = Path(directory) / "empty.signals"
-            signals.write_text("", encoding="utf-8")
+            signals = Path(directory) / "custom.signals"
+            signals.write_text("syscall.exit <local> 0\n", encoding="utf-8")
             completed = self._run(f"USER_RUNTIME_SIGNALS={signals}")
 
-        self.assertEqual(completed.returncode, 0)
-        self.assertTrue(completed.stdout.endswith("Derivation yielded!\n"))
-        self.assertEqual(completed.stderr, "")
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertTrue(completed.stdout.endswith("stopped: panic\n"))
+        self.assertIn("Attempted to kill init!", completed.stdout)
+        self.assertIn("Error 1", completed.stderr)
+
+    def test_explicit_empty_signal_variable_uses_in_memory_default(self) -> None:
+        completed = self._run("VERBOSE=1", "USER_RUNTIME_SIGNALS=")
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertNotIn("--user-runtime-signals", completed.stdout)
+        self.assertIn("Attempted to kill init!", completed.stdout)
+        self.assertTrue(completed.stdout.endswith("stopped: panic\n"))
+        self.assertIn("Error 1", completed.stderr)
 
     def test_quiet_run_keeps_error_diagnostics_visible(self) -> None:
         completed = self._run("MODEL=missing-model.spec")

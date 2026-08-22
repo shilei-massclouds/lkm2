@@ -62,7 +62,7 @@ make build  # Python 源码编译检查并更新持久化 Model IR 缓存
 make test   # 运行 unittest 测试
 make test-derive  # 运行 derive 单元测试和 golden 冒烟测试
 make test-smoke   # 只运行 derive golden 冒烟案例
-make run    # 以 model/main.spec 为默认模型执行 tools/bin/derive
+make run    # 以默认模型和 tools/signals/parked.signals 执行 tools/bin/derive
 make run VERBOSE=1  # 同上，并显示 Make 委托、构建步骤和 derive 命令
 ```
 
@@ -88,14 +88,17 @@ source tools/.venv/bin/activate
 tools/bin/modelc                         # 默认 model/main.spec
 tools/bin/modelc model/main.spec
 tools/bin/modelc -o model.json model/main.spec
-tools/bin/derive                         # 默认 --model model/main.spec
+tools/bin/derive                         # 默认模型 + 内存 syscall.exit 程序
 tools/bin/derive --model model/main.spec
 tools/bin/derive --model tools/build/modelc/model.ir.json
 tools/bin/derive --sequence tools/build/derive/main.sequence.json
 tools/bin/derive --user-runtime-signals tools/signals/default.signals
+make run                                 # 默认使用 parked.signals
 make run MODEL=model/main.spec
 make run SEQUENCE=tools/build/derive/main.sequence.json
-make run USER_RUNTIME_SIGNALS=tools/signals/parked.signals
+make run USER_RUNTIME_SIGNALS=tools/signals/default.signals
+make run USER_RUNTIME_SIGNALS=/absolute/path/custom.signals
+make run USER_RUNTIME_SIGNALS=           # 省略 CLI 参数，使用内存默认程序
 ```
 
 激活虚拟环境后，也可以直接使用安装生成的 `modelc` 和 `derive` 命令。
@@ -112,13 +115,15 @@ derive 命令行，只保留推导输出或错误诊断；只有 `VERBOSE` 严�
 `--user-runtime-signals` 使用逐行文本文件完全替换内存默认程序。每个非空、非注释行
 格式为 `<family>.<name> <local|logical-id> [signed-integer ...]`，支持 `#` 行尾注释。
 当前可执行信号只有恰好带一个 signed 32-bit status 的 `syscall.exit`；其他合法信号
-可解析，但消费时明确失败。未指定文件时默认程序为
-`syscall.exit <local> 0`，因此默认 CLI 走 PID 1 panic 并返回 1；空文件会把用户态
-episode parked，推导结果为 `yielded` 并返回 0。
+可解析，但消费时明确失败。推导器未收到该参数时默认程序为
+`syscall.exit <local> 0`，因此直接使用默认 CLI 会走 PID 1 panic 并返回 1；空文件会把
+用户态 episode parked，推导结果为 `yielded` 并返回 0。Make 接口默认把
+`tools/signals/parked.signals` 作为参数传入；命令行可以用 `USER_RUNTIME_SIGNALS`
+覆盖它，显式赋空值则完全省略该参数。
 
 仓库将可复用的信号程序持久保存在 [`signals/`](signals/)：`default.signals` 显式表示
-内存默认程序，`parked.signals` 是只有注释的空程序。该目录是输入样例集合，不是
-隐式搜索路径；命令行仍须传入所选文件，未传时也不会读取磁盘。
+内存默认程序，`parked.signals` 是只有注释的空程序。Make 默认值明确指向后者；
+`derive` CLI 本身不会隐式搜索或读取该目录。
 
 ## Model IR、推导和缓存
 
@@ -190,11 +195,13 @@ idle Task，始终位于 runq 之外；Kernel 首次 Resume 使其进入 OnCpu�
 通过 `CurrentTaskRef.UserAppRuntimeRef` 同步完成推导器按需生成的
 `KernelInitTask.UserAppRuntime` 的 Preset、Setup、Enable，再 yield 到其
 `Action::Enter` 用户态黑盒入口。`user_runtime: true` 指示推导器在此消费实例私有的
-运行时 signal cursor。默认 exit 先送达由 `cpu_ref` 解析出的 `BootCPU`，CPU 创建 fresh
-`SyscallExitFlow0`，再驱动 `KernelInitTask.Action::Exit(0)`。该 EventFlow 不调用
-Scheduler、不改变 Task `OnCpu` 状态或 runq；PID 1 保护最终以
-`Attempted to kill init!` panic，CLI 返回 1。指定空信号文件时入口保持 parked，结果
-为 `yielded`，CLI 返回 0。Model IR schema 为 v11。
+运行时 signal cursor。Make 默认的 parked 程序没有有效信号，因此入口保持 parked，
+推导结果为 `yielded`，CLI 返回 0。直接无参数调用 `tools/bin/derive`、显式选择
+`default.signals`，或令 Make 的 `USER_RUNTIME_SIGNALS=` 省略参数时，内存默认 exit 会
+送达由 `cpu_ref` 解析出的 `BootCPU`；CPU 创建 fresh `SyscallExitFlow0`，再驱动
+`KernelInitTask.Action::Exit(0)`。该 EventFlow 不调用 Scheduler、不改变 Task `OnCpu`
+状态或 runq；PID 1 保护最终以 `Attempted to kill init!` panic，CLI 返回 1。Model IR
+schema 为 v11。
 
 公共库接口为：
 
