@@ -1,36 +1,7 @@
 .DEFAULT_GOAL := build
 
-TARGET ?= riscv64imac-unknown-none-elf
-RUSTC ?= rustc
-OBJCOPY ?= rust-objcopy
-QEMU ?= qemu-system-riscv64
-
-BUILD_DIR := build
-BUILD_STAMP := $(BUILD_DIR)/.stamp
-ELF := $(BUILD_DIR)/lkm2.elf
-IMAGE := $(BUILD_DIR)/lkm2.bin
-RUST_SOURCES := main.rs phases.rs phases/arch_head.rs
-
-RUSTC_FLAGS := \
-	--edition=2024 \
-	--crate-name=lkm2 \
-	--crate-type=bin \
-	--target=$(TARGET) \
-	-C opt-level=2 \
-	-C panic=abort \
-	-C relocation-model=static \
-	-C linker=rust-lld \
-	-C link-arg=-Tlinker.ld \
-	-C link-arg=--gc-sections \
-	-C link-arg=--build-id=none
-
-QEMU_FLAGS := \
-	-machine virt \
-	-bios default \
-	-m 128M \
-	-smp 1 \
-	-nographic \
-	-kernel $(IMAGE)
+include build.mak
+include qemu.mak
 
 .PHONY: all build run clean help
 
@@ -38,7 +9,7 @@ all: build
 
 build: $(IMAGE)
 
-$(ELF): $(RUST_SOURCES) linker.ld | $(BUILD_STAMP)
+$(ELF): $(RUST_SOURCES) $(LINKER_SCRIPT) | $(BUILD_STAMP)
 	$(RUSTC) $(RUSTC_FLAGS) -o $@ main.rs
 
 $(IMAGE): $(ELF)
