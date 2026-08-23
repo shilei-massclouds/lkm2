@@ -1,10 +1,13 @@
-# LKM
+# LKM2
 
-本仓库维护 LKM 的模型规格、设计文档和配套工具。仓库根目录只负责组织各组件及提供统一协调入口；各组件的环境、构建方式和使用说明由组件目录自行维护。
+本仓库维护 LKM2 的模型规格、设计文档、Rust 实现和配套工具。仓库根目录负责组织各组件
+并提供统一协调入口。
 
 ## 目录
 
 - `model/`：模型入口和系统规格。
+- `coding/`：从模型到实现的编码约束。
+- `impl/`：不依赖 Cargo 和外部 crate 的 Rust 内核实现。
 - `tools/`：模型工具链，详见 [`tools/README.md`](tools/README.md)。
 - `docs/`：总体计划和设计文档。
 - `Makefile`：将统一目标委托给各组件 Makefile。
@@ -18,15 +21,14 @@ make setup
 make build
 make test
 make derive
-make run  # 暂时保留的空操作
+make run
 make clean
 ```
 
-当前 `setup`、`build`、`test`、`derive` 和 `clean` 由根 Makefile 委托给
-`tools/Makefile`，其中根目录 `make derive` 对应组件入口 `make -C tools run`。
-根目录 `make run` 暂时保留为空操作：不构建、不推导、无输出并成功退出。后续增加
-其他组件时，根 Makefile 将继续负责组合各组件目标。组件特有的安装、运行和测试方式
-不在根 README 重复说明。
+根目录 `make build` 依次构建工具链与 Rust 实现，`make clean` 清理这两个组件的构建
+产物。`make derive` 仍对应 `make -C tools run`；`make run` 对应
+`make -C impl run`，会构建 raw kernel image 并使用 QEMU virt/OpenSBI 启动。入口空壳
+不会产生 LKM2 串口输出，并会一直停驻；在 QEMU 终端中按 `Ctrl-a x` 退出。
 
 根目录 `make derive` 与组件入口 `make -C tools run` 默认显式使用
 `tools/signals/parked.signals`。推导会完成 BootCPU/CPU0 Scheduler 初始化、首次
@@ -38,3 +40,21 @@ Suspend、事务式 current 切换与 Resume，然后停在 UserAppRuntime，以
 程序。
 仓库内可复用的信号程序保存在 [`tools/signals/`](tools/signals/)；详细语义与因果输出
 见工具说明。
+
+## 源码和参考基线
+
+项目固定采用以下 sibling 布局：
+
+```text
+<parent>/
+├── lkm2/
+└── linux-6.12/
+```
+
+`../linux-6.12` 仅作为只读的 Linux 机制参考与未来差分测试基线。当前构建不依赖它，
+Makefile 也不会检查它是否存在。Rust 实现不使用 Cargo，不从 registry、Git 或 vendor
+目录引入外部 crate，只使用仓库源码与固定工具链提供的 sysroot crate。
+
+当前只支持 RISC-V 64 位；这一架构范围同时适用于 LKM2 和 `../linux-6.12` sibling。
+实现的默认 Rust target 是 `riscv64imac-unknown-none-elf`，不支持其他架构。后续实现
+内容将以该 sibling 中的 RISC-V 64 位机制、顺序和差分行为为参考。

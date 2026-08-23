@@ -1,0 +1,48 @@
+OUTPUT_ARCH(riscv)
+ENTRY(_start)
+
+/*
+ * Match the 64-bit RISC-V kernel virtual link base.  The raw image is loaded
+ * by OpenSBI at its physical kernel address; the position-independent head
+ * stub does not use the virtual address before later boot phases establish it.
+ */
+KERNEL_LINK_ADDR = 0xffffffff80000000;
+LOAD_OFFSET = KERNEL_LINK_ADDR;
+
+SECTIONS
+{
+    . = LOAD_OFFSET;
+
+    .head.text : AT(ADDR(.head.text) - LOAD_OFFSET) ALIGN(4K)
+    {
+        KEEP(*(.head.text.entry))
+        KEEP(*(.head.text .head.text.*))
+    }
+
+    .text : AT(ADDR(.text) - LOAD_OFFSET) ALIGN(4K)
+    {
+        *(.text .text.*)
+    }
+
+    .rodata : AT(ADDR(.rodata) - LOAD_OFFSET) ALIGN(4K)
+    {
+        *(.rodata .rodata.*)
+    }
+
+    .data : AT(ADDR(.data) - LOAD_OFFSET) ALIGN(4K)
+    {
+        *(.data .data.*)
+    }
+
+    .bss (NOLOAD) : AT(ADDR(.bss) - LOAD_OFFSET) ALIGN(4K)
+    {
+        *(.bss .bss.*)
+        *(COMMON)
+    }
+
+    /DISCARD/ :
+    {
+        *(.eh_frame .eh_frame.*)
+        *(.comment)
+    }
+}

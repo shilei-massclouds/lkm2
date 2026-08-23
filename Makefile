@@ -1,6 +1,7 @@
 .DEFAULT_GOAL := all
 
 TOOLS_MAKE := $(MAKE) --no-print-directory -C tools
+IMPL_MAKE := $(MAKE) --no-print-directory -C impl
 RUN_QUIET := @
 
 ifeq ($(VERBOSE),1)
@@ -11,22 +12,30 @@ endif
 
 all: build
 
-setup build test test-derive test-smoke clean:
+setup test test-derive test-smoke:
 	$(TOOLS_MAKE) $@
+
+build:
+	$(TOOLS_MAKE) build
+	$(IMPL_MAKE) build
 
 derive:
 	$(RUN_QUIET)$(TOOLS_MAKE) run
 
 run:
-	@:
+	$(IMPL_MAKE) run
+
+clean:
+	$(TOOLS_MAKE) clean
+	$(IMPL_MAKE) clean
 
 help:
 	@echo "Top-level coordination targets:"
 	@echo "  all    Build all components (default)"
 	@echo "  setup  Set up component development environments"
-	@echo "  build  Build all components"
+	@echo "  build  Build tools and the kernel implementation"
 	@echo "  derive  Run the current project derivation"
-	@echo "  run    Temporarily retained as a no-op"
+	@echo "  run    Build and run the kernel implementation on QEMU"
 	@echo "  test   Test all components"
 	@echo "  test-derive  Test derive units and golden cases"
 	@echo "  test-smoke   Test only derive golden cases"
@@ -34,3 +43,5 @@ help:
 	@echo "  help   Show this help"
 	@echo
 	@$(TOOLS_MAKE) help
+	@echo
+	@$(IMPL_MAKE) help

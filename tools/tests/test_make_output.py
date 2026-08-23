@@ -99,18 +99,18 @@ class MakeDeriveOutputTests(unittest.TestCase):
         self.assertIn("missing-model.spec", completed.stderr)
         self.assertNotIn("tools/bin/derive", completed.stderr)
 
-    def test_root_run_is_silent_no_op(self) -> None:
+    def test_root_run_delegates_to_impl_without_running_qemu(self) -> None:
         completed = self._make(
             "run",
-            "VERBOSE=1",
+            "IMPL_MAKE=echo impl-delegated",
             "TOOLS_MAKE=false",
-            "MODEL=missing-model.spec",
-            "SEQUENCE=missing-sequence.json",
-            "USER_RUNTIME_SIGNALS=missing-signals.txt",
         )
 
         self.assertEqual(completed.returncode, 0)
-        self.assertEqual(completed.stdout, "")
+        self.assertEqual(
+            completed.stdout,
+            "echo impl-delegated run\nimpl-delegated run\n",
+        )
         self.assertEqual(completed.stderr, "")
 
 
