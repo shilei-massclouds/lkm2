@@ -34,6 +34,12 @@ SECTIONS
         *(.data .data.*)
     }
 
+    .sdata : AT(ADDR(.sdata) - LOAD_OFFSET) ALIGN(4K)
+    {
+        __global_pointer$ = . + 0x800;
+        *(.sdata .sdata.*)
+    }
+
     .bss (NOLOAD) : AT(ADDR(.bss) - LOAD_OFFSET) ALIGN(4K)
     {
         *(.bss .bss.*)
