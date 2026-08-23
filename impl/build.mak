@@ -9,7 +9,7 @@ BUILD_STAMP := $(BUILD_DIR)/.stamp
 ELF := $(BUILD_DIR)/lkm2.elf
 CLIPPY_ELF := $(BUILD_DIR)/lkm2.clippy.elf
 IMAGE := $(BUILD_DIR)/lkm2.bin
-RUST_SOURCES := main.rs cpu.rs phases.rs phases/arch_head.rs phases/asm_macros.rs phases/csr.rs
+RUST_SOURCES := main.rs systems/kernel/config.rs objects.rs objects/cpu.rs phases.rs phases/arch_head.rs phases/asm_macros.rs phases/csr.rs
 LINKER_SCRIPT := systems/kernel/linker.ld
 
 RUSTC_FLAGS := \

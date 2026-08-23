@@ -1,6 +1,6 @@
 //! Architecture-specific machine entry.
 
-use crate::cpu::CPUID_TO_HARTID_MAP;
+use crate::objects::cpu::CPUID_TO_HARTID_MAP;
 
 use super::asm_macros::load_global_pointer;
 use super::csr::SR_FS_VS;

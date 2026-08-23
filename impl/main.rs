@@ -3,7 +3,9 @@
 #![no_std]
 #![no_main]
 
-mod cpu;
+#[path = "systems/kernel/config.rs"]
+mod config;
+mod objects;
 mod phases;
 
 use core::panic::PanicInfo;
