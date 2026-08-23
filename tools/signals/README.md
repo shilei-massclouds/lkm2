@@ -5,13 +5,15 @@
 
 ```sh
 tools/bin/derive --user-runtime-signals tools/signals/default.signals
-make run USER_RUNTIME_SIGNALS=tools/signals/default.signals
+make derive USER_RUNTIME_SIGNALS=tools/signals/default.signals
+make -C tools run USER_RUNTIME_SIGNALS=tools/signals/default.signals
 ```
 
 - `default.signals`：显式表示内存默认程序，向本地 CPU 发送 `syscall.exit(0)`。
 - `parked.signals`：只有注释，没有有效信号；使 UserAppRuntime 保持 parked，推导结果为
   `yielded`。
 
-`make run`（包括 `make -C tools run`）默认显式传入 `parked.signals`。直接调用
-`tools/bin/derive` 而不指定信号文件时，推导器仍使用内存默认程序，不会隐式读取本目录；
-`make run USER_RUNTIME_SIGNALS=` 会省略参数并恢复这一行为。
+根目录 `make derive` 和组件入口 `make -C tools run` 默认显式传入 `parked.signals`。
+根目录 `make run` 暂时为空操作。直接调用 `tools/bin/derive` 而不指定信号文件时，
+推导器仍使用内存默认程序，不会隐式读取本目录；
+`make derive USER_RUNTIME_SIGNALS=` 会省略参数并恢复这一行为。

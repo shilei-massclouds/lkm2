@@ -62,8 +62,8 @@ make build  # Python 源码编译检查并更新持久化 Model IR 缓存
 make test   # 运行 unittest 测试
 make test-derive  # 运行 derive 单元测试和 golden 冒烟测试
 make test-smoke   # 只运行 derive golden 冒烟案例
-make run    # 以默认模型和 tools/signals/parked.signals 执行 tools/bin/derive
-make run VERBOSE=1  # 同上，并显示 Make 委托、构建步骤和 derive 命令
+make derive    # 以默认模型和 tools/signals/parked.signals 执行 tools/bin/derive
+make derive VERBOSE=1  # 同上，并显示 Make 委托、构建步骤和 derive 命令
 ```
 
 直接使用组件 Makefile 的等价命令为：
@@ -93,12 +93,13 @@ tools/bin/derive --model model/main.spec
 tools/bin/derive --model tools/build/modelc/model.ir.json
 tools/bin/derive --sequence tools/build/derive/main.sequence.json
 tools/bin/derive --user-runtime-signals tools/signals/default.signals
-make run                                 # 默认使用 parked.signals
-make run MODEL=model/main.spec
-make run SEQUENCE=tools/build/derive/main.sequence.json
-make run USER_RUNTIME_SIGNALS=tools/signals/default.signals
-make run USER_RUNTIME_SIGNALS=/absolute/path/custom.signals
-make run USER_RUNTIME_SIGNALS=           # 省略 CLI 参数，使用内存默认程序
+make derive                              # 根入口，默认使用 parked.signals
+make derive MODEL=model/main.spec
+make derive SEQUENCE=tools/build/derive/main.sequence.json
+make derive USER_RUNTIME_SIGNALS=tools/signals/default.signals
+make derive USER_RUNTIME_SIGNALS=/absolute/path/custom.signals
+make derive USER_RUNTIME_SIGNALS=        # 省略 CLI 参数，使用内存默认程序
+make -C tools run                        # 组件入口，行为与根 derive 相同
 ```
 
 激活虚拟环境后，也可以直接使用安装生成的 `modelc` 和 `derive` 命令。
@@ -107,17 +108,19 @@ make run USER_RUNTIME_SIGNALS=           # 省略 CLI 参数，使用内存默�
 输入失败退出 1，参数错误退出 2。人类可读的推导过程（包括语义失败）写 stdout；
 该输出是精简因果视图，展示 drives/emits/resumes 因果关系、实参、单元进入状态和提交结果。
 depends_on、ensures、establishes、invariant、handler 匹配及其逐项结果保留在结果
-JSON 中。输入和编译诊断写 stderr。默认 `make run` 隐藏 Make 委托、构建步骤和
-derive 命令行，只保留推导输出或错误诊断；只有 `VERBOSE` 严格等于 `1` 时恢复
-全部命令回显。这个静默行为只作用于 `run` 的构建前置步骤，独立的 `make build`
-和 `make test` 保持原有输出。
+JSON 中。输入和编译诊断写 stderr。默认根入口 `make derive` 隐藏 Make 委托、构建
+步骤和 derive 命令行，只保留推导输出或错误诊断；组件入口 `make -C tools run` 保持
+相同行为。只有 `VERBOSE` 严格等于 `1` 时恢复全部命令回显。这个静默行为只作用于
+推导入口的构建前置步骤，独立的 `make build` 和 `make test` 保持原有输出。根目录
+`make run` 暂时为空操作。
 
 `--user-runtime-signals` 使用逐行文本文件完全替换内存默认程序。每个非空、非注释行
 格式为 `<family>.<name> <local|logical-id> [signed-integer ...]`，支持 `#` 行尾注释。
 当前可执行信号只有恰好带一个 signed 32-bit status 的 `syscall.exit`；其他合法信号
 可解析，但消费时明确失败。推导器未收到该参数时默认程序为
 `syscall.exit <local> 0`，因此直接使用默认 CLI 会走 PID 1 panic 并返回 1；空文件会把
-用户态 episode parked，推导结果为 `yielded` 并返回 0。Make 接口默认把
+用户态 episode parked，推导结果为 `yielded` 并返回 0。根 `derive`/组件 `run` Make
+接口默认把
 `tools/signals/parked.signals` 作为参数传入；命令行可以用 `USER_RUNTIME_SIGNALS`
 覆盖它，显式赋空值则完全省略该参数。
 
@@ -187,7 +190,8 @@ resumes。提交前失败会丢弃这些 resumes 并保留旧 current；恢复�
 结果总体状态在任一路径失败时为 `failed`，否则在存在 suspended 路径时为
 `yielded`，其余为 `passed`；CLI 对多路径按稳定顺序分段输出，并在总体失败时返回 1。
 
-默认 `make run` 输出完整推导，与结论空开一行。BootSetup 将 Scheduler 推进到
+默认 `make derive`（或 `make -C tools run`）输出完整推导，与结论空开一行。
+BootSetup 将 Scheduler 推进到
 Online 并启用 `KernelInitTask`；其 Enable 生命周期驱动隐藏 runq 的 Enqueue；
 Suspend 与 Resume 不改变 runnable membership。BootTask 初始为 Online 且兼作
 idle Task，始终位于 runq 之外；Kernel 首次 Resume 使其进入 OnCpu。切换到
@@ -197,7 +201,7 @@ idle Task，始终位于 runq 之外；Kernel 首次 Resume 使其进入 OnCpu�
 `Action::Enter` 用户态黑盒入口。`user_runtime: true` 指示推导器在此消费实例私有的
 运行时 signal cursor。Make 默认的 parked 程序没有有效信号，因此入口保持 parked，
 推导结果为 `yielded`，CLI 返回 0。直接无参数调用 `tools/bin/derive`、显式选择
-`default.signals`，或令 Make 的 `USER_RUNTIME_SIGNALS=` 省略参数时，内存默认 exit 会
+`default.signals`，或令推导 Make 入口的 `USER_RUNTIME_SIGNALS=` 省略参数时，内存默认 exit 会
 送达由 `cpu_ref` 解析出的 `BootCPU`；CPU 创建 fresh `SyscallExitFlow0`，再驱动
 `KernelInitTask.Action::Exit(0)`。该 EventFlow 不调用 Scheduler、不改变 Task `OnCpu`
 状态或 runq；PID 1 保护最终以 `Attempted to kill init!` panic，CLI 返回 1。Model IR
