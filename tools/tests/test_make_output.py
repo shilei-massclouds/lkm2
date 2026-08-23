@@ -113,6 +113,23 @@ class MakeDeriveOutputTests(unittest.TestCase):
         )
         self.assertEqual(completed.stderr, "")
 
+    def test_root_test_delegates_to_tools_and_impl(self) -> None:
+        completed = self._make(
+            "test",
+            "TOOLS_MAKE=echo tools-delegated",
+            "IMPL_MAKE=echo impl-delegated",
+        )
+
+        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(
+            completed.stdout,
+            "echo tools-delegated test\n"
+            "tools-delegated test\n"
+            "echo impl-delegated test\n"
+            "impl-delegated test\n",
+        )
+        self.assertEqual(completed.stderr, "")
+
 
 if __name__ == "__main__":
     unittest.main()

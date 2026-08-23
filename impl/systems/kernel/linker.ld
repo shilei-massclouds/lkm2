@@ -42,8 +42,11 @@ SECTIONS
 
     .bss (NOLOAD) : AT(ADDR(.bss) - LOAD_OFFSET) ALIGN(4K)
     {
+        __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
+        . = ALIGN(8);
+        __bss_stop = .;
     }
 
     /DISCARD/ :

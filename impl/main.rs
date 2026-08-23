@@ -3,6 +3,7 @@
 #![no_std]
 #![no_main]
 
+mod cpu;
 mod phases;
 
 use core::panic::PanicInfo;
