@@ -2142,6 +2142,7 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("objects", "scheduler"),
                 ("objects", "task"),
                 ("objects", "user_app_runtime"),
+                ("objects", "vm"),
                 ("phases",),
                 ("phases", "arch_head"),
                 ("phases", "kernel_init"),

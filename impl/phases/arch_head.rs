@@ -2,7 +2,7 @@
 
 use crate::config;
 use crate::objects::cpu::CPUID_TO_HARTID_MAP;
-use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK};
+use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK, setup_vm};
 
 use super::asm_macros::load_global_pointer;
 use super::csr::SR_FS_VS;
@@ -50,7 +50,7 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
         "la a3, .Lsecondary_park",
         "csrw stvec, a3",
 
-        "call setup_vm",
+        "call {setup_vm}",
 
     ".align 2",
     ".Lsecondary_park:",
@@ -67,6 +67,7 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
         riscv_szptr = const core::mem::size_of::<usize>(),
         cpuid_to_hartid_map = sym CPUID_TO_HARTID_MAP,
         init_task = sym BOOT_TASK,
+        setup_vm = sym setup_vm,
         thread_size = const config::THREAD_SIZE,
         pt_size_on_stack = const PT_SIZE_ON_STACK,
     );

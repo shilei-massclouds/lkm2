@@ -4,3 +4,4 @@ spec cpu;
 spec scheduler;
 spec task;
 spec user_app_runtime;
+spec vm;
