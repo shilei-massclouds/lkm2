@@ -1,6 +1,8 @@
 //! Architecture-specific machine entry.
 
+use crate::config;
 use crate::objects::cpu::CPUID_TO_HARTID_MAP;
+use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK};
 
 use super::asm_macros::load_global_pointer;
 use super::csr::SR_FS_VS;
@@ -37,6 +39,11 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
         "la a2, {cpuid_to_hartid_map}",
         "sd a0, (a2)",
 
+        /* Initialize the boot task and kernel stack */
+        "la tp, {init_task}",
+        "la sp, init_thread_union + {thread_size}",
+        "addi sp, sp, -{pt_size_on_stack}",
+
         "1:",
         "wfi",
         "j 1b",
@@ -44,5 +51,8 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
         sr_fs_vs = const SR_FS_VS,
         riscv_szptr = const core::mem::size_of::<usize>(),
         cpuid_to_hartid_map = sym CPUID_TO_HARTID_MAP,
+        init_task = sym BOOT_TASK,
+        thread_size = const config::THREAD_SIZE,
+        pt_size_on_stack = const PT_SIZE_ON_STACK,
     );
 }

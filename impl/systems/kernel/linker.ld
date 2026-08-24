@@ -45,6 +45,15 @@ SECTIONS
         __bss_start = .;
         *(.bss .bss.*)
         *(COMMON)
+
+        /* Linux INIT_TASK_DATA-style boot stack, kept in zero-filled BSS. */
+        . = ALIGN(THREAD_SIZE);
+        __start_init_stack = .;
+        init_thread_union = .;
+        init_stack = .;
+        . = __start_init_stack + THREAD_SIZE;
+        __end_init_stack = .;
+
         . = ALIGN(8);
         __bss_stop = .;
     }
