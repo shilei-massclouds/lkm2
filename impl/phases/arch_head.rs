@@ -30,11 +30,11 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
         "la a3, __bss_start",
         "la a4, __bss_stop",
         "ble a4, a3, .Lclear_bss_done",
-        ".Lclear_bss:",
+    ".Lclear_bss:",
         "sd zero, (a3)",
         "addi a3, a3, {riscv_szptr}",
         "blt a3, a4, .Lclear_bss",
-        ".Lclear_bss_done:",
+    ".Lclear_bss_done:",
 
         "la a2, {cpuid_to_hartid_map}",
         "sd a0, (a2)",
@@ -44,9 +44,24 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
         "la sp, init_thread_union + {thread_size}",
         "addi sp, sp, -{pt_size_on_stack}",
 
-        "1:",
+        "mv a0, a1",
+
+        /* Set trap vector to spin forever to help debug */
+        "la a3, .Lsecondary_park",
+        "csrw stvec, a3",
+
+        "call setup_vm",
+
+    ".align 2",
+    ".Lsecondary_park:",
+        /*
+         * Park this hart if we:
+         *  - have too many harts on CONFIG_RISCV_BOOT_SPINWAIT
+         *  - receive an early trap, before setup_trap_vector finished
+         *  - fail in smp_callin(), as a successful one wouldn't return
+         */
         "wfi",
-        "j 1b",
+        "j .Lsecondary_park",
 
         sr_fs_vs = const SR_FS_VS,
         riscv_szptr = const core::mem::size_of::<usize>(),
