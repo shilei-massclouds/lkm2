@@ -58,6 +58,9 @@ SECTIONS
         __bss_stop = .;
     }
 
+    . = ALIGN(4K);
+    _end = .;
+
     /DISCARD/ :
     {
         *(.eh_frame .eh_frame.*)

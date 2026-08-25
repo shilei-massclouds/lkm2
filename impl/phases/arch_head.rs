@@ -7,9 +7,17 @@ use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK, setup_vm};
 use super::asm_macros::load_global_pointer;
 use super::csr::SR_FS_VS;
 
+// SAFETY: these attributes define the image's unique firmware entry symbol and
+// place a prologue-free naked assembly body in the linker entry section.
 #[unsafe(naked)]
 #[unsafe(export_name = "_start")]
 #[unsafe(link_section = ".head.text.entry")]
+/// # Safety
+///
+/// OpenSBI must enter with the RISC-V boot ABI (`a0 = hart_id`, `a1 = dtb_pa`),
+/// supervisor privilege, SATP Bare, and writable RAM covering the linked image,
+/// BSS, and boot stack. Every symbol reference remains PC-relative until a later
+/// phase deliberately enables the MMU; this entry never returns to firmware.
 pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
     core::arch::naked_asm!(
         /* Mask all interrupts */

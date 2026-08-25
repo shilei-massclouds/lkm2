@@ -19,6 +19,7 @@ RUSTC_FLAGS := \
 	--target=$(TARGET) \
 	-C opt-level=2 \
 	-C panic=abort \
+	-C code-model=medium \
 	-C relocation-model=static \
 	-C linker=rust-lld \
 	-C link-arg=-T$(LINKER_SCRIPT) \
