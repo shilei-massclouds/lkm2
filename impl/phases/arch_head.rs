@@ -3,9 +3,11 @@
 use crate::config;
 use crate::objects::cpu::CPUID_TO_HARTID_MAP;
 use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK, SATP_MODE, TRAMPOLINE_PAGE_TABLE, setup_vm};
+use crate::systems::kernel::soc_early_init;
 
 use super::asm_macros::load_global_pointer;
 use super::csr::SR_FS_VS;
+use super::start_kernel::start_kernel;
 
 // SAFETY: these attributes define the image's unique firmware entry symbol and
 // place a prologue-free naked assembly body in the linker entry section.
@@ -159,17 +161,51 @@ pub unsafe extern "C" fn start_kernel_entry(_hart_id: usize, _dtb: usize) -> ! {
         /* `setup_vm` returns the early page-table root in `a0`. */
         "call {relocate_enable_mmu}",
 
-        "j {secondary_park}",
+        "call {setup_trap_vector}",
+
+        /* Restore C environment */
+        "la tp, {init_task}",
+        "la sp, init_thread_union + {thread_size}",
+        "addi sp, sp, -{pt_size_on_stack}",
+
+        /* Start the kernel */
+        "call {soc_early_init}",
+        "tail {start_kernel}",
 
         sr_fs_vs = const SR_FS_VS,
         riscv_szptr = const core::mem::size_of::<usize>(),
         cpuid_to_hartid_map = sym CPUID_TO_HARTID_MAP,
         init_task = sym BOOT_TASK,
         relocate_enable_mmu = sym relocate_enable_mmu,
+        soc_early_init = sym soc_early_init,
+        start_kernel = sym start_kernel,
         setup_vm = sym setup_vm,
+        setup_trap_vector = sym setup_trap_vector,
         secondary_park = sym secondary_park,
         thread_size = const config::THREAD_SIZE,
         pt_size_on_stack = const PT_SIZE_ON_STACK,
+    );
+}
+
+// SAFETY: this prologue-free helper is called only after the early page table
+// is active and `.head.text` has a valid virtual mapping. It uses only the
+// caller-saved `a0`, installs the current fail-stop trap entry, clears the
+// kernel-origin scratch convention, and returns through the caller-provided
+// `ra` without touching the stack.
+#[unsafe(naked)]
+#[unsafe(link_section = ".head.text")]
+/// # Safety
+///
+/// The caller must execute in S-mode with the early kernel mapping active, a
+/// valid return address in `ra`, and [`secondary_park`] mapped executable at
+/// its linked virtual address.
+unsafe extern "C" fn setup_trap_vector() {
+    core::arch::naked_asm!(
+        "la a0, {trap_entry}",
+        "csrw stvec, a0",
+        "csrw sscratch, zero",
+        "ret",
+        trap_entry = sym secondary_park,
     );
 }
 

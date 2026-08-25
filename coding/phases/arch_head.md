@@ -17,14 +17,19 @@
 - 调用导出名和 ABI 均固定的 `extern "C" fn setup_vm(usize) -> usize`；返回值是最终
   EarlyPageTable root 的运行时物理地址；
 - 将该 root 保留在 `a0` 调用 `relocate_enable_mmu`，完成 trampoline 到 early 页表的
-  双阶段 SATP 切换，并返回虚拟地址调用点。
+  双阶段 SATP 切换，并返回虚拟地址调用点；
+- 调用私有 naked `setup_trap_vector`，在 early 虚拟地址空间清零 `sscratch`，并把
+  `stvec` 安装到当前安全的 fail-stop trap 入口；
+- 在虚拟地址空间恢复 boot task 的 `tp` 和内核栈 `sp`，调用空的 `soc_early_init`，然后
+  tail call `start_kernel` 完成 ArchHead 到 StartKernel 的控制流移交。
 
 `setup_vm` 内部依次对应模型的 `Vm.Preset` 和 `Vm.Setup`，具体规则见
 [`../objects/vm.md`](../objects/vm.md)。成功返回时仍处于 MMU-off，且 `satp == 0`；失败
 路径不会返回。`setup_vm` 本身不会把 early root 留在 SATP 中；成功返回后的 ArchHead
 重定位路径负责启用 early MMU。`relocate_enable_mmu` 返回后，当前 `_start_kernel` 仍进入
-本地 `wfi` fail-stop 循环，作为尚未实现后续 `StartKernel` 代码的边界；该循环不再是重定位路径前的
-不可达屏障。
+`setup_trap_vector`，恢复 C 环境并调用 `soc_early_init`，最后以 tail call 进入
+`start_kernel`。当前 StartKernel 实现是不返回的空占位循环；ArchHead 不再在正常路径跳转
+`secondary_park`。
 
 除 `_start` 和 `_start_kernel` 外，`.head.text` 还导出 naked C ABI 函数
 `relocate_enable_mmu(a0 = early page-table root)`。该函数按以下顺序执行完整重定位：
@@ -39,15 +44,23 @@
    再在虚拟地址空间重载 `gp`；
 5. 写入已保存的 early SATP，执行全局 `sfence.vma`，最后 `ret` 到虚拟调用点。
 
+`setup_trap_vector` 必须是位于 `.head.text` 的私有 naked C ABI helper。当前尚无
+`handle_exception`，因此它把 `stvec` 指向同样位于 `.head.text` 的 `secondary_park`，并将
+`sscratch` 清零后返回；正式异常入口落地时只替换 trap target，不改变调用 ABI。
+
+`soc_early_init` 是 `impl/systems/kernel.rs` 中唯一导出的同名 C ABI 空函数，可以正常返回。
+`start_kernel` 是 `impl/phases/start_kernel.rs` 中唯一导出的同名 C ABI 不返回函数，与模型
+`StartKernel` 对应；当前只提供空占位循环，后续阶段在其内部逐步实现模型声明的启动序列。
+
 `trampoline_pg_dir` 和 `satp_mode` 是两个互不别名、各自唯一的 linker-visible Rust static；
 前者的符号地址就是 4 KiB 对齐的 trampoline root 页地址，后者只保存运行时选择的 SATP
 MODE 位域。`setup_vm` 仍只通过 `a0` 返回 early root，不额外导出 `early_pg_dir`。
 `_start` 仍是 linker entry 和唯一固件入口，不扩展为完整 Linux image/EFI header。
 
 链接脚本必须断言 `_start == ADDR(.head.text)` 且 `SIZEOF(.head.text) <= 2M`，使整个
-`.head.text` 都位于 trampoline 从内核链接基址开始建立的首个 2 MiB 映射内。当前源码
-按 `_start`、`relocate_enable_mmu`、`_start_kernel`、私有 park 入口的顺序排列；该顺序
-是源码布局偏好和当前产物检查项，不是由 linker 强制的长期 ABI。
+`.head.text` 都位于 trampoline 从内核链接基址开始建立的首个 2 MiB 映射内。当前产物
+保持 `_start < relocate_enable_mmu < _start_kernel`；私有 trap helper 和 park 入口没有
+相对顺序 ABI，只要求同样位于 `.head.text` 并被首个 2 MiB 映射覆盖。
 
 这些独立入口函数的裸汇编是必要的 `unsafe` 边界。`relocate_enable_mmu` 的 `SAFETY`
 契约必须覆盖 early root 的页对齐与来源、两套页表的发布状态、`satp_mode` 的有效性，以及

@@ -10,6 +10,7 @@ mod checkpoints;
 mod config;
 mod objects;
 mod phases;
+mod systems;
 
 use core::panic::PanicInfo;
 

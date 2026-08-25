@@ -6,12 +6,14 @@
 ```text
 impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
                                       -> impl/objects/vm.rs
+                                      -> impl/systems/kernel.rs
+                                      -> impl/phases/start_kernel.rs
 ```
 
 对应的主要编码契约为：
 
 - [`phases/arch_head.md`](phases/arch_head.md)：MMU-off 机器入口、DTB ABI、早期异常入口、
-  `setup_vm` 调用边界和双阶段 SATP 重定位；
+  `setup_vm` 调用边界、双阶段 SATP 重定位和 StartKernel handoff；
 - [`objects/vm.md`](objects/vm.md)：KernelMap、分页模式探测、trampoline/early 页表和
   fail-stop 规则；
 - [`checkpoints.md`](checkpoints.md)：从 Model IR 生成的 checkpoint、handler、sibling
