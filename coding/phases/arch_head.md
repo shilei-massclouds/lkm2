@@ -14,19 +14,22 @@
 - 保存固件传入的 boot hart id，建立 boot task 的 `tp` 和内核栈 `sp`；
 - 保留固件在 `a1` 中传入的 DTB PA，并在调用前移动到 C ABI 的第一个参数 `a0`；
 - 在进入 Rust VM 代码前把 `stvec` 指向本地永久停驻入口，使早期异常 fail-stop；
-- 调用导出名和 ABI 均固定的 `extern "C" fn setup_vm(usize)`。
+- 调用导出名和 ABI 均固定的 `extern "C" fn setup_vm(usize) -> usize`；返回值是最终
+  EarlyPageTable root 的运行时物理地址。
 
 `setup_vm` 内部依次对应模型的 `Vm.Preset` 和 `Vm.Setup`，具体规则见
 [`../objects/vm.md`](../objects/vm.md)。成功返回时仍处于 MMU-off，且 `satp == 0`；失败
-路径不会返回。当前实现尚未进入 `StartKernel`，所以成功返回后也落入同一个本地
-`wfi` fail-stop 循环。这只是未实现后续阶段的边界，不是 ArchHead “仅进入 WFI”，也
-不是 `setup_vm` 永久启用 MMU 的授权。
+路径不会返回。当前实现尚未进入 `StartKernel`，所以成功返回后调用
+`relocate_enable_mmu`，其已启用的前缀最终仍落入本地 `wfi` fail-stop 循环。这只是未实现
+后续阶段的边界，不是 ArchHead “仅进入 WFI”，也不是 `setup_vm` 永久启用 MMU 的授权。
 
 除 `_start` 和 `_start_kernel` 外，`.head.text` 还导出 naked C ABI 函数
 `relocate_enable_mmu(a0 = page-table root)`，为未来的 Linux 风格地址重定位保留接口。
-当前它没有调用方；它先按 `KERNEL_LINK_ADDR - runtime(_start)` 调整 `ra`，再跳转到共享的
-私有 park 入口。它仍不得读取 `a0`、写入 `satp`、启用 MMU 或返回。`_start` 仍是
-linker entry 和唯一固件入口，不扩展为完整 Linux image/EFI header。
+当前 `_start_kernel` 在 `setup_vm` 成功后调用它；已启用的前缀先按
+`KERNEL_LINK_ADDR - runtime(_start)` 调整 `ra`，再通过显式屏障跳转到共享的私有 park
+入口。屏障后的预备代码从独立全局 `satp_mode` 读取所选 SATP MODE，并与 `a0` 的 root
+PPN 组合，但在实现完整切换前保持不可达。当前路径仍不得写入 `satp`、启用 MMU 或返回。
+`_start` 仍是 linker entry 和唯一固件入口，不扩展为完整 Linux image/EFI header。
 
 链接脚本必须断言 `_start == ADDR(.head.text)` 且 `SIZEOF(.head.text) <= 2M`，使整个
 `.head.text` 都位于 trampoline 从内核链接基址开始建立的首个 2 MiB 映射内。当前源码

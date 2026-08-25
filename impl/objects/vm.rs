@@ -2,7 +2,7 @@
 
 use core::arch::asm;
 use core::mem::{align_of, size_of};
-use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use crate::checkpoints::{
     self, EarlyDtbObservation, EarlyKernelObservation, KernelMapObservation, TrampolineObservation,
@@ -61,6 +61,18 @@ impl PagingMode {
         (self as u64) << SATP_MODE_SHIFT
     }
 
+    const fn from_satp_bits(value: u64) -> Option<Self> {
+        if value == Self::Sv57.satp_bits() {
+            Some(Self::Sv57)
+        } else if value == Self::Sv48.satp_bits() {
+            Some(Self::Sv48)
+        } else if value == Self::Sv39.satp_bits() {
+            Some(Self::Sv39)
+        } else {
+            None
+        }
+    }
+
     const fn top_level_shift(self) -> usize {
         match self {
             Self::Sv57 => PGD_SHIFT_SV57,
@@ -105,6 +117,17 @@ enum VmSetupError {
 }
 
 type VmResult<T> = Result<T, VmSetupError>;
+
+// SAFETY: this is the sole linker-visible definition of `satp_mode`. Its
+// atomic word is written only by the boot hart after probing and contains the
+// complete SATP MODE bit field derived from `PagingMode`.
+#[unsafe(export_name = "satp_mode")]
+pub(crate) static SATP_MODE: AtomicU64 = AtomicU64::new(0);
+
+fn selected_paging_mode() -> VmResult<PagingMode> {
+    PagingMode::from_satp_bits(SATP_MODE.load(Ordering::Acquire))
+        .ok_or(VmSetupError::UnsupportedPagingMode)
+}
 
 #[derive(Clone, Copy)]
 struct Pte(u64);
@@ -453,7 +476,6 @@ fn observe_leaf_2m(
 
 #[repr(C)]
 struct KernelMapType {
-    mode: AtomicU8,
     page_offset: AtomicU64,
     virtual_address: AtomicU64,
     physical_address: AtomicU64,
@@ -464,7 +486,6 @@ struct KernelMapType {
 impl KernelMapType {
     const fn new() -> Self {
         Self {
-            mode: AtomicU8::new(0),
             page_offset: AtomicU64::new(0),
             virtual_address: AtomicU64::new(0),
             physical_address: AtomicU64::new(0),
@@ -495,7 +516,6 @@ impl KernelMapType {
             .checked_sub(physical_address)
             .ok_or(VmSetupError::AddressOverflow)?;
 
-        self.mode.store(0, Ordering::Relaxed);
         self.page_offset.store(0, Ordering::Relaxed);
         self.virtual_address
             .store(KERNEL_LINK_ADDR as u64, Ordering::Relaxed);
@@ -510,16 +530,6 @@ impl KernelMapType {
     fn setup(&self, mode: PagingMode) {
         self.page_offset
             .store(mode.page_offset() as u64, Ordering::Relaxed);
-        self.mode.store(mode as u8, Ordering::Release);
-    }
-
-    fn mode(&self) -> VmResult<PagingMode> {
-        match self.mode.load(Ordering::Acquire) {
-            value if value == PagingMode::Sv57 as u8 => Ok(PagingMode::Sv57),
-            value if value == PagingMode::Sv48 as u8 => Ok(PagingMode::Sv48),
-            value if value == PagingMode::Sv39 as u8 => Ok(PagingMode::Sv39),
-            _ => Err(VmSetupError::UnsupportedPagingMode),
-        }
     }
 
     fn virtual_address(&self) -> usize {
@@ -574,6 +584,7 @@ impl VmType {
     }
 
     fn preset(&self, _dtb_pa: usize) -> VmResult<()> {
+        SATP_MODE.store(0, Ordering::Relaxed);
         self.setup_error.store(0, Ordering::Relaxed);
         self.early_dtb_pa.store(0, Ordering::Relaxed);
         self.early_dtb_va.store(0, Ordering::Relaxed);
@@ -584,6 +595,7 @@ impl VmType {
 
         let mode = self.probe_paging_mode()?;
         self.kernel_map.setup(mode);
+        SATP_MODE.store(mode.satp_bits(), Ordering::Release);
         let satp = read_satp();
         if satp != 0 {
             return Err(VmSetupError::InvalidMappingRange);
@@ -595,7 +607,7 @@ impl VmType {
     }
 
     fn setup(&self, dtb_pa: usize) -> VmResult<()> {
-        let mode = self.kernel_map.mode()?;
+        let mode = selected_paging_mode()?;
         self.trampoline.preset();
         self.early.preset();
 
@@ -619,6 +631,11 @@ impl VmType {
             satp,
         );
         Ok(())
+    }
+
+    fn early_root_address(&self) -> VmResult<usize> {
+        let root_ppn = self.early.root_satp_ppn()?;
+        Ok((root_ppn << PAGE_SHIFT) as usize)
     }
 
     fn probe_paging_mode(&self) -> VmResult<PagingMode> {
@@ -916,13 +933,20 @@ static VM: VmType = VmType::new();
 // SAFETY: this is the sole definition of the linker-visible `setup_vm` symbol,
 // and its C ABI matches the MMU-off call site in the naked boot entry.
 #[unsafe(export_name = "setup_vm")]
-pub(crate) extern "C" fn setup_vm(dtb_pa: usize) {
-    if let Err(error) = VM.preset(dtb_pa).and_then(|()| VM.setup(dtb_pa)) {
-        VM.fail_stop(error);
+pub(crate) extern "C" fn setup_vm(dtb_pa: usize) -> usize {
+    match VM
+        .preset(dtb_pa)
+        .and_then(|()| VM.setup(dtb_pa))
+        .and_then(|()| VM.early_root_address())
+    {
+        Ok(root_address) => root_address,
+        Err(error) => VM.fail_stop(error),
     }
 }
 
 const _: () = assert!(PAGE_TABLE_ENTRIES == 512);
+const _: () = assert!(size_of::<AtomicU64>() == size_of::<u64>());
+const _: () = assert!(align_of::<AtomicU64>() >= align_of::<u64>());
 const _: () = assert!(size_of::<PageTablePage>() == PAGE_SIZE);
 const _: () = assert!(align_of::<PageTablePage>() == PAGE_SIZE);
 const _: () = assert!(size_of::<PageTableType<NoFixmap>>() == 4 * PAGE_SIZE);

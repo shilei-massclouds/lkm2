@@ -2,7 +2,7 @@
 
 use crate::config;
 use crate::objects::cpu::CPUID_TO_HARTID_MAP;
-use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK, setup_vm};
+use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK, SATP_MODE, setup_vm};
 
 use super::asm_macros::load_global_pointer;
 use super::csr::SR_FS_VS;
@@ -50,8 +50,25 @@ pub unsafe extern "C" fn relocate_enable_mmu(_page_table_root: usize) -> ! {
         "la a2, _start",
         "sub a1, a1, a2",
         "add ra, ra, a1",
+        /* Keep the remaining relocation path unreachable until it can switch SATP. */
         "j {secondary_park}",
+
+        /* Point stvec to virtual address of instruction after satp write */
+        "la a2, 1f",
+        "add a2, a2, a1",
+        "csrw stvec, a2",
+
+        /* Compute satp for kernel page tables, but don't load it yet */
+        "srli a2, a0, {page_shift}",
+        "la a1, {satp_mode}",
+        "ld a1, 0(a1)",
+        "or a2, a2, a1",
+        "1:",
+        "j {secondary_park}",
+
         kernel_link_addr = const config::KERNEL_LINK_ADDR,
+        page_shift = const config::PAGE_SHIFT,
+        satp_mode = sym SATP_MODE,
         secondary_park = sym secondary_park,
     );
 }
@@ -107,12 +124,17 @@ pub unsafe extern "C" fn start_kernel_entry(_hart_id: usize, _dtb: usize) -> ! {
         "csrw stvec, a3",
 
         "call {setup_vm}",
+
+        /* `setup_vm` returns the early page-table root in `a0`. */
+        "call {relocate_enable_mmu}",
+
         "j {secondary_park}",
 
         sr_fs_vs = const SR_FS_VS,
         riscv_szptr = const core::mem::size_of::<usize>(),
         cpuid_to_hartid_map = sym CPUID_TO_HARTID_MAP,
         init_task = sym BOOT_TASK,
+        relocate_enable_mmu = sym relocate_enable_mmu,
         setup_vm = sym setup_vm,
         secondary_park = sym secondary_park,
         thread_size = const config::THREAD_SIZE,

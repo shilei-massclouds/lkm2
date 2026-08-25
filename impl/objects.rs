@@ -5,4 +5,4 @@ mod vm;
 
 pub(crate) use ptrace::PT_SIZE_ON_STACK;
 pub(crate) use task::BOOT_TASK;
-pub(crate) use vm::setup_vm;
+pub(crate) use vm::{SATP_MODE, setup_vm};

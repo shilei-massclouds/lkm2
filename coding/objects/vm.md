@@ -10,17 +10,18 @@ KernelMap、分页模式探测、trampoline 页表和 early 页表构造；不�
 实现必须继续导出且只导出以下 C ABI 入口：
 
 ```rust
-extern "C" fn setup_vm(dtb_pa: usize)
+extern "C" fn setup_vm(dtb_pa: usize) -> usize
 ```
 
-导出名必须保持为 `setup_vm`。`VM`、KernelMap、两个页表及其辅助符号均为 Rust 私有，
-不要求使用 Linux 全局符号名。`setup_vm` 必须按模型顺序同步执行：
+返回值是最终 EarlyPageTable root 的运行时物理地址。导出名必须保持为 `setup_vm`。
+除唯一的 `satp_mode` 外，`VM`、KernelMap、两个页表及其辅助符号均为 Rust 私有，不要求
+使用 Linux 全局符号名。`setup_vm` 必须按模型顺序同步执行：
 
 ```text
 VM.preset(dtb_pa)
   -> 准备 KernelMap 与两个静态页表对象
   -> 使用 EarlyPageTable 的临时页表页探测分页模式
-  -> 将唯一探测结果记录到 KernelMap
+  -> 将唯一探测结果发布到 satp_mode
   -> 清理临时表项并恢复 SATP Bare
 
 VM.setup(dtb_pa)
@@ -42,23 +43,25 @@ VM.setup(dtb_pa)
 - early DTB 的物理地址和虚拟地址；
 - 一个静态 VM setup 错误码。
 
-聚合对象必须声明为普通 `static`，不得使用 `static mut`。KernelMap 字段、DTB 字段、
-模式状态和错误码等需要在早期入口写入的标量必须使用适当宽度的原子整数提供内部
-可变性；安全方法负责在整数表示与 `PagingMode`、地址和错误码之间检查转换。
+聚合对象必须声明为普通 `static`，不得使用 `static mut`。所选模式另存于独立且
+linker-visible 的 `satp_mode: AtomicU64`；KernelMap 字段、DTB 字段、模式状态和错误码等
+需要在早期入口写入的标量必须使用适当宽度的原子整数提供内部可变性；安全方法负责在
+整数表示与 `PagingMode`、地址和错误码之间检查转换。
 
 `KernelMapType` 必须记录：
 
-- 唯一的 `PagingMode::{Sv57, Sv48, Sv39}`；
 - 与该模式对应的层数、顶层位移和 `PAGE_OFFSET`；
 - 内核链接虚拟地址、运行时物理地址、镜像大小及虚实偏移。
 
-`PagingMode` 是分页层级、地址布局和 SATP MODE 编码的唯一事实来源。SATP MODE 位必须
-由它按需计算；不得另设 `pgtable_l4_enabled`、`pgtable_l5_enabled`、独立
-`satp_mode` 或其他可能与它不一致的状态。
+`PagingMode` 是分页层级、地址布局和 SATP MODE 编码的类型级事实来源。运行时探测结果
+必须由它编码为完整的 SATP MODE 位域，并发布到唯一的 `satp_mode`；Rust 侧使用前必须
+严格解码回 `PagingMode`。KernelMap 不得保存模式副本，也不得另设
+`pgtable_l4_enabled`、`pgtable_l5_enabled` 或其他可能与 `satp_mode` 不一致的状态。
 
-模式探测由 `VM.preset` 协调，探测结果归 KernelMap。EarlyPageTable 只拥有探测所需的
-临时页表存储；探测成功或失败后都必须恢复这些页为全零。使用临时存储不会使
-EarlyPageTable 进入 Ready，它只有在最终内核镜像和 DTB 映射建立后才 Ready。
+模式探测由 `VM.preset` 协调，探测结果发布到 `satp_mode`，派生布局归 KernelMap。
+EarlyPageTable 只拥有探测所需的临时页表存储；探测成功或失败后都必须恢复这些页为
+全零。使用临时存储不会使 EarlyPageTable 进入 Ready，它只有在最终内核镜像和 DTB
+映射建立后才 Ready。
 
 ## 静态页表存储与安全接口
 
@@ -124,8 +127,9 @@ Sv48 和 Sv39 折叠不用的层级；对应页必须保持为零。未使用的
    所有临时表项清零。
 6. 只有读取值与写入值完全相同才选择该模式；否则继续下一级。
 
-Sv39 也不受支持时记录 `UnsupportedPagingMode` 并 fail-stop。探测完成后 KernelMap
-记录所选模式及其派生布局，且 `satp == 0`；最终页表构造不得重新探测或维护模式副本。
+Sv39 也不受支持时记录 `UnsupportedPagingMode` 并 fail-stop。探测完成后 `satp_mode`
+记录所选模式，KernelMap 记录其派生布局，且 `satp == 0`；最终页表构造不得重新探测或
+维护模式副本。
 
 ## 最终早期映射
 
@@ -193,5 +197,5 @@ VM 保存稳定的非格式化错误码：
 `../linux-6.12` 仅用于确认机制、顺序、布局和权限语义。它不是普通构建依赖，普通
 Makefile 和源码不得读取或链接 sibling 内容。只有 [`../checkpoints.md`](../checkpoints.md)
 定义的显式 patch/差分入口可以读取并校验固定 sibling。实现不得复制 Linux 的
-`pt_ops`、alternatives、KASLR、日志、最终页表或其分散的分页模式全局变量；本阶段也不
-实现永久 MMU 切换。
+`pt_ops`、alternatives、KASLR、日志、最终页表或除唯一 `satp_mode` 外的分散分页模式
+全局变量；本阶段也不实现永久 MMU 切换。
