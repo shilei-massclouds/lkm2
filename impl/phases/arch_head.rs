@@ -16,9 +16,28 @@ use super::csr::SR_FS_VS;
 ///
 /// OpenSBI must enter with the RISC-V boot ABI (`a0 = hart_id`, `a1 = dtb_pa`),
 /// supervisor privilege, SATP Bare, and writable RAM covering the linked image,
-/// BSS, and boot stack. Every symbol reference remains PC-relative until a later
-/// phase deliberately enables the MMU; this entry never returns to firmware.
+/// BSS, and boot stack. This entry preserves the firmware arguments and jumps
+/// directly to `_start_kernel`; it never returns to firmware.
 pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
+    core::arch::naked_asm!(
+        /* Stable encoding of the executable "MZ" image prefix (`c.li s4, -13`). */
+        ".2byte 0x5a4d",
+        "j {start_kernel}",
+        start_kernel = sym start_kernel_entry,
+    );
+}
+
+// SAFETY: this is the prologue-free continuation of `boot_entry`; all symbol
+// references remain PC-relative until a later phase deliberately enables MMU.
+#[unsafe(naked)]
+#[unsafe(export_name = "_start_kernel")]
+#[unsafe(link_section = ".head.text")]
+/// # Safety
+///
+/// The caller must provide the same boot ABI and machine state documented by
+/// [`boot_entry`]. The image's BSS and boot stack must be writable. This entry
+/// establishes the early Rust execution environment and does not return.
+pub unsafe extern "C" fn start_kernel_entry(_hart_id: usize, _dtb: usize) -> ! {
     core::arch::naked_asm!(
         /* Mask all interrupts */
         "csrw sie, zero",
@@ -38,11 +57,11 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
         "la a3, __bss_start",
         "la a4, __bss_stop",
         "ble a4, a3, .Lclear_bss_done",
-    ".Lclear_bss:",
+        ".Lclear_bss:",
         "sd zero, (a3)",
         "addi a3, a3, {riscv_szptr}",
         "blt a3, a4, .Lclear_bss",
-    ".Lclear_bss_done:",
+        ".Lclear_bss_done:",
 
         "la a2, {cpuid_to_hartid_map}",
         "sd a0, (a2)",
@@ -55,13 +74,45 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
         "mv a0, a1",
 
         /* Set trap vector to spin forever to help debug */
-        "la a3, .Lsecondary_park",
+        "la a3, {secondary_park}",
         "csrw stvec, a3",
 
         "call {setup_vm}",
+        "j {secondary_park}",
 
-    ".align 2",
-    ".Lsecondary_park:",
+        sr_fs_vs = const SR_FS_VS,
+        riscv_szptr = const core::mem::size_of::<usize>(),
+        cpuid_to_hartid_map = sym CPUID_TO_HARTID_MAP,
+        init_task = sym BOOT_TASK,
+        setup_vm = sym setup_vm,
+        secondary_park = sym secondary_park,
+        thread_size = const config::THREAD_SIZE,
+        pt_size_on_stack = const PT_SIZE_ON_STACK,
+    );
+}
+
+// SAFETY: the naked C ABI reserves `a0` for the page-table root without
+// introducing a prologue. The current fail-stop stub deliberately ignores it.
+#[unsafe(naked)]
+#[unsafe(export_name = "relocate_enable_mmu")]
+#[unsafe(link_section = ".head.text")]
+/// # Safety
+///
+/// `_page_table_root` is reserved for a future Linux-style relocation path.
+/// This placeholder does not inspect the value, write SATP, or return.
+pub unsafe extern "C" fn relocate_enable_mmu(_page_table_root: usize) -> ! {
+    core::arch::naked_asm!(
+        "j {secondary_park}",
+        secondary_park = sym secondary_park,
+    );
+}
+
+// SAFETY: this private naked function is a shared fail-stop target. It neither
+// consumes an ABI nor returns, and is kept in the pre-MMU text section.
+#[unsafe(naked)]
+#[unsafe(link_section = ".head.text")]
+unsafe extern "C" fn secondary_park() -> ! {
+    core::arch::naked_asm!(
         /*
          * Park this hart if we:
          *  - have too many harts on CONFIG_RISCV_BOOT_SPINWAIT
@@ -69,14 +120,7 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
          *  - fail in smp_callin(), as a successful one wouldn't return
          */
         "wfi",
-        "j .Lsecondary_park",
-
-        sr_fs_vs = const SR_FS_VS,
-        riscv_szptr = const core::mem::size_of::<usize>(),
-        cpuid_to_hartid_map = sym CPUID_TO_HARTID_MAP,
-        init_task = sym BOOT_TASK,
-        setup_vm = sym setup_vm,
-        thread_size = const config::THREAD_SIZE,
-        pt_size_on_stack = const PT_SIZE_ON_STACK,
+        "j {secondary_park}",
+        secondary_park = sym secondary_park,
     );
 }
