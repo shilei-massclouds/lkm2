@@ -20,15 +20,19 @@ use super::csr::SR_FS_VS;
 /// directly to `_start_kernel`; it never returns to firmware.
 pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
     core::arch::naked_asm!(
-        /* Stable encoding of the executable "MZ" image prefix (`c.li s4, -13`). */
-        ".2byte 0x5a4d",
+        ".option push",
+        ".option rvc",
+        /* Encoding of the executable "MZ" image prefix. */
+        "c.li s4, -13",
+        ".option pop",
         "j {start_kernel}",
         start_kernel = sym start_kernel_entry,
     );
 }
 
-// SAFETY: the naked C ABI reserves `a0` for the page-table root without
-// introducing a prologue. The current fail-stop stub deliberately ignores it.
+// SAFETY: the naked C ABI reserves `a0` for the page-table root without a
+// prologue. The current partial stub only relocates `ra` before fail-stop and
+// deliberately ignores the page-table root.
 #[unsafe(naked)]
 // LLVM strips the `\u{1}` raw-name marker, so the ELF symbol remains exactly
 // `relocate_enable_mmu` while this toolchain emits it before `_start_kernel`.
@@ -37,10 +41,17 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
 /// # Safety
 ///
 /// `_page_table_root` is reserved for a future Linux-style relocation path.
-/// This placeholder does not inspect the value, write SATP, or return.
+/// This partial implementation relocates `ra` from the runtime physical image
+/// to `KERNEL_LINK_ADDR`, but does not inspect the root, write SATP, or return.
 pub unsafe extern "C" fn relocate_enable_mmu(_page_table_root: usize) -> ! {
     core::arch::naked_asm!(
+        /* Relocate return address */
+        "li a1, {kernel_link_addr}",
+        "la a2, _start",
+        "sub a1, a1, a2",
+        "add ra, ra, a1",
         "j {secondary_park}",
+        kernel_link_addr = const config::KERNEL_LINK_ADDR,
         secondary_park = sym secondary_park,
     );
 }
@@ -75,11 +86,11 @@ pub unsafe extern "C" fn start_kernel_entry(_hart_id: usize, _dtb: usize) -> ! {
         "la a3, __bss_start",
         "la a4, __bss_stop",
         "ble a4, a3, .Lclear_bss_done",
-        ".Lclear_bss:",
+    ".Lclear_bss:",
         "sd zero, (a3)",
         "addi a3, a3, {riscv_szptr}",
         "blt a3, a4, .Lclear_bss",
-        ".Lclear_bss_done:",
+    ".Lclear_bss_done:",
 
         "la a2, {cpuid_to_hartid_map}",
         "sd a0, (a2)",

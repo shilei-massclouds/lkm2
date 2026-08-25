@@ -24,9 +24,9 @@
 
 除 `_start` 和 `_start_kernel` 外，`.head.text` 还导出 naked C ABI 函数
 `relocate_enable_mmu(a0 = page-table root)`，为未来的 Linux 风格地址重定位保留接口。
-当前它没有调用方，只会跳转到共享的私有 park 入口；不得读取 `a0`、写入 `satp`、启用
-MMU 或返回。`_start` 仍是 linker entry 和唯一固件入口，不扩展为完整 Linux image/EFI
-header。
+当前它没有调用方；它先按 `KERNEL_LINK_ADDR - runtime(_start)` 调整 `ra`，再跳转到共享的
+私有 park 入口。它仍不得读取 `a0`、写入 `satp`、启用 MMU 或返回。`_start` 仍是
+linker entry 和唯一固件入口，不扩展为完整 Linux image/EFI header。
 
 链接脚本必须断言 `_start == ADDR(.head.text)` 且 `SIZEOF(.head.text) <= 2M`，使整个
 `.head.text` 都位于 trampoline 从内核链接基址开始建立的首个 2 MiB 映射内。当前源码
