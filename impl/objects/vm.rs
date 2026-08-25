@@ -7,8 +7,11 @@ use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use crate::checkpoints::{
     self, EarlyDtbObservation, EarlyKernelObservation, KernelMapObservation, TrampolineObservation,
 };
+use crate::config::{
+    FIX_FDT_VA_SV39, FIX_FDT_VA_SV48, FIX_FDT_VA_SV57, KERNEL_LINK_ADDR, PAGE_OFFSET_SV39,
+    PAGE_OFFSET_SV48, PAGE_OFFSET_SV57, PAGE_SHIFT,
+};
 
-const PAGE_SHIFT: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
 const PAGE_TABLE_ENTRIES: usize = PAGE_SIZE / size_of::<u64>();
 const PAGE_TABLE_INDEX_MASK: usize = PAGE_TABLE_ENTRIES - 1;
@@ -43,16 +46,7 @@ const PAGE_KERNEL_FLAGS: u64 =
 const SATP_MODE_SHIFT: u32 = 60;
 const SATP_PPN_MASK: u64 = (1_u64 << 44) - 1;
 
-const KERNEL_LINK_ADDR: usize = 0xffff_ffff_8000_0000;
 const ADDRESS_SPACE_LAST_PAGE: usize = usize::MAX - (PAGE_SIZE - 1);
-
-const PAGE_OFFSET_SV57: usize = 0xff60_0000_0000_0000;
-const PAGE_OFFSET_SV48: usize = 0xffff_af80_0000_0000;
-const PAGE_OFFSET_SV39: usize = 0xffff_ffd6_0000_0000;
-
-const FIX_FDT_VA_SV57: usize = 0xff1b_ffff_fec0_0000;
-const FIX_FDT_VA_SV48: usize = 0xffff_8d7f_fec0_0000;
-const FIX_FDT_VA_SV39: usize = 0xffff_ffc4_fec0_0000;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

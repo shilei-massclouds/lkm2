@@ -89,6 +89,13 @@ Sv48 和 Sv39 折叠不用的层级；对应页必须保持为零。未使用的
 
 ## 分页模式与虚拟布局
 
+固定 sibling 的选定配置和冻结虚拟布局输入统一保存在
+[`impl/systems/kernel/config.rs`](../../impl/systems/kernel/config.rs)，包括
+`PAGE_SHIFT`、`KERNEL_LINK_ADDR`、三种模式的 `PAGE_OFFSET` 和 DTB fixmap 起始 VA。
+`KERNEL_LINK_ADDR` 同时由该文件导出为 ELF 绝对符号，链接脚本只引用它，不得再次硬编码
+数值。RISC-V 页表层级位移、PTE/PPN/SATP 位编码、权限、页表容量、派生大小与 mask，
+以及 map、walk 和 checkpoint 观测算法继续归 `vm.rs` 所有。
+
 模式及布局必须与固定 sibling 的 RISC-V 64 位、4 KiB 页配置逐项一致：
 
 | 模式 | 层数 | SATP MODE | 顶层位移 | `PAGE_OFFSET` | DTB fixmap 起始 VA |
@@ -99,7 +106,8 @@ Sv48 和 Sv39 折叠不用的层级；对应页必须保持为零。未使用的
 
 所有模式共用 `KERNEL_LINK_ADDR = 0xffffffff80000000`、4 KiB 基础页和 2 MiB PMD
 叶子。DTB fixmap 地址来自 sibling 对应模式的 VMALLOC、VMEMMAP、PCI I/O 和 FIX_FDT
-布局；实现应把上表作为本仓库常量，不得在构建时读取 sibling。
+布局；这些受版本控制的值由人工同步，构建过程不得读取 sibling。4 KiB 页和上表三种
+模式的既有数值不得改变。
 
 ## Sv57 → Sv48 → Sv39 探测
 

@@ -5,8 +5,8 @@ ENTRY(_start)
  * Match the 64-bit RISC-V kernel virtual link base.  The raw image is loaded
  * by OpenSBI at its physical kernel address; the position-independent head
  * stub does not use the virtual address before later boot phases establish it.
+ * KERNEL_LINK_ADDR is an absolute symbol exported from the Rust configuration.
  */
-KERNEL_LINK_ADDR = 0xffffffff80000000;
 LOAD_OFFSET = KERNEL_LINK_ADDR;
 
 SECTIONS
