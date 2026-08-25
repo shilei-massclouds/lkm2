@@ -1,0 +1,128 @@
+{
+  "facts": [
+    "phases::start_kernel::arch_head_boot_hart_identity_ready",
+    "phases::start_kernel::arch_head_early_address_space_active",
+    "phases::start_kernel::arch_head_early_cpu_state_ready",
+    "phases::start_kernel::arch_head_kernel_image_execution_environment_ready",
+    "phases::start_kernel::arch_head_soc_early_init_complete",
+    "phases::start_kernel::arch_head_trap_context_ready",
+    "phases::start_kernel::arch_head_virtual_boot_task_stack_context_ready",
+    "systems::opensbi::opensbi_kernel_entry_handoff_ready"
+  ],
+  "handlers": [
+    {
+      "depends_on": [],
+      "ensures": [],
+      "establishes": [
+        {
+          "expression": "opensbi_kernel_entry_handoff_ready()",
+          "status": "established"
+        }
+      ],
+      "handler": "Transition::Enable",
+      "target": "OpenSBI"
+    },
+    {
+      "depends_on": [
+        {
+          "expression": "OpenSBI == State::Online",
+          "status": "passed"
+        },
+        {
+          "expression": "BootCPU == State::Online",
+          "status": "passed"
+        },
+        {
+          "expression": "BootTask == State::OnCpu",
+          "status": "passed"
+        },
+        {
+          "expression": "Vm == State::Base",
+          "status": "passed"
+        },
+        {
+          "expression": "opensbi_kernel_entry_handoff_ready()",
+          "status": "passed"
+        }
+      ],
+      "ensures": [
+        {
+          "expression": "Vm == State::Ready",
+          "status": "passed"
+        }
+      ],
+      "establishes": [
+        {
+          "expression": "arch_head_early_cpu_state_ready()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_kernel_image_execution_environment_ready()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_boot_hart_identity_ready()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_early_address_space_active()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_virtual_boot_task_stack_context_ready()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_trap_context_ready()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_soc_early_init_complete()",
+          "status": "established"
+        }
+      ],
+      "handler": "Action::Enter",
+      "target": "ArchHead"
+    },
+    {
+      "depends_on": [
+        {
+          "expression": "Vm == State::Ready",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_early_cpu_state_ready()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_kernel_image_execution_environment_ready()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_boot_hart_identity_ready()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_early_address_space_active()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_virtual_boot_task_stack_context_ready()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_trap_context_ready()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_soc_early_init_complete()",
+          "status": "passed"
+        }
+      ],
+      "ensures": [],
+      "establishes": [],
+      "handler": "Action::Enter",
+      "target": "StartKernel"
+    }
+  ]
+}

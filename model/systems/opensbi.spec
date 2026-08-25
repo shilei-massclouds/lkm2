@@ -4,6 +4,8 @@ use super::kernel::Kernel;
 
 type OpenSBIType;
 
+predicate opensbi_kernel_entry_handoff_ready() -> bool;
+
 object OpenSBI: OpenSBIType {
     parent: Computer;
 
@@ -24,6 +26,10 @@ object OpenSBI: OpenSBIType {
     state State::Ready {
         transitions {
             on Transition::Enable -> State::Online {
+                establishes {
+                    opensbi_kernel_entry_handoff_ready();
+                }
+
                 emits {
                     Kernel.Transition::Enable;
                 }

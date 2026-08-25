@@ -3,6 +3,43 @@
 本页对应 [`model/phases/arch_head.spec`](../../model/phases/arch_head.spec)，实现位于
 [`impl/phases/arch_head.rs`](../../impl/phases/arch_head.rs)。
 
+## Model-to-code 对照
+
+`ArchHead.Action::Enter` 建模的是固件入口和 `StartKernel` 交接之间的稳定系统契约，不复刻
+裸汇编的过程。其前置条件对应如下：
+
+| Model 前置条件 | 实现事实 |
+| --- | --- |
+| `OpenSBI.state == Online` 与 `opensbi_kernel_entry_handoff_ready()` | OpenSBI 按 RISC-V boot ABI 跳入唯一 `_start`：`a0` 是 boot hart id，`a1` 是 DTB PA，入口 `satp` 为 Bare；`boot_entry` 的 `Safety` 契约冻结该边界。 |
+| `BootCPU.state == Online` | `BootCPU.logical_id == 0` 表示当前唯一 boot CPU；OpenSBI 入口只把 primary boot hart 交给该路径。 |
+| `BootTask.state == OnCpu` | `Kernel.Enable` 已恢复 `BootTask`，随后经 `BootInitFlow` 同步进入 ArchHead；物理入口用 `BOOT_TASK` 建立当前任务上下文。 |
+| `Vm.state == Base` | `setup_vm` 尚未执行；该入口只允许从初始 VM 生命周期开始一次完整构造。 |
+
+ArchHead 继续只驱动 `Vm.Preset` 和 `Vm.Setup`。两次 transition 成功后 `Vm` 为 Ready；页表
+构造状态归 `Vm` 所有，ArchHead 只负责激活并发布交接事实：
+
+| Model 后置事实 | 实现事实 |
+| --- | --- |
+| `arch_head_early_cpu_state_ready()` | `_start_kernel` 将 `sie` 清零，并以 `SR_FS_VS` 清除 `sstatus.FS/VS`，所以内核入口屏蔽 S-mode interrupt 且 FPU/Vector 均为 Off。 |
+| `arch_head_kernel_image_execution_environment_ready()` | flat image 的 BSS 已清零；重定位后再次执行 `load_global_pointer!()`，交接时 `gp` 是内核虚拟地址上下文。 |
+| `arch_head_boot_hart_identity_ready()` | 固件 `a0` 被保存到唯一 `CPUID_TO_HARTID_MAP[0]`；固件 `a1` 保持为 DTB PA，并作为 `setup_vm` 的 `a0` 参数使用。 |
+| `arch_head_early_address_space_active()` | `setup_vm` 发布 Ready 页表后，`relocate_enable_mmu` 最终把返回的 EarlyPageTable root 写入 `satp`，并在内核虚拟映射中返回。 |
+| `arch_head_virtual_boot_task_stack_context_ready()` | early 地址空间激活后重新装载 `tp = BOOT_TASK`，并令 `sp = init_thread_union + THREAD_SIZE - PT_SIZE_ON_STACK`。 |
+| `arch_head_trap_context_ready()` | 最终 `setup_trap_vector` 将 `stvec` 安装为 early fail-stop trap target，并清零 `sscratch`。 |
+| `arch_head_soc_early_init_complete()` | `soc_early_init` 已正常返回；紧随其后的 tail call 把控制流交给唯一 `start_kernel`。 |
+
+`StartKernel.Action::Enter` 必须同时检查以上七项事实和 `Vm.state == Ready`。因此模型保留的
+只有 OpenSBI 入口状态、`Vm.Preset → Vm.Setup` 生命周期和最终交接状态。`sie`、FS/VS、
+虚拟 `gp`、BSS、boot hart id、最终 early SATP、虚拟 `tp/sp`、最终 `stvec/sscratch` 以及
+`soc_early_init` 正常返回都是稳定交接约束。
+
+`sip` 的 pending-interrupt 清除写、MMU-off 阶段的临时 park trap、物理 `tp/sp`、
+trampoline SATP，以及 trampoline、early SATP 和重定位指令的先后顺序只属于本编码约束；
+它们在交接前已被覆盖或不构成可持久保证，不为其建立历史谓词、寄存器属性对象或额外
+过程型 Phase。
+
+## 入口与重定位顺序
+
 当前 RISC-V 64 位机器入口按以下顺序建立 MMU-off 执行环境：
 
 - 由专用的 `.head.text.entry` 输入 section 导出唯一固件入口 `_start`；其可执行的首个
