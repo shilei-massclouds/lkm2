@@ -52,6 +52,30 @@ OpenSBI -> Kernel: emits Transition::Enable
     commit state: unchanged
   BootInitFlow -> ArchHead: resumes Action::Enter
     current state: State::Online
+    ArchHead -> Vm: drives Transition::Preset
+      current state: State::Base
+      Vm -> KernelMap: drives Transition::Preset
+        current state: State::Base
+        commit state: State::Prepared
+      Vm -> TrampolinePageTable: drives Transition::Preset
+        current state: State::Base
+        commit state: State::Prepared
+      Vm -> EarlyPageTable: drives Transition::Preset
+        current state: State::Base
+        commit state: State::Prepared
+      Vm -> KernelMap: drives Transition::Setup
+        current state: State::Prepared
+        commit state: State::Ready
+      commit state: State::Prepared
+    ArchHead -> Vm: drives Transition::Setup
+      current state: State::Prepared
+      Vm -> TrampolinePageTable: drives Transition::Setup
+        current state: State::Prepared
+        commit state: State::Ready
+      Vm -> EarlyPageTable: drives Transition::Setup
+        current state: State::Prepared
+        commit state: State::Ready
+      commit state: State::Ready
     commit state: unchanged
   ArchHead -> StartKernel: resumes Action::Enter
     current state: State::Online

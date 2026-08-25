@@ -1,6 +1,7 @@
 /* ArchHead - architecture-specific kernel entry phase. */
 
 use model::flows::task_flow::BootInitFlow;
+use model::objects::vm::Vm;
 use model::phases::phase::PhaseType;
 use super::start_kernel::StartKernel;
 
@@ -10,6 +11,11 @@ object ArchHead: PhaseType {
     state State::Online {
         actions {
             override on Action::Enter {
+                drives {
+                    Vm.Transition::Preset;
+                    Vm.Transition::Setup;
+                }
+
                 // EntryPreludePhase.Preset migration candidates copied from LKM.
                 // Keep every candidate disabled until it has been discussed and
                 // adapted to the ArchHead action model.
@@ -39,8 +45,6 @@ object ArchHead: PhaseType {
                 //     BootInitStack.Transition::Preset;
                 //     EventStream.Transition::Preset;
                 //     ExceptionStream.Transition::Preset;
-                //     Vm.Transition::Preset;
-                //     Vm.Transition::Setup;
                 //     EventStream.Transition::Setup;
                 //     BootTaskEntryBinding.Transition::Setup;
                 //     BootInitStack.Transition::Setup;
