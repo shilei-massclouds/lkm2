@@ -101,10 +101,22 @@ class CheckpointGeneratorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch(
                 "checkpointgen.sibling._git",
-                side_effect=("0" * 40, self.mapping.sibling_branch, ""),
+                side_effect=(self.mapping.sibling_branch, "", "0" * 40),
             ):
-                with self.assertRaisesRegex(CheckpointGenerationError, "sibling commit"):
+                with self.assertRaisesRegex(CheckpointGenerationError, "sibling HEAD"):
                     validate_sibling(Path(directory), self.mapping)
+
+    def test_sibling_mapping_freezes_patch_and_integrated_revisions(self) -> None:
+        self.assertEqual(
+            self.mapping.sibling_patch_base.commit,
+            "d0fef99b651d141dd6ffbbddeb8b729b2f8faaff",
+        )
+        self.assertEqual(
+            self.mapping.sibling_integrated.commit,
+            "2f5f2bbdcdbede7b65b18f36cfcc72150a40ee0f",
+        )
+        self.assertEqual(len(self.mapping.sibling_patch_base.files), 2)
+        self.assertEqual(len(self.mapping.sibling_integrated.files), 4)
 
     def test_rust_and_manifest_generation_are_repeatable(self) -> None:
         checkpoints = build_checkpoints(self.model, self.mapping)

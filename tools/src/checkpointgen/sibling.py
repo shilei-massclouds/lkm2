@@ -11,8 +11,17 @@ from .generator import (
     Checkpoint,
     CheckpointGenerationError,
     CheckpointMapping,
+    SiblingRevision,
     _observation_source,
 )
+
+
+EXPECTED_SIBLING_PATHS = {
+    "arch/riscv/mm/Makefile",
+    "arch/riscv/mm/init.c",
+    "arch/riscv/mm/lkm2_checkpoint_handler.c",
+    "arch/riscv/mm/lkm2_checkpoints.inc",
+}
 
 
 def _git(sibling: Path, *arguments: str) -> str:
@@ -29,33 +38,129 @@ def _git(sibling: Path, *arguments: str) -> str:
     return result.stdout.strip()
 
 
-def validate_sibling(sibling: Path, mapping: CheckpointMapping) -> None:
-    if not sibling.is_dir():
-        raise CheckpointGenerationError(f"sibling path does not exist: {sibling}")
-    commit = _git(sibling, "rev-parse", "HEAD")
-    if commit != mapping.sibling_commit:
+def _git_bytes(sibling: Path, *arguments: str) -> bytes:
+    result = subprocess.run(
+        ["git", *arguments],
+        cwd=sibling,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.decode(errors="replace").strip()
         raise CheckpointGenerationError(
-            f"sibling commit {commit} != frozen {mapping.sibling_commit}"
+            f"sibling git {' '.join(arguments)} failed: {detail}"
         )
+    return result.stdout
+
+
+def _fingerprint(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def _validate_branch(sibling: Path, mapping: CheckpointMapping) -> None:
     branch = _git(sibling, "branch", "--show-current")
     if branch != mapping.sibling_branch:
         raise CheckpointGenerationError(
             f"sibling branch {branch!r} != frozen {mapping.sibling_branch!r}"
         )
-    status = _git(sibling, "status", "--short")
-    if status:
-        raise CheckpointGenerationError("sibling worktree is not clean")
-    for relative, expected in mapping.sibling_files:
+
+
+def _validate_worktree_files(
+    sibling: Path, revision: SiblingRevision, label: str
+) -> None:
+    for relative, expected in revision.files:
         path = sibling / relative
         try:
             content = path.read_bytes()
         except OSError as exc:
-            raise CheckpointGenerationError(f"cannot read sibling anchor {relative}: {exc}") from exc
-        observed = hashlib.sha256(content).hexdigest()
-        if observed != expected:
             raise CheckpointGenerationError(
-                f"sibling anchor fingerprint mismatch for {relative}"
+                f"cannot read sibling {label} anchor {relative}: {exc}"
+            ) from exc
+        if _fingerprint(content) != expected:
+            raise CheckpointGenerationError(
+                f"sibling {label} anchor fingerprint mismatch for {relative}"
             )
+
+
+def _read_revision_file(
+    sibling: Path, revision: SiblingRevision, relative: str
+) -> str:
+    expected_files = dict(revision.files)
+    if relative not in expected_files:
+        raise CheckpointGenerationError(
+            f"sibling revision has no frozen anchor for {relative}"
+        )
+    content = _git_bytes(sibling, "show", f"{revision.commit}:{relative}")
+    if _fingerprint(content) != expected_files[relative]:
+        raise CheckpointGenerationError(
+            f"sibling patch-base object fingerprint mismatch for {relative}"
+        )
+    try:
+        return content.decode("utf-8")
+    except UnicodeError as exc:
+        raise CheckpointGenerationError(
+            f"sibling patch-base anchor {relative} is not UTF-8"
+        ) from exc
+
+
+def validate_sibling(sibling: Path, mapping: CheckpointMapping) -> None:
+    """Validate a clean checkout and the immutable historical patch source."""
+
+    if not sibling.is_dir():
+        raise CheckpointGenerationError(f"sibling path does not exist: {sibling}")
+    _validate_branch(sibling, mapping)
+    status = _git(sibling, "status", "--short")
+    if status:
+        raise CheckpointGenerationError("sibling worktree is not clean")
+    commit = _git(sibling, "rev-parse", "HEAD")
+    revisions = {
+        mapping.sibling_patch_base.commit: (mapping.sibling_patch_base, "patch-base"),
+        mapping.sibling_integrated.commit: (mapping.sibling_integrated, "integrated"),
+    }
+    current = revisions.get(commit)
+    if current is None:
+        raise CheckpointGenerationError(
+            "sibling HEAD is neither the frozen patch base nor integrated checkpoint commit"
+        )
+    _validate_worktree_files(sibling, *current)
+    _git(sibling, "cat-file", "-e", f"{mapping.sibling_patch_base.commit}^{{commit}}")
+    for relative, _expected in mapping.sibling_patch_base.files:
+        _read_revision_file(sibling, mapping.sibling_patch_base, relative)
+
+
+def validate_differential_sibling(
+    sibling: Path, mapping: CheckpointMapping
+) -> str:
+    """Accept either the committed integration or the exact unstaged review state."""
+
+    if not sibling.is_dir():
+        raise CheckpointGenerationError(f"sibling path does not exist: {sibling}")
+    _validate_branch(sibling, mapping)
+    commit = _git(sibling, "rev-parse", "HEAD")
+    status = _git(sibling, "status", "--short")
+    if any(line and line[0] not in {" ", "?"} for line in status.splitlines()):
+        raise CheckpointGenerationError("sibling checkpoint changes must remain unstaged")
+    if commit == mapping.sibling_integrated.commit:
+        if status:
+            raise CheckpointGenerationError(
+                "integrated sibling checkpoint worktree must be clean"
+            )
+        state = "integrated"
+    elif commit == mapping.sibling_patch_base.commit:
+        changed_paths = {
+            line[3:] for line in status.splitlines() if len(line) >= 4
+        }
+        if changed_paths != EXPECTED_SIBLING_PATHS:
+            raise CheckpointGenerationError(
+                "sibling must contain exactly the reviewed, unstaged checkpoint patch"
+            )
+        state = "reviewed-patch"
+    else:
+        raise CheckpointGenerationError(
+            "sibling HEAD is neither the frozen patch base nor integrated checkpoint commit"
+        )
+    _validate_worktree_files(sibling, mapping.sibling_integrated, "integrated")
+    return state
 
 
 def _c_parameters(item: Checkpoint, *, names: bool = True) -> str:
@@ -445,15 +550,32 @@ def generate_sibling_patch(
     validate_sibling(sibling, mapping)
     init_path = "arch/riscv/mm/init.c"
     makefile_path = "arch/riscv/mm/Makefile"
-    init_before = (sibling / init_path).read_text(encoding="utf-8")
-    makefile_before = (sibling / makefile_path).read_text(encoding="utf-8")
+    init_before = _read_revision_file(sibling, mapping.sibling_patch_base, init_path)
+    makefile_before = _read_revision_file(
+        sibling, mapping.sibling_patch_base, makefile_path
+    )
     init_after = _modify_init(init_before)
     makefile_after = _modify_makefile(makefile_before)
     include_path = "arch/riscv/mm/lkm2_checkpoints.inc"
     handler_path = "arch/riscv/mm/lkm2_checkpoint_handler.c"
+    generated = {
+        makefile_path: makefile_after,
+        init_path: init_after,
+        include_path: render_linux_include(checkpoints, mapping),
+        handler_path: render_linux_handler(checkpoints),
+    }
+    if set(generated) != {path for path, _digest in mapping.sibling_integrated.files}:
+        raise CheckpointGenerationError(
+            "integrated sibling fingerprints do not cover exactly the generated patch paths"
+        )
+    for relative, expected in mapping.sibling_integrated.files:
+        if _fingerprint(generated[relative].encode("utf-8")) != expected:
+            raise CheckpointGenerationError(
+                f"generated sibling content differs from integrated anchor {relative}"
+            )
     return (
         _diff_file(makefile_path, makefile_before, makefile_after)
         + _diff_file(init_path, init_before, init_after)
-        + _diff_new_file(include_path, render_linux_include(checkpoints, mapping))
-        + _diff_new_file(handler_path, render_linux_handler(checkpoints))
+        + _diff_new_file(include_path, generated[include_path])
+        + _diff_new_file(handler_path, generated[handler_path])
     )

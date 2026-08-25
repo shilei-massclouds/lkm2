@@ -13,6 +13,9 @@ import sys
 import time
 from typing import Sequence
 
+from .generator import CheckpointGenerationError, load_mapping
+from .sibling import validate_differential_sibling
+
 
 RECORD_PREFIX = "LKMCP1 "
 FIELD = re.compile(r"([a-zA-Z0-9_.-]+)=([^ ]+)")
@@ -227,32 +230,15 @@ def _verify_sibling_pc_relative(sibling: Path) -> None:
 
 def run_diff(
     repository: Path, sibling: Path, timeout: float, build_sibling: bool
-) -> None:
-    status = subprocess.run(
-        ["git", "status", "--short"],
-        cwd=sibling,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    expected_paths = {
-        "arch/riscv/mm/Makefile",
-        "arch/riscv/mm/init.c",
-        "arch/riscv/mm/lkm2_checkpoint_handler.c",
-        "arch/riscv/mm/lkm2_checkpoints.inc",
-    }
-    changed_paths = {
-        line[3:] for line in status.stdout.splitlines() if len(line) >= 4
-    }
-    if status.returncode != 0 or changed_paths != expected_paths:
-        raise CheckpointRunError(
-            "sibling must contain exactly the reviewed, unstaged checkpoint patch"
-        )
-    cached = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"], cwd=sibling
-    )
-    if cached.returncode != 0:
-        raise CheckpointRunError("sibling checkpoint patch must remain unstaged")
+) -> str:
+    try:
+        with (repository / "tools" / "checkpoints" / "vm.json").open(
+            encoding="utf-8"
+        ) as stream:
+            mapping = load_mapping(stream)
+        sibling_state = validate_differential_sibling(sibling, mapping)
+    except (OSError, UnicodeError, CheckpointGenerationError) as exc:
+        raise CheckpointRunError(f"invalid sibling differential state: {exc}") from exc
     if build_sibling:
         jobs = "2"
         build = subprocess.run(
@@ -318,6 +304,7 @@ def run_diff(
                     f"lkm2: {left!r}\nlinux: {right!r}"
                 )
         raise CheckpointRunError("Sv57 differential output differs")
+    return sibling_state
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -339,13 +326,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if arguments.diff_sv57:
             if arguments.sibling is None:
                 raise CheckpointRunError("--diff-sv57 requires --sibling")
-            run_diff(
+            sibling_state = run_diff(
                 repository,
                 arguments.sibling.resolve(),
                 arguments.timeout,
                 arguments.build_sibling,
             )
-            print("checkpoint-runner: strict lkm2/Linux Sv57 differential passed")
+            print(
+                "checkpoint-runner: strict lkm2/Linux Sv57 differential passed "
+                f"(sibling state: {sibling_state})"
+            )
         else:
             modes = (
                 tuple(CPU_ARGUMENTS)

@@ -36,16 +36,34 @@ def _git(sibling: Path, *arguments: str, check: bool = True) -> subprocess.Compl
 
 
 def apply_reviewed_patch(
-    sibling: Path, patch: Path, expected_branch: str, expected_commit: str
+    sibling: Path,
+    patch: Path,
+    expected_branch: str,
+    patch_base_commit: str,
+    integrated_commit: str,
 ) -> str:
-    if _git(sibling, "rev-parse", "HEAD").stdout.strip() != expected_commit:
-        raise SiblingApplyError("sibling HEAD is not the frozen checkpoint baseline")
     if _git(sibling, "branch", "--show-current").stdout.strip() != expected_branch:
         raise SiblingApplyError("sibling branch is not the frozen checkpoint branch")
     if not patch.is_file():
         raise SiblingApplyError(f"reviewed patch does not exist: {patch}")
     patch_argument = str(patch.resolve())
+    head = _git(sibling, "rev-parse", "HEAD").stdout.strip()
     status = _git(sibling, "status", "--short").stdout.strip()
+    if head == integrated_commit:
+        if status:
+            raise SiblingApplyError("integrated sibling checkpoint worktree must be clean")
+        reverse = _git(
+            sibling, "apply", "--reverse", "--check", patch_argument, check=False
+        )
+        if reverse.returncode != 0:
+            raise SiblingApplyError(
+                "integrated sibling commit does not reverse-check against the reviewed patch"
+            )
+        return "already-integrated"
+    if head != patch_base_commit:
+        raise SiblingApplyError(
+            "sibling HEAD is neither the frozen patch base nor integrated commit"
+        )
     forward = _git(sibling, "apply", "--check", patch_argument, check=False)
     if forward.returncode == 0:
         if status:
@@ -87,7 +105,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--sibling", type=Path, required=True)
     parser.add_argument("--patch", type=Path, required=True)
     parser.add_argument("--branch", required=True)
-    parser.add_argument("--commit", required=True)
+    parser.add_argument("--patch-base-commit", required=True)
+    parser.add_argument("--integrated-commit", required=True)
     return parser
 
 
@@ -98,12 +117,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             arguments.sibling.resolve(),
             arguments.patch.resolve(),
             arguments.branch,
-            arguments.commit,
+            arguments.patch_base_commit,
+            arguments.integrated_commit,
         )
     except (OSError, SiblingApplyError) as exc:
         print(f"checkpoint-sibling-apply: error: {exc}", file=sys.stderr)
         return 1
-    print(f"checkpoint-sibling-apply: {outcome}; changes remain unstaged")
+    suffix = "" if outcome == "already-integrated" else "; changes remain unstaged"
+    print(f"checkpoint-sibling-apply: {outcome}{suffix}")
     return 0
 
 

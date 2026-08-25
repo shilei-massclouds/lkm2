@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "scope": {
     "module": "objects.vm",
     "root_object": "Vm",
@@ -8,10 +8,21 @@
   "sibling": {
     "path": "../linux-6.12",
     "branch": "dev",
-    "commit": "d0fef99b651d141dd6ffbbddeb8b729b2f8faaff",
-    "files": {
-      "arch/riscv/mm/Makefile": "3c7635a621eb34cf974a4a54f8456a64dc1ddf9ea0907a0993793b1ffb08fc69",
-      "arch/riscv/mm/init.c": "556c3cf25b74f8b880bf0a89397d6751472aea97e34ff01460f2b75ec5386499"
+    "patch_base": {
+      "commit": "d0fef99b651d141dd6ffbbddeb8b729b2f8faaff",
+      "files": {
+        "arch/riscv/mm/Makefile": "3c7635a621eb34cf974a4a54f8456a64dc1ddf9ea0907a0993793b1ffb08fc69",
+        "arch/riscv/mm/init.c": "556c3cf25b74f8b880bf0a89397d6751472aea97e34ff01460f2b75ec5386499"
+      }
+    },
+    "integrated": {
+      "commit": "2f5f2bbdcdbede7b65b18f36cfcc72150a40ee0f",
+      "files": {
+        "arch/riscv/mm/Makefile": "5fff2e22c8f44a3ac104b9ed4b2a8015005f60c81c76e585948d868556e468e3",
+        "arch/riscv/mm/init.c": "2d6b28622e531a1f7905586c42b01734b4566d75946a07f834da5e3c5d08019c",
+        "arch/riscv/mm/lkm2_checkpoint_handler.c": "01b0e1c2b45e41d4fc63795901a8ea81aabab2cb2a2990a3e899cb9b39dc220d",
+        "arch/riscv/mm/lkm2_checkpoints.inc": "718034a7ab938e50b5d3beae13369ccc798ec645ea1669d3ab4c01e48be4c485"
+      }
     }
   },
   "milestones": [

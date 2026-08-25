@@ -40,10 +40,13 @@ DBCN 错误不改变启动控制流。页表观测只能通过安全的 `AtomicU
 
 ## Sibling patch 与执行
 
-sibling 固定为相邻 `linux-6.12` 的 `dev@d0fef99b651d141dd6ffbbddeb8b729b2f8faaff`。
-生成 patch 前必须同时校验提交、分支、干净工作区和修改锚点指纹。patch 是未跟踪构建
-产物；生成器不得暂存、提交或自动应用。显式应用必须先运行 `git apply --check`，通过
-reverse-check 识别已应用状态，应用后保持 unstaged。
+sibling 固定为相邻 `linux-6.12` 的 `dev` 分支，并使用两个独立锚点：patch base 为
+`d0fef99b651d141dd6ffbbddeb8b729b2f8faaff`，已集成 checkpoint 的提交为
+`2f5f2bbdcdbede7b65b18f36cfcc72150a40ee0f`。生成器必须从 patch-base Git 对象读取并校验
+修改锚点，不得用当前工作树内容代替历史输入；同时必须验证生成后的四个文件与 integrated
+提交的冻结指纹完全一致。patch 是未跟踪构建产物；生成器不得暂存、提交、切换提交或自动
+应用。显式应用必须先运行 `git apply --check`，通过 reverse-check 识别已应用或已集成
+状态；应用到 patch base 后必须保持 unstaged，已集成状态则必须保持干净。
 
 Linux patch 在 `setup_vm` 的同六个语义边界调用生成 wrapper，并以独立 C 文件提供固定
 DBCN handler。它运行在 `sbi_init()` 之前，所以不得调用 Linux SBI 或 logging API，也
@@ -53,6 +56,10 @@ DBCN handler。它运行在 `sbi_init()` 之前，所以不得调用 Linux SBI �
 `LKMCP1`。Sv57 必须严格比较 28 项 canonical ID 顺序、参数名顺序和所有值；缺失、重复
 或差异均失败。Sv48 通过 CPU 配置禁用 Sv57，Sv39 同时禁用 Sv57/Sv48；后二者只验证
 lkm2 回退与记录自洽。
+
+顶层 `make difftest` 是 Sv57 严格差分的正式入口。runner 接受两种且仅两种 sibling
+状态：patch base 上内容与 integrated 指纹完全一致的未暂存 review patch，或 integrated
+提交上的干净工作树；两种状态都必须位于冻结分支，且不得包含暂存修改。
 
 缓冲 handler、永久启用 MMU、Sv48/Sv39 sibling 差分、Linux alternatives/KASLR/
 `pt_ops` 迁移不在本阶段范围。

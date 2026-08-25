@@ -24,6 +24,12 @@ class MappingCheckpoint:
 
 
 @dataclass(frozen=True, slots=True)
+class SiblingRevision:
+    commit: str
+    files: tuple[tuple[str, str], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class CheckpointMapping:
     module: tuple[str, ...]
     root_object: str
@@ -32,8 +38,8 @@ class CheckpointMapping:
     checkpoints: tuple[MappingCheckpoint, ...]
     sibling_path: str
     sibling_branch: str
-    sibling_commit: str
-    sibling_files: tuple[tuple[str, str], ...]
+    sibling_patch_base: SiblingRevision
+    sibling_integrated: SiblingRevision
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +72,38 @@ def _string_array(value: object, path: str) -> tuple[str, ...]:
     return values
 
 
+def _load_sibling_revision(value: object, path: str) -> SiblingRevision:
+    revision = _require_dict(value, path)
+    if set(revision) != {"commit", "files"}:
+        raise CheckpointGenerationError(f"{path} has missing or unknown fields")
+    commit = _require_string(revision["commit"], f"{path}.commit")
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        raise CheckpointGenerationError(
+            f"{path}.commit must be a full lowercase Git object ID"
+        )
+    files_data = _require_dict(revision["files"], f"{path}.files")
+    files: list[tuple[str, str]] = []
+    for relative, digest in sorted(files_data.items()):
+        if (
+            type(relative) is not str
+            or not relative
+            or relative.startswith("/")
+            or ".." in Path(relative).parts
+        ):
+            raise CheckpointGenerationError(
+                f"{path}.files keys must be relative paths"
+            )
+        digest_text = _require_string(digest, f"{path}.files[{relative!r}]")
+        if re.fullmatch(r"[0-9a-f]{64}", digest_text) is None:
+            raise CheckpointGenerationError(
+                f"{path} file fingerprint must be SHA-256"
+            )
+        files.append((relative, digest_text))
+    if not files:
+        raise CheckpointGenerationError(f"{path}.files must not be empty")
+    return SiblingRevision(commit, tuple(files))
+
+
 def load_mapping(stream: TextIO) -> CheckpointMapping:
     try:
         raw = json.load(stream)
@@ -79,7 +117,7 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         raise CheckpointGenerationError(
             f"mapping fields must be exactly {', '.join(sorted(expected))}"
         )
-    if data["schema_version"] != 1:
+    if data["schema_version"] != 2:
         raise CheckpointGenerationError("unsupported checkpoint mapping schema_version")
 
     scope = _require_dict(data["scope"], "scope")
@@ -96,22 +134,18 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         )
 
     sibling = _require_dict(data["sibling"], "sibling")
-    if set(sibling) != {"path", "branch", "commit", "files"}:
+    if set(sibling) != {"path", "branch", "patch_base", "integrated"}:
         raise CheckpointGenerationError("sibling has missing or unknown fields")
-    sibling_commit = _require_string(sibling["commit"], "sibling.commit")
-    if re.fullmatch(r"[0-9a-f]{40}", sibling_commit) is None:
-        raise CheckpointGenerationError("sibling.commit must be a full lowercase Git object ID")
-    sibling_files_data = _require_dict(sibling["files"], "sibling.files")
-    sibling_files: list[tuple[str, str]] = []
-    for path, digest in sorted(sibling_files_data.items()):
-        if type(path) is not str or not path or path.startswith("/") or ".." in Path(path).parts:
-            raise CheckpointGenerationError("sibling.files keys must be relative paths")
-        digest_text = _require_string(digest, f"sibling.files[{path!r}]")
-        if re.fullmatch(r"[0-9a-f]{64}", digest_text) is None:
-            raise CheckpointGenerationError("sibling file fingerprint must be SHA-256")
-        sibling_files.append((path, digest_text))
-    if not sibling_files:
-        raise CheckpointGenerationError("sibling.files must not be empty")
+    sibling_patch_base = _load_sibling_revision(
+        sibling["patch_base"], "sibling.patch_base"
+    )
+    sibling_integrated = _load_sibling_revision(
+        sibling["integrated"], "sibling.integrated"
+    )
+    if sibling_patch_base.commit == sibling_integrated.commit:
+        raise CheckpointGenerationError(
+            "sibling patch_base and integrated commits must differ"
+        )
 
     milestones = _string_array(data["milestones"], "milestones")
     raw_checkpoints = data["checkpoints"]
@@ -153,8 +187,8 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         checkpoints=tuple(checkpoints),
         sibling_path=_require_string(sibling["path"], "sibling.path"),
         sibling_branch=_require_string(sibling["branch"], "sibling.branch"),
-        sibling_commit=sibling_commit,
-        sibling_files=tuple(sibling_files),
+        sibling_patch_base=sibling_patch_base,
+        sibling_integrated=sibling_integrated,
     )
 
 
