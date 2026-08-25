@@ -28,6 +28,11 @@
 MMU 或返回。`_start` 仍是 linker entry 和唯一固件入口，不扩展为完整 Linux image/EFI
 header。
 
+链接脚本必须断言 `_start == ADDR(.head.text)` 且 `SIZEOF(.head.text) <= 2M`，使整个
+`.head.text` 都位于 trampoline 从内核链接基址开始建立的首个 2 MiB 映射内。当前源码
+按 `_start`、`relocate_enable_mmu`、`_start_kernel`、私有 park 入口的顺序排列；该顺序
+是源码布局偏好和当前产物检查项，不是由 linker 强制的长期 ABI。
+
 这些独立入口函数的裸汇编是必要的 `unsafe` 边界。寄存器约定、栈有效性、PC-relative
 符号访问和控制流不返回条件必须由紧邻的 `SAFETY` 说明覆盖。固定 sibling
 `../linux-6.12` 只用于核对 RISC-V 64 位机制和顺序；不得复制其 Linux image header、

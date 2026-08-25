@@ -27,6 +27,24 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
     );
 }
 
+// SAFETY: the naked C ABI reserves `a0` for the page-table root without
+// introducing a prologue. The current fail-stop stub deliberately ignores it.
+#[unsafe(naked)]
+// LLVM strips the `\u{1}` raw-name marker, so the ELF symbol remains exactly
+// `relocate_enable_mmu` while this toolchain emits it before `_start_kernel`.
+#[unsafe(export_name = "\u{1}relocate_enable_mmu")]
+#[unsafe(link_section = ".head.text")]
+/// # Safety
+///
+/// `_page_table_root` is reserved for a future Linux-style relocation path.
+/// This placeholder does not inspect the value, write SATP, or return.
+pub unsafe extern "C" fn relocate_enable_mmu(_page_table_root: usize) -> ! {
+    core::arch::naked_asm!(
+        "j {secondary_park}",
+        secondary_park = sym secondary_park,
+    );
+}
+
 // SAFETY: this is the prologue-free continuation of `boot_entry`; all symbol
 // references remain PC-relative until a later phase deliberately enables MMU.
 #[unsafe(naked)]
@@ -88,22 +106,6 @@ pub unsafe extern "C" fn start_kernel_entry(_hart_id: usize, _dtb: usize) -> ! {
         secondary_park = sym secondary_park,
         thread_size = const config::THREAD_SIZE,
         pt_size_on_stack = const PT_SIZE_ON_STACK,
-    );
-}
-
-// SAFETY: the naked C ABI reserves `a0` for the page-table root without
-// introducing a prologue. The current fail-stop stub deliberately ignores it.
-#[unsafe(naked)]
-#[unsafe(export_name = "relocate_enable_mmu")]
-#[unsafe(link_section = ".head.text")]
-/// # Safety
-///
-/// `_page_table_root` is reserved for a future Linux-style relocation path.
-/// This placeholder does not inspect the value, write SATP, or return.
-pub unsafe extern "C" fn relocate_enable_mmu(_page_table_root: usize) -> ! {
-    core::arch::naked_asm!(
-        "j {secondary_park}",
-        secondary_park = sym secondary_park,
     );
 }
 

@@ -18,6 +18,8 @@ SECTIONS
         KEEP(*(.head.text.entry))
         KEEP(*(.head.text .head.text.*))
     }
+    ASSERT(_start == ADDR(.head.text), "_start must begin .head.text")
+    ASSERT(SIZEOF(.head.text) <= 2M, ".head.text must fit in the first 2 MiB")
 
     .text : AT(ADDR(.text) - LOAD_OFFSET) ALIGN(4K)
     {
