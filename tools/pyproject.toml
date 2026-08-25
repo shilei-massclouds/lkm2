@@ -15,6 +15,9 @@ dependencies = [
 [project.scripts]
 modelc = "modelc.cli:main"
 derive = "derive.cli:main"
+checkpointgen = "checkpointgen.cli:main"
+checkpoint-runner = "checkpointgen.runner:main"
+checkpoint-sibling-apply = "checkpointgen.sibling_apply:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

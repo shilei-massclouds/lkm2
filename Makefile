@@ -8,7 +8,7 @@ ifeq ($(VERBOSE),1)
 RUN_QUIET :=
 endif
 
-.PHONY: all setup build derive run test test-derive test-smoke clean help
+.PHONY: all setup build derive run test test-derive test-smoke test-checkpoints checkpoint-sibling-patch checkpoint-sibling-apply checkpoint-diff-sv57 clean help
 
 all: build
 
@@ -18,6 +18,9 @@ setup test-derive test-smoke:
 test:
 	$(TOOLS_MAKE) test
 	$(IMPL_MAKE) test
+
+test-checkpoints checkpoint-sibling-patch checkpoint-sibling-apply checkpoint-diff-sv57:
+	$(IMPL_MAKE) $@
 
 build:
 	$(TOOLS_MAKE) build
@@ -43,6 +46,10 @@ help:
 	@echo "  test   Test all components"
 	@echo "  test-derive  Test derive units and golden cases"
 	@echo "  test-smoke   Test only derive golden cases"
+	@echo "  test-checkpoints Test lkm2 Sv57/Sv48/Sv39 checkpoint output"
+	@echo "  checkpoint-sibling-patch Generate and check the frozen Linux patch"
+	@echo "  checkpoint-sibling-apply Explicitly apply the reviewed patch unstaged"
+	@echo "  checkpoint-diff-sv57 Run strict lkm2/Linux Sv57 differential"
 	@echo "  clean  Remove component build output"
 	@echo "  help   Show this help"
 	@echo

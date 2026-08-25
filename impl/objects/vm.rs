@@ -4,6 +4,10 @@ use core::arch::asm;
 use core::mem::{align_of, size_of};
 use core::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 
+use crate::checkpoints::{
+    self, EarlyDtbObservation, EarlyKernelObservation, KernelMapObservation, TrampolineObservation,
+};
+
 const PAGE_SHIFT: usize = 12;
 const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
 const PAGE_TABLE_ENTRIES: usize = PAGE_SIZE / size_of::<u64>();
@@ -28,6 +32,7 @@ const PTE_PERMISSION_MASK: u64 =
     PTE_READ | PTE_WRITE | PTE_EXEC | PTE_USER | PTE_GLOBAL | PTE_ACCESSED | PTE_DIRTY;
 const PTE_PPN_BITS: u32 = 44;
 const PTE_PPN_MASK: u64 = (1_u64 << PTE_PPN_BITS) - 1;
+const PTE_LOW_BITS_MASK: u64 = (1_u64 << 10) - 1;
 
 const PAGE_TABLE_FLAGS: u64 = PTE_VALID;
 const PAGE_KERNEL_EXEC_FLAGS: u64 =
@@ -139,6 +144,14 @@ impl Pte {
         }
         Ok(Self((ppn << 10) | flags))
     }
+
+    fn physical_address(self) -> u64 {
+        ((self.0 >> 10) & PTE_PPN_MASK) << PAGE_SHIFT
+    }
+
+    fn flags(self) -> u64 {
+        self.0 & PTE_LOW_BITS_MASK
+    }
 }
 
 #[repr(C, align(4096))]
@@ -169,6 +182,11 @@ impl PageTablePage {
         }
         entry.store(pte.0, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn read(&self, index: usize) -> Option<Pte> {
+        let value = self.entries.get(index)?.load(Ordering::Acquire);
+        (value != 0).then_some(Pte(value))
     }
 
     fn physical_address(&self) -> usize {
@@ -263,6 +281,10 @@ impl<F> PageTableType<F> {
             physical_address,
             flags,
         )
+    }
+
+    fn observe_kernel_leaf(&self, mode: PagingMode, virtual_address: usize) -> (Option<Pte>, bool) {
+        observe_leaf_2m(&self.root, &self.kernel_path, mode, virtual_address)
     }
 }
 
@@ -381,6 +403,60 @@ fn map_2m(
     )
 }
 
+fn table_entry_targets(page: &PageTablePage, index: usize, target: &PageTablePage) -> bool {
+    let Some(entry) = page.read(index) else {
+        return false;
+    };
+    entry.flags() == PAGE_TABLE_FLAGS
+        && entry.physical_address() == target.physical_address() as u64
+}
+
+fn observe_leaf_2m(
+    root: &PageTablePage,
+    path: &PathPages,
+    mode: PagingMode,
+    virtual_address: usize,
+) -> (Option<Pte>, bool) {
+    let path_ok = match mode {
+        PagingMode::Sv57 => {
+            table_entry_targets(
+                root,
+                page_table_index(virtual_address, PGD_SHIFT_SV57),
+                &path.level4,
+            ) && table_entry_targets(
+                &path.level4,
+                page_table_index(virtual_address, P4D_SHIFT),
+                &path.level3,
+            ) && table_entry_targets(
+                &path.level3,
+                page_table_index(virtual_address, PUD_SHIFT),
+                &path.level2,
+            )
+        }
+        PagingMode::Sv48 => {
+            table_entry_targets(
+                root,
+                page_table_index(virtual_address, P4D_SHIFT),
+                &path.level3,
+            ) && table_entry_targets(
+                &path.level3,
+                page_table_index(virtual_address, PUD_SHIFT),
+                &path.level2,
+            )
+        }
+        PagingMode::Sv39 => table_entry_targets(
+            root,
+            page_table_index(virtual_address, PUD_SHIFT),
+            &path.level2,
+        ),
+    };
+    (
+        path.level2
+            .read(page_table_index(virtual_address, PMD_SHIFT)),
+        path_ok,
+    )
+}
+
 #[repr(C)]
 struct KernelMapType {
     mode: AtomicU8,
@@ -463,6 +539,22 @@ impl KernelMapType {
     fn image_size(&self) -> usize {
         self.image_size.load(Ordering::Relaxed) as usize
     }
+
+    fn checkpoint_observation(&self, mode: PagingMode) -> KernelMapObservation {
+        KernelMapObservation {
+            kernel_va: self.virtual_address.load(Ordering::Acquire),
+            kernel_pa: self.physical_address.load(Ordering::Acquire),
+            page_offset: self.page_offset.load(Ordering::Acquire),
+            kernel_va_pa_offset: self.virtual_physical_offset.load(Ordering::Acquire),
+            mode: mode as u64,
+            levels: match mode {
+                PagingMode::Sv57 => 5,
+                PagingMode::Sv48 => 4,
+                PagingMode::Sv39 => 3,
+            },
+            top_shift: mode.top_level_shift() as u64,
+        }
+    }
 }
 
 #[repr(C)]
@@ -498,9 +590,13 @@ impl VmType {
 
         let mode = self.probe_paging_mode()?;
         self.kernel_map.setup(mode);
-        if read_satp() != 0 {
+        let satp = read_satp();
+        if satp != 0 {
             return Err(VmSetupError::InvalidMappingRange);
         }
+        let kernel = self.kernel_map.checkpoint_observation(mode);
+        checkpoints::kernel_map_ready(kernel, satp);
+        checkpoints::preset_complete(kernel, satp);
         Ok(())
     }
 
@@ -510,13 +606,24 @@ impl VmType {
         self.early.preset();
 
         self.setup_trampoline(mode)?;
+        checkpoints::trampoline_ready(self.observe_trampoline(mode));
         self.setup_early_kernel(mode)?;
+        checkpoints::early_kernel_ready(self.observe_early_kernel(mode)?);
         self.setup_early_dtb(mode, dtb_pa)?;
+        checkpoints::early_dtb_ready(self.observe_early_dtb(mode, dtb_pa));
         page_table_write_fence();
 
-        if read_satp() != 0 {
+        let satp = read_satp();
+        if satp != 0 {
             return Err(VmSetupError::InvalidMappingRange);
         }
+        checkpoints::setup_complete(
+            self.kernel_map.checkpoint_observation(mode),
+            self.observe_trampoline(mode),
+            self.observe_early_kernel(mode)?,
+            self.observe_early_dtb(mode, dtb_pa),
+            satp,
+        );
         Ok(())
     }
 
@@ -604,6 +711,87 @@ impl VmType {
         self.early_dtb_va
             .store(early_dtb_va as u64, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn observe_trampoline(&self, mode: PagingMode) -> TrampolineObservation {
+        let virtual_address = self.kernel_map.virtual_address();
+        let (leaf, path_ok) = self.trampoline.observe_kernel_leaf(mode, virtual_address);
+        TrampolineObservation {
+            mode: mode as u64,
+            va: virtual_address as u64,
+            pa: leaf.map_or(0, Pte::physical_address),
+            size: PMD_SIZE as u64,
+            flags: leaf.map_or(0, Pte::flags),
+            path_ok: u64::from(path_ok),
+        }
+    }
+
+    fn observe_early_kernel(&self, mode: PagingMode) -> VmResult<EarlyKernelObservation> {
+        let virtual_start = self.kernel_map.virtual_address();
+        let physical_start = self.kernel_map.physical_address();
+        let image_size = self.kernel_map.image_size();
+        let rounded_size = image_size
+            .checked_add(PMD_SIZE - 1)
+            .ok_or(VmSetupError::AddressOverflow)?
+            & PMD_MASK;
+        let (first_leaf, first_path_ok) = self.early.observe_kernel_leaf(mode, virtual_start);
+        let mut coverage_ok = first_path_ok;
+        let mut offset = 0_usize;
+        while offset < rounded_size {
+            let virtual_address = virtual_start
+                .checked_add(offset)
+                .ok_or(VmSetupError::AddressOverflow)?;
+            let expected_pa = physical_start
+                .checked_add(offset)
+                .ok_or(VmSetupError::AddressOverflow)? as u64;
+            let (leaf, path_ok) = self.early.observe_kernel_leaf(mode, virtual_address);
+            coverage_ok &= path_ok
+                && leaf.is_some_and(|entry| {
+                    entry.physical_address() == expected_pa
+                        && entry.flags() == PAGE_KERNEL_EXEC_FLAGS
+                });
+            offset = offset
+                .checked_add(PMD_SIZE)
+                .ok_or(VmSetupError::AddressOverflow)?;
+        }
+        Ok(EarlyKernelObservation {
+            mode: mode as u64,
+            va: virtual_start as u64,
+            pa: first_leaf.map_or(0, Pte::physical_address),
+            flags: first_leaf.map_or(0, Pte::flags),
+            coverage_ok: u64::from(coverage_ok),
+        })
+    }
+
+    fn observe_early_dtb(&self, mode: PagingMode, dtb_pa: usize) -> EarlyDtbObservation {
+        let fix_va = mode.fix_fdt_va();
+        let second_va = fix_va + PMD_SIZE;
+        let (leaf0, path0_ok) =
+            observe_leaf_2m(&self.early.root, &self.early.fixmap.path, mode, fix_va);
+        let (leaf1, path1_ok) =
+            observe_leaf_2m(&self.early.root, &self.early.fixmap.path, mode, second_va);
+        let expected_pa = (dtb_pa & PMD_MASK) as u64;
+        let coverage_ok = path0_ok
+            && path1_ok
+            && leaf0.is_some_and(|entry| {
+                entry.physical_address() == expected_pa && entry.flags() == PAGE_KERNEL_FLAGS
+            })
+            && leaf1.is_some_and(|entry| {
+                entry.physical_address() == expected_pa + PMD_SIZE as u64
+                    && entry.flags() == PAGE_KERNEL_FLAGS
+            });
+        EarlyDtbObservation {
+            mode: mode as u64,
+            dtb_pa: self.early_dtb_pa.load(Ordering::Acquire),
+            dtb_va: self.early_dtb_va.load(Ordering::Acquire),
+            fix_va: fix_va as u64,
+            leaf0_pa: leaf0.map_or(0, Pte::physical_address),
+            leaf0_flags: leaf0.map_or(0, Pte::flags),
+            leaf1_pa: leaf1.map_or(0, Pte::physical_address),
+            leaf1_flags: leaf1.map_or(0, Pte::flags),
+            size: (2 * PMD_SIZE) as u64,
+            coverage_ok: u64::from(coverage_ok),
+        }
     }
 
     fn fail_stop(&self, error: VmSetupError) -> ! {

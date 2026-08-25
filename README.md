@@ -51,10 +51,17 @@ Suspend、事务式 current 切换与 Resume，然后停在 UserAppRuntime，以
 └── linux-6.12/
 ```
 
-`../linux-6.12` 仅作为只读的 Linux 机制参考与未来差分测试基线。当前构建不依赖它，
-Makefile 也不会检查它是否存在。Rust 实现不使用 Cargo，不从 registry、Git 或 vendor
-目录引入外部 crate，只使用仓库源码与固定工具链提供的 sysroot crate。
+`../linux-6.12` 仅作为只读的 Linux 机制参考与显式 checkpoint 差分基线。普通构建不
+依赖它，也不会检查它是否存在；只有 `make -C impl checkpoint-sibling-patch` 和后续显式
+apply/diff 目标会校验冻结的 sibling。生成 patch 不会修改、暂存或提交 sibling。Rust
+实现不使用 Cargo，不从 registry、Git 或 vendor 目录引入外部 crate，只使用仓库源码与
+固定工具链提供的 sysroot crate。
 
 当前只支持 RISC-V 64 位；这一架构范围同时适用于 LKM2 和 `../linux-6.12` sibling。
 实现的默认 Rust target 是 `riscv64imac-unknown-none-elf`，不支持其他架构。后续实现
 内容将以该 sibling 中的 RISC-V 64 位机制、顺序和差分行为为参考。
+
+实现 checkpoint 默认使用可完全优化消除的 `empty` handler。可用
+`make -C impl CHECKPOINT_HANDLER=debugcon build` 生成原始 SBI DBCN 记录；
+`make -C impl test-checkpoints` 会分别验证 Sv57、Sv48 和 Sv39。checkpoint ABI、28 项冻结
+清单以及 sibling 审查门见 [`coding/checkpoints.md`](coding/checkpoints.md)。

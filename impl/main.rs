@@ -3,6 +3,9 @@
 #![no_std]
 #![no_main]
 
+#[rustfmt::skip]
+#[path = "build/checkpoints.rs"]
+mod checkpoints;
 #[path = "systems/kernel/config.rs"]
 mod config;
 mod objects;

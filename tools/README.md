@@ -1,6 +1,9 @@
 # LKM 模型工具
 
-`tools/` 独立维护基于 Python 的模型工具链，包括 Python 项目配置、虚拟环境、源码、测试和命令行包装脚本。仓库其他目录不依赖这里的 Python 虚拟环境。
+`tools/` 独立维护基于 Python 的模型工具链，包括 Python 项目配置、虚拟环境、源码、
+测试和命令行包装脚本。仓库其他目录不依赖这里的 Python 虚拟环境。除 modelc/derive 外，
+`checkpointgen` 从 Model IR 生成实现观测点，但不改变 derive 语义；普通 Rust 生成不会
+读取 Linux sibling，受版本控制的 VM 映射位于 `checkpoints/vm.json`。
 
 当前工具链处理流程为：
 

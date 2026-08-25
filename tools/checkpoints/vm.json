@@ -1,0 +1,167 @@
+{
+  "schema_version": 1,
+  "scope": {
+    "module": "objects.vm",
+    "root_object": "Vm",
+    "begins_after": "arch_head_stack_established"
+  },
+  "sibling": {
+    "path": "../linux-6.12",
+    "branch": "dev",
+    "commit": "d0fef99b651d141dd6ffbbddeb8b729b2f8faaff",
+    "files": {
+      "arch/riscv/mm/Makefile": "3c7635a621eb34cf974a4a54f8456a64dc1ddf9ea0907a0993793b1ffb08fc69",
+      "arch/riscv/mm/init.c": "556c3cf25b74f8b880bf0a89397d6751472aea97e34ff01460f2b75ec5386499"
+    }
+  },
+  "milestones": [
+    "kernel_map_ready",
+    "preset_complete",
+    "trampoline_ready",
+    "early_kernel_ready",
+    "early_dtb_ready",
+    "setup_complete"
+  ],
+  "checkpoints": [
+    {
+      "id": "KernelMap.Ready.Invariant.kernel_map_established",
+      "milestone": "kernel_map_ready",
+      "parameters": ["kernel_va", "kernel_pa", "page_offset", "kernel_va_pa_offset"]
+    },
+    {
+      "id": "KernelMap.Ready.Invariant.kernel_map_records_supported_paging_mode",
+      "milestone": "kernel_map_ready",
+      "parameters": ["mode", "levels", "top_shift", "page_offset"]
+    },
+    {
+      "id": "KernelMap.Ready.Invariant.paging_mode_probe_completed_with_satp_bare",
+      "milestone": "kernel_map_ready",
+      "parameters": ["mode", "satp"]
+    },
+    {
+      "id": "Vm.Preset.Ensures.KernelMap.Ready",
+      "milestone": "preset_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Preset.Ensures.TrampolinePageTable.Prepared",
+      "milestone": "preset_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Preset.Ensures.EarlyPageTable.Prepared",
+      "milestone": "preset_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Prepared.Invariant.KernelMap.Ready",
+      "milestone": "preset_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Prepared.Invariant.TrampolinePageTable.Prepared",
+      "milestone": "preset_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Prepared.Invariant.EarlyPageTable.Prepared",
+      "milestone": "preset_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Prepared.Invariant.kernel_map_established",
+      "milestone": "preset_complete",
+      "parameters": ["kernel_va", "kernel_pa", "page_offset", "kernel_va_pa_offset"]
+    },
+    {
+      "id": "Vm.Prepared.Invariant.kernel_map_records_supported_paging_mode",
+      "milestone": "preset_complete",
+      "parameters": ["mode", "levels", "top_shift", "page_offset"]
+    },
+    {
+      "id": "Vm.Prepared.Invariant.paging_mode_probe_completed_with_satp_bare",
+      "milestone": "preset_complete",
+      "parameters": ["mode", "satp"]
+    },
+    {
+      "id": "TrampolinePageTable.Ready.Invariant.trampoline_first_segment_mapping_established",
+      "milestone": "trampoline_ready",
+      "parameters": ["mode", "va", "pa", "size", "flags", "path_ok"]
+    },
+    {
+      "id": "EarlyPageTable.Ready.Invariant.early_kernel_image_mapping_established",
+      "milestone": "early_kernel_ready",
+      "parameters": ["mode", "va", "pa", "flags", "coverage_ok"]
+    },
+    {
+      "id": "EarlyPageTable.Ready.Invariant.early_dtb_four_mib_mapping_established",
+      "milestone": "early_dtb_ready",
+      "parameters": ["mode", "dtb_pa", "dtb_va", "fix_va", "leaf0_pa", "leaf0_flags", "leaf1_pa", "leaf1_flags", "size", "coverage_ok"]
+    },
+    {
+      "id": "Vm.Setup.Ensures.KernelMap.Ready",
+      "milestone": "setup_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Setup.Ensures.TrampolinePageTable.Ready",
+      "milestone": "setup_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Setup.Ensures.EarlyPageTable.Ready",
+      "milestone": "setup_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Ready.Invariant.KernelMap.Ready",
+      "milestone": "setup_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Ready.Invariant.TrampolinePageTable.Ready",
+      "milestone": "setup_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Ready.Invariant.EarlyPageTable.Ready",
+      "milestone": "setup_complete",
+      "parameters": []
+    },
+    {
+      "id": "Vm.Ready.Invariant.kernel_map_established",
+      "milestone": "setup_complete",
+      "parameters": ["kernel_va", "kernel_pa", "page_offset", "kernel_va_pa_offset"]
+    },
+    {
+      "id": "Vm.Ready.Invariant.kernel_map_records_supported_paging_mode",
+      "milestone": "setup_complete",
+      "parameters": ["mode", "levels", "top_shift", "page_offset"]
+    },
+    {
+      "id": "Vm.Ready.Invariant.paging_mode_probe_completed_with_satp_bare",
+      "milestone": "setup_complete",
+      "parameters": ["mode", "satp"]
+    },
+    {
+      "id": "Vm.Ready.Invariant.trampoline_first_segment_mapping_established",
+      "milestone": "setup_complete",
+      "parameters": ["mode", "va", "pa", "size", "flags", "path_ok"]
+    },
+    {
+      "id": "Vm.Ready.Invariant.early_kernel_image_mapping_established",
+      "milestone": "setup_complete",
+      "parameters": ["mode", "va", "pa", "flags", "coverage_ok"]
+    },
+    {
+      "id": "Vm.Ready.Invariant.early_dtb_four_mib_mapping_established",
+      "milestone": "setup_complete",
+      "parameters": ["mode", "dtb_pa", "dtb_va", "fix_va", "leaf0_pa", "leaf0_flags", "leaf1_pa", "leaf1_flags", "size", "coverage_ok"]
+    },
+    {
+      "id": "Vm.Ready.Invariant.vm_setup_completes_with_satp_bare",
+      "milestone": "setup_complete",
+      "parameters": ["satp"]
+    }
+  ]
+}

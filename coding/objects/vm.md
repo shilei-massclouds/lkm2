@@ -182,7 +182,8 @@ VM 保存稳定的非格式化错误码：
 
 ## Sibling 边界
 
-`../linux-6.12` 仅用于确认机制、顺序、布局和权限语义。它不是构建依赖，Makefile 和
-源码不得读取或链接 sibling 内容。实现不得复制 Linux 的 `pt_ops`、alternatives、
-KASLR、日志、最终页表或其分散的分页模式全局变量；本阶段也不实现差分框架、
-arch_head trace 或永久 MMU 切换。
+`../linux-6.12` 仅用于确认机制、顺序、布局和权限语义。它不是普通构建依赖，普通
+Makefile 和源码不得读取或链接 sibling 内容。只有 [`../checkpoints.md`](../checkpoints.md)
+定义的显式 patch/差分入口可以读取并校验固定 sibling。实现不得复制 Linux 的
+`pt_ops`、alternatives、KASLR、日志、最终页表或其分散的分页模式全局变量；本阶段也不
+实现永久 MMU 切换。
