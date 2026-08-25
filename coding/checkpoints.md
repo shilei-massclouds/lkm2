@@ -61,5 +61,6 @@ lkm2 回退与记录自洽。
 状态：patch base 上内容与 integrated 指纹完全一致的未暂存 review patch，或 integrated
 提交上的干净工作树；两种状态都必须位于冻结分支，且不得包含暂存修改。
 
-缓冲 handler、永久启用 MMU、Sv48/Sv39 sibling 差分、Linux alternatives/KASLR/
-`pt_ops` 迁移不在本阶段范围。
+缓冲 handler、最终内核页表、Sv48/Sv39 sibling 差分、Linux alternatives/KASLR/
+`pt_ops` 迁移不在本阶段范围；ArchHead 对已观测 early 页表的 SATP 重定位不增加新的
+checkpoint 协议项。

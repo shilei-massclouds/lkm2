@@ -235,7 +235,7 @@ impl PathPages {
 }
 
 #[repr(C)]
-struct NoFixmap;
+pub(crate) struct NoFixmap;
 
 #[repr(C)]
 struct FixmapPages {
@@ -251,7 +251,7 @@ impl FixmapPages {
 }
 
 #[repr(C)]
-struct PageTableType<F> {
+pub(crate) struct PageTableType<F> {
     root: PageTablePage,
     kernel_path: PathPages,
     fixmap: F,
@@ -346,6 +346,14 @@ impl PageTableType<FixmapPages> {
         )
     }
 }
+
+// SAFETY: this is the sole linker-visible definition of `trampoline_pg_dir`.
+// `PageTableType` has a C representation and `root` is its first field, so the
+// exported object's address is exactly the page-aligned trampoline root address.
+// The remaining fields are the root's uniquely owned intermediate page-table
+// pages; no alias or copy of this object exists.
+#[unsafe(export_name = "trampoline_pg_dir")]
+pub(crate) static TRAMPOLINE_PAGE_TABLE: PageTableType<NoFixmap> = PageTableType::new_trampoline();
 
 fn page_table_index(virtual_address: usize, shift: usize) -> usize {
     (virtual_address >> shift) & PAGE_TABLE_INDEX_MASK
@@ -567,7 +575,6 @@ struct VmType {
     early_dtb_pa: AtomicU64,
     early_dtb_va: AtomicU64,
     setup_error: AtomicU32,
-    trampoline: PageTableType<NoFixmap>,
     early: PageTableType<FixmapPages>,
 }
 
@@ -578,7 +585,6 @@ impl VmType {
             early_dtb_pa: AtomicU64::new(0),
             early_dtb_va: AtomicU64::new(0),
             setup_error: AtomicU32::new(0),
-            trampoline: PageTableType::new_trampoline(),
             early: PageTableType::new_early(),
         }
     }
@@ -590,7 +596,7 @@ impl VmType {
         self.early_dtb_va.store(0, Ordering::Relaxed);
 
         self.kernel_map.preset()?;
-        self.trampoline.preset();
+        TRAMPOLINE_PAGE_TABLE.preset();
         self.early.preset();
 
         let mode = self.probe_paging_mode()?;
@@ -608,7 +614,7 @@ impl VmType {
 
     fn setup(&self, dtb_pa: usize) -> VmResult<()> {
         let mode = selected_paging_mode()?;
-        self.trampoline.preset();
+        TRAMPOLINE_PAGE_TABLE.preset();
         self.early.preset();
 
         self.setup_trampoline(mode)?;
@@ -648,7 +654,7 @@ impl VmType {
     }
 
     fn setup_trampoline(&self, mode: PagingMode) -> VmResult<()> {
-        self.trampoline.map_kernel_2m(
+        TRAMPOLINE_PAGE_TABLE.map_kernel_2m(
             mode,
             self.kernel_map.virtual_address(),
             self.kernel_map.physical_address(),
@@ -726,7 +732,7 @@ impl VmType {
 
     fn observe_trampoline(&self, mode: PagingMode) -> TrampolineObservation {
         let virtual_address = self.kernel_map.virtual_address();
-        let (leaf, path_ok) = self.trampoline.observe_kernel_leaf(mode, virtual_address);
+        let (leaf, path_ok) = TRAMPOLINE_PAGE_TABLE.observe_kernel_leaf(mode, virtual_address);
         TrampolineObservation {
             mode: mode as u64,
             va: virtual_address as u64,
@@ -951,5 +957,6 @@ const _: () = assert!(size_of::<PageTablePage>() == PAGE_SIZE);
 const _: () = assert!(align_of::<PageTablePage>() == PAGE_SIZE);
 const _: () = assert!(size_of::<PageTableType<NoFixmap>>() == 4 * PAGE_SIZE);
 const _: () = assert!(size_of::<PageTableType<FixmapPages>>() == 7 * PAGE_SIZE);
+const _: () = assert!(core::mem::offset_of!(PageTableType<NoFixmap>, root) == 0);
 const _: () = assert!(PAGE_KERNEL_EXEC_FLAGS == 0xef);
 const _: () = assert!(PAGE_KERNEL_FLAGS == 0xe7);

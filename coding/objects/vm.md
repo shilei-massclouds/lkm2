@@ -2,8 +2,8 @@
 
 本页对应 [`model/objects/vm.spec`](../../model/objects/vm.spec)，实现位于
 [`impl/objects/vm.rs`](../../impl/objects/vm.rs)。本契约只覆盖 MMU-off 的早期
-KernelMap、分页模式探测、trampoline 页表和 early 页表构造；不永久启用 MMU，也不
-构造最终内核页表。
+KernelMap、分页模式探测、trampoline 页表和 early 页表构造；`setup_vm` 自身不启用
+MMU，也不构造最终内核页表。
 
 ## ABI 与生命周期
 
@@ -14,12 +14,14 @@ extern "C" fn setup_vm(dtb_pa: usize) -> usize
 ```
 
 返回值是最终 EarlyPageTable root 的运行时物理地址。导出名必须保持为 `setup_vm`。
-除唯一的 `satp_mode` 外，`VM`、KernelMap、两个页表及其辅助符号均为 Rust 私有，不要求
-使用 Linux 全局符号名。`setup_vm` 必须按模型顺序同步执行：
+VM 还必须导出且只导出两个 linker-visible 对象：独立 trampoline 页表对象
+`trampoline_pg_dir` 和运行时模式状态 `satp_mode`。前者的地址必须就是其 root 页地址；
+后者保存完整 SATP MODE 位域。`VM`、KernelMap、EarlyPageTable 及其他辅助符号均为 Rust
+私有，不要求使用 Linux 全局符号名。`setup_vm` 必须按模型顺序同步执行：
 
 ```text
 VM.preset(dtb_pa)
-  -> 准备 KernelMap 与两个静态页表对象
+  -> 准备 KernelMap、独立 TrampolinePageTable 与 VM 持有的 EarlyPageTable
   -> 使用 EarlyPageTable 的临时页表页探测分页模式
   -> 将唯一探测结果发布到 satp_mode
   -> 清理临时表项并恢复 SATP Bare
@@ -30,23 +32,27 @@ VM.setup(dtb_pa)
   -> 保持 SATP Bare
 ```
 
-成功返回时，KernelMap 和两个页表对象均已 Ready，且读取 `satp` 必须得到 `0`。失败
-路径不得返回。
+成功返回时，KernelMap 和两个页表对象均已 Ready，且读取 `satp` 必须得到 `0`。返回的
+early root 和独立 `trampoline_pg_dir` 随后由 ArchHead 重定位路径消费；失败路径不得返回。
 
 ## 对象与所有权
 
 `VM` 是一个静态聚合对象，至少包含：
 
 - 一个 `KernelMapType` 实例；
-- 一个 `TrampolinePageTable: PageTableType` 实例；
 - 一个 `EarlyPageTable: PageTableType` 实例，fixmap 分支包含在该实例内部；
 - early DTB 的物理地址和虚拟地址；
 - 一个静态 VM setup 错误码。
 
-聚合对象必须声明为普通 `static`，不得使用 `static mut`。所选模式另存于独立且
-linker-visible 的 `satp_mode: AtomicU64`；KernelMap 字段、DTB 字段、模式状态和错误码等
-需要在早期入口写入的标量必须使用适当宽度的原子整数提供内部可变性；安全方法负责在
-整数表示与 `PagingMode`、地址和错误码之间检查转换。
+`TrampolinePageTable: PageTableType` 必须从该聚合对象移出，成为唯一的独立普通 Rust
+static，并以 `trampoline_pg_dir` 导出。VM 构表和 checkpoint 观测必须直接访问这个对象，
+不得另建 root 别名、镜像 static 或页表副本。`PageTableType` 使用 `repr(C)` 且 root 是首个
+字段，因此导出对象地址与 root 页地址相同。
+
+聚合对象和独立 trampoline 对象都必须声明为普通 `static`，不得使用 `static mut`。
+所选模式另存于独立且 linker-visible 的 `satp_mode: AtomicU64`；KernelMap 字段、DTB
+字段、模式状态和错误码等需要在早期入口写入的标量必须使用适当宽度的原子整数提供内部
+可变性；安全方法负责在整数表示与 `PagingMode`、地址和错误码之间检查转换。
 
 `KernelMapType` 必须记录：
 
@@ -181,7 +187,8 @@ VM 保存稳定的非格式化错误码：
 
 `setup_vm` 及其完整调用链在 MMU 关闭时运行，必须采用 medany/PC-relative 的符号访问；
 不得生成只有启用内核虚拟映射后才可访问的绝对地址。实现完成后必须检查 ELF 重定位和
-反汇编，而不能只依赖源码判断。
+反汇编，而不能只依赖源码判断。写入 SATP 并返回虚拟地址调用点归 ArchHead 契约所有，
+不改变 `setup_vm` 成功返回时保持 SATP Bare 的要求。
 
 除以下硬件或链接边界外，VM 实现不得使用 `unsafe`：
 
@@ -198,4 +205,4 @@ VM 保存稳定的非格式化错误码：
 Makefile 和源码不得读取或链接 sibling 内容。只有 [`../checkpoints.md`](../checkpoints.md)
 定义的显式 patch/差分入口可以读取并校验固定 sibling。实现不得复制 Linux 的
 `pt_ops`、alternatives、KASLR、日志、最终页表或除唯一 `satp_mode` 外的分散分页模式
-全局变量；本阶段也不实现永久 MMU 切换。
+全局变量；`setup_vm` 返回时也不得把 early root 留在 SATP 中，页表激活归 ArchHead。

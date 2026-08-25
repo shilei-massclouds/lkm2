@@ -2,7 +2,7 @@
 
 use crate::config;
 use crate::objects::cpu::CPUID_TO_HARTID_MAP;
-use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK, SATP_MODE, setup_vm};
+use crate::objects::{BOOT_TASK, PT_SIZE_ON_STACK, SATP_MODE, TRAMPOLINE_PAGE_TABLE, setup_vm};
 
 use super::asm_macros::load_global_pointer;
 use super::csr::SR_FS_VS;
@@ -30,9 +30,10 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
     );
 }
 
-// SAFETY: the naked C ABI reserves `a0` for the page-table root without a
-// prologue. The current partial stub only relocates `ra` before fail-stop and
-// deliberately ignores the page-table root.
+// SAFETY: the naked C ABI preserves `a0` as the early page-table root without
+// a prologue. Both SATP writes occur only after setup_vm has published the
+// trampoline and early page tables, and the relocated return address remains
+// within the first mapped kernel superpage.
 #[unsafe(naked)]
 // LLVM strips the `\u{1}` raw-name marker, so the ELF symbol remains exactly
 // `relocate_enable_mmu` while this toolchain emits it before `_start_kernel`.
@@ -40,18 +41,19 @@ pub unsafe extern "C" fn boot_entry(_hart_id: usize, _dtb: usize) -> ! {
 #[unsafe(link_section = ".head.text")]
 /// # Safety
 ///
-/// `_page_table_root` is reserved for a future Linux-style relocation path.
-/// This partial implementation relocates `ra` from the runtime physical image
-/// to `KERNEL_LINK_ADDR`, but does not inspect the root, write SATP, or return.
-pub unsafe extern "C" fn relocate_enable_mmu(_page_table_root: usize) -> ! {
+/// `_page_table_root` must be the page-aligned runtime physical address returned
+/// by [`setup_vm`]. `setup_vm` must have published both page tables, and
+/// [`SATP_MODE`] must contain a valid complete SATP MODE field. The trampoline
+/// and early tables must both map the currently executing `.head.text` code at
+/// its linked virtual address. On success this function returns to the relocated
+/// virtual caller with the early page table active.
+pub unsafe extern "C" fn relocate_enable_mmu(_page_table_root: usize) {
     core::arch::naked_asm!(
         /* Relocate return address */
         "li a1, {kernel_link_addr}",
         "la a2, _start",
         "sub a1, a1, a2",
         "add ra, ra, a1",
-        /* Keep the remaining relocation path unreachable until it can switch SATP. */
-        "j {secondary_park}",
 
         /* Point stvec to virtual address of instruction after satp write */
         "la a2, 1f",
@@ -63,12 +65,41 @@ pub unsafe extern "C" fn relocate_enable_mmu(_page_table_root: usize) -> ! {
         "la a1, {satp_mode}",
         "ld a1, 0(a1)",
         "or a2, a2, a1",
-        "1:",
-        "j {secondary_park}",
 
+        /*
+         * Load trampoline page directory, which will cause us to trap to
+         * stvec if VA != PA, or simply fall through if VA == PA.  We need a
+         * full fence here because setup_vm() just wrote these PTEs and we need
+         * to ensure the new translations are in use.
+         */
+        "la a0, {trampoline_pg_dir}",
+        "srli a0, a0, {page_shift}",
+        "or a0, a0, a1",
+        "sfence.vma",
+        "csrw satp, a0",
+    ".align 2",
+    "1:",
+        /* Set trap vector to spin forever to help debug */
+        "la a0, {secondary_park}",
+        "csrw stvec, a0",
+
+        /* Reload the global pointer */
+        load_global_pointer!(),
+
+        /*
+         * Switch to kernel page tables.  A full fence is necessary in order to
+         * avoid using the trampoline translations, which are only correct for
+         * the first superpage.  Fetching the fence is guaranteed to work
+         * because that first superpage is translated the same way.
+         */
+        "csrw satp, a2",
+        "sfence.vma",
+
+        "ret",
         kernel_link_addr = const config::KERNEL_LINK_ADDR,
         page_shift = const config::PAGE_SHIFT,
         satp_mode = sym SATP_MODE,
+        trampoline_pg_dir = sym TRAMPOLINE_PAGE_TABLE,
         secondary_park = sym secondary_park,
     );
 }
