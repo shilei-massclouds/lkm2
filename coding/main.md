@@ -1,11 +1,19 @@
 # 生成代码约束
 
 `coding/` 将模型约束收敛为实现规则，并与 `model/`、`impl/` 保持稀疏的目录对应关系。
-当前实现入口链为：
+当前实现入口及早期 VM 链为：
 
 ```text
 impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
+                                      -> impl/objects/vm.rs
 ```
+
+对应的主要编码契约为：
+
+- [`phases/arch_head.md`](phases/arch_head.md)：MMU-off 机器入口、DTB ABI、早期异常入口和
+  `setup_vm` 调用边界；
+- [`objects/vm.md`](objects/vm.md)：KernelMap、分页模式探测、trampoline/early 页表和
+  fail-stop 规则。
 
 实现必须直接使用固定 Rust 工具链及其 sysroot crate。禁止引入 Cargo，禁止从 registry、
 Git 或 vendor 目录取得外部 crate；允许的代码来源只有本仓库源码和固定工具链自带的
