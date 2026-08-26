@@ -208,8 +208,8 @@ resumes。提交前失败会丢弃这些 resumes 并保留旧 current；恢复�
 `yielded`，其余为 `passed`；CLI 对多路径按稳定顺序分段输出，并在总体失败时返回 1。
 
 默认 `make derive`（或 `make -C tools run`）输出完整推导，与结论空开一行。
-EarlyBoot 依次从 DtbBlob 建立 BootCommandLine、绑定 EarlyConsole、将 Scheduler 推进到
-Online，再以最后一个 drive 打开全局 interrupt gate；
+EarlyBoot 先启用 Banner，再依次从 DtbBlob 建立 BootCommandLine、绑定并向 Printk 注册
+EarlyConsole、将 Scheduler 推进到 Online，最后以第五个 drive 打开全局 interrupt gate；
 BootSetup 只启用 `KernelInitTask`，其 Enable 生命周期驱动隐藏 runq 的 Enqueue；
 Suspend 与 Resume 不改变 runnable membership。BootTask 初始为 Online 且兼作
 idle Task，始终位于 runq 之外；Kernel 首次 Resume 使其进入 OnCpu。切换到

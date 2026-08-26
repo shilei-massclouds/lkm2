@@ -16,6 +16,8 @@ impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
   `setup_vm` 调用边界、双阶段 SATP 重定位和 StartKernel handoff；
 - [`objects/vm.md`](objects/vm.md)：KernelMap、分页模式探测、trampoline/early 页表和
   fail-stop 规则；
+- [`objects/printk.md`](objects/printk.md)：Printk 静态可用性、Console 注册与 Banner
+  提交边界；
 - [`checkpoints.md`](checkpoints.md)：从 Model IR 生成的 checkpoint、handler、sibling
   patch 和 Sv57 差分规则。
 

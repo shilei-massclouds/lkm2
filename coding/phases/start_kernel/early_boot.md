@@ -11,13 +11,17 @@ trap、IRQ/timekeeping 初始化和硬件 Unmask 留给后续实现阶段。
 
 1. 复查 BootTask 是 current 且 OnCpu、`Cpu0Scheduler.state == Ready`，并确认 ArchHead
    交接时 interrupts masked；
-2. 驱动 `DtbBlob.Transition::Enable`，从其 `/chosen/bootargs` 子关系把
-   `earlycon=sbi` 复制到静态存在、初始为空的 `BootCommandLine`；
-3. 驱动 `EarlyConsole.Transition::Enable`，依次查询命令行和静态 earlycon 注册表；
-4. 驱动 `Cpu0Scheduler.Transition::Enable`，使 CPU0 Scheduler 进入 Online；
-5. 最后驱动 `CurrentCPU.InterruptControlRef.Action::Unmask`；
-6. 仅在 DtbBlob、EarlyConsole、Scheduler 均为 Online，且命令行包含
-   `earlycon=sbi` 后建立 `early_boot_interrupts_enabled()`。
+2. 驱动 `Banner.Transition::Enable`，通过初始 Online 的 Printk 提交内核 banner；此时
+   Console 可以尚未 Online；
+3. 驱动 `DtbBlob.Transition::Enable`，从其 `/chosen/bootargs` 子关系把唯一的
+   `earlycon` 值复制到静态存在、初始为空的 `BootCommandLine`；
+4. 驱动 `EarlyConsole.Transition::Enable`，依次查询命令行和静态 earlycon 注册表，
+   建立 backend binding 和 Printk Console 注册事实；
+5. 驱动 `Cpu0Scheduler.Transition::Enable`，使 CPU0 Scheduler 进入 Online；
+6. 最后驱动 `CurrentCPU.InterruptControlRef.Action::Unmask`；
+7. 仅在 Banner、DtbBlob、EarlyConsole、Scheduler 均为 Online，且命令行存在
+   `earlycon` 键后建立 `early_boot_interrupts_enabled()`；EarlyBoot 不约束该键的具体
+   外部输入值。
 
 Unmask 必须始终是 EarlyBoot 的最后一个 drive；任何后续引入的 architecture、memory、
 trap、IRQ、timer 或 timekeeping 初始化都只能插入它之前，并需要独立冻结 ownership、状态
@@ -26,8 +30,8 @@ trap、IRQ、timer 或 timekeeping 初始化都只能插入它之前，并需要
 
 M2 直接用 `DtbBlob.Enable` 表达“内核观察并复制 bootargs”的生命周期边界，不增加
 `SetupArch` 或 `parse_dtb` 具名阶段，也不把字符串扫描算法纳入 model。DtbBlob binding
-失败时，后续 EarlyConsole、Scheduler 和 Unmask drive 均不得发生；Online 不表示 DTB
-内存失效。
+失败时，Banner 已经 Online，但后续 EarlyConsole、Scheduler 和 Unmask drive 均不得发生；
+Online 不表示 DTB 内存失效。
 
 BootSetup 入口复查 `early_boot_interrupts_enabled()`、BootTask current/OnCpu 和 Scheduler
 Online，之后只驱动 `KernelInitTask` 的 Preset、Setup、Enable。BootHandoff 仍拥有首次

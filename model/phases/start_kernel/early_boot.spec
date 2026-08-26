@@ -5,6 +5,7 @@ use model::objects::task::BootTask;
 use model::objects::early_console::BootCommandLine;
 use model::objects::early_console::DtbBlob;
 use model::objects::early_console::EarlyConsole;
+use model::objects::printk::Banner;
 use model::phases::phase::PhaseType;
 use super::arch_head_interrupts_masked;
 
@@ -22,6 +23,7 @@ object EarlyBoot: PhaseType {
                 }
 
                 drives {
+                    Banner.Transition::Enable;
                     DtbBlob.Transition::Enable;
                     EarlyConsole.Transition::Enable;
                     Cpu0Scheduler.Transition::Enable;
@@ -31,10 +33,11 @@ object EarlyBoot: PhaseType {
                 ensures {
                     CurrentTaskRef == BootTask;
                     BootTask.state == State::OnCpu;
+                    Banner.state == State::Online;
                     DtbBlob.state == State::Online;
                     EarlyConsole.state == State::Online;
                     Cpu0Scheduler.state == State::Online;
-                    BootCommandLine.contains("earlycon", "sbi");
+                    BootCommandLine.has_key("earlycon");
                 }
 
                 establishes {

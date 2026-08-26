@@ -22,6 +22,69 @@ def _all_units(units):
 
 
 class EarlyConsoleModelTests(unittest.TestCase):
+    def test_printk_banner_and_console_protocols_are_minimal(self) -> None:
+        model = compile_spec(REPOSITORY / "model/main.spec")
+        printk_module = next(
+            item for item in model.modules if item.name == ("objects", "printk")
+        )
+        printk_objects = {item.name[-1]: item for item in printk_module.objects}
+        self.assertEqual(set(printk_objects), {"Banner", "Printk"})
+
+        printk = printk_objects["Printk"]
+        self.assertEqual(printk.base_type.name, ("PrintkType",))
+        self.assertEqual(printk.initial_state, ("State", "Online"))
+        self.assertEqual(printk.parent.value, "Kernel")
+        self.assertFalse(
+            any(state.transitions or state.actions for state in printk.states)
+        )
+
+        banner = printk_objects["Banner"]
+        self.assertEqual(banner.base_type.name, ("BannerType",))
+        self.assertEqual(banner.initial_state, ("State", "Ready"))
+        self.assertEqual(banner.parent.value, "Kernel")
+        banner_handlers = tuple(
+            transition for state in banner.states for transition in state.transitions
+        )
+        self.assertEqual(
+            tuple(handler.signal for handler in banner_handlers),
+            (("Transition", "Enable"),),
+        )
+        self.assertFalse(any(state.actions for state in banner.states))
+        self.assertEqual(
+            tuple(block.kind for block in banner_handlers[0].blocks),
+            ("ensures",),
+        )
+        self.assertEqual(len(banner_handlers[0].blocks[0].expressions), 1)
+
+        console_module = next(
+            item
+            for item in model.modules
+            if item.name == ("objects", "early_console")
+        )
+        self.assertIn("ConsoleType", {item.name[-1] for item in console_module.types})
+        self.assertNotIn(
+            "EarlyConsoleType", {item.name[-1] for item in console_module.types}
+        )
+        early_console = next(
+            item for item in console_module.objects if item.name[-1] == "EarlyConsole"
+        )
+        self.assertEqual(early_console.base_type.name, ("ConsoleType",))
+        online = next(
+            state for state in early_console.states if state.name == ("State", "Online")
+        )
+        invariant_calls = tuple(
+            expression.children[0].value
+            for block in online.invariants
+            for expression in block
+        )
+        self.assertEqual(
+            invariant_calls,
+            (
+                "early_console_bound_from_registry",
+                "printk_console_registered",
+            ),
+        )
+
     def test_default_boot_binds_sbi_early_console_from_committed_tuples(self) -> None:
         model = compile_spec(REPOSITORY / "model/main.spec")
         module = next(
@@ -110,7 +173,24 @@ class EarlyConsoleModelTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(unit.event.target[-1] for unit in early_boot.drives),
-            ("DtbBlob", "EarlyConsole", "Cpu0Scheduler", "InterruptControl"),
+            (
+                "Banner",
+                "DtbBlob",
+                "EarlyConsole",
+                "Cpu0Scheduler",
+                "InterruptControl",
+            ),
+        )
+
+        banner_enable = next(
+            unit
+            for unit in units
+            if unit.event.target[-1] == "Banner"
+            and unit.handler == ("Transition", "Enable")
+        )
+        self.assertEqual(
+            tuple((check.expression, check.status) for check in banner_enable.ensures),
+            (("Printk == State::Online", "passed"),),
         )
 
         dtb_enable = next(
@@ -172,6 +252,8 @@ class EarlyConsoleModelTests(unittest.TestCase):
         )
 
         states = {item.object[-1]: item.state for item in path.final_state}
+        self.assertEqual(states["Printk"], ("State", "Online"))
+        self.assertEqual(states["Banner"], ("State", "Online"))
         self.assertEqual(states["SbiConsole"], ("State", "Online"))
         self.assertEqual(states["DtbBlob"], ("State", "Online"))
         self.assertEqual(states["EarlyConsole"], ("State", "Online"))
@@ -204,6 +286,18 @@ class EarlyConsoleModelTests(unittest.TestCase):
         self.assertEqual(
             tuple(argument.rsplit("::", 1)[-1] for argument in binding_fact.arguments),
             ("EarlyConsole", "SbiConsole"),
+        )
+        registration_fact = next(
+            fact
+            for fact in path.facts
+            if fact.predicate[-1] == "printk_console_registered"
+        )
+        self.assertEqual(
+            tuple(
+                argument.rsplit("::", 1)[-1]
+                for argument in registration_fact.arguments
+            ),
+            ("Printk", "EarlyConsole"),
         )
 
     def test_missing_dtb_bootargs_stops_early_boot_before_console_and_irqs(self) -> None:
@@ -261,6 +355,8 @@ class EarlyConsoleModelTests(unittest.TestCase):
             )
         )
         states = {item.object[-1]: item.state for item in path.final_state}
+        self.assertEqual(states["Printk"], ("State", "Online"))
+        self.assertEqual(states["Banner"], ("State", "Online"))
         self.assertEqual(states["DtbBlob"], ("State", "Ready"))
         self.assertEqual(states["EarlyConsole"], ("State", "Ready"))
         self.assertEqual(states["Cpu0Scheduler"], ("State", "Ready"))

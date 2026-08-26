@@ -103,6 +103,9 @@ OpenSBI -> Kernel: emits Transition::Enable
     commit state: unchanged
   StartKernel -> EarlyBoot: resumes Action::Enter
     current state: State::Online
+    EarlyBoot -> Banner: drives Transition::Enable
+      current state: State::Ready
+      commit state: State::Online
     EarlyBoot -> DtbBlob: drives Transition::Enable
       current state: State::Ready
       binds value = 'sbi' (objects::early_console::ChosenBootArgs key 'earlycon')

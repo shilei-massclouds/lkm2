@@ -2261,6 +2261,7 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("objects", "cpu"),
                 ("objects", "early_console"),
                 ("objects", "kernel_image"),
+                ("objects", "printk"),
                 ("objects", "scheduler"),
                 ("objects", "task"),
                 ("objects", "user_app_runtime"),

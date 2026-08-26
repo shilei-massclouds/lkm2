@@ -2,7 +2,7 @@
 
 ## 核心对象
 
-正式模型当前固定以下六个核心对象：
+正式模型当前固定以下六个 console 选择对象：
 
 - `DtbBlob: DtbBlobType`：Kernel 持有的 DTB 输入，Online 表示 bootargs 已被观察并复制；
 - `ChosenBootArgs: Relation<String, String>`：`DtbBlob` 的子对象，表示
@@ -10,7 +10,11 @@
 - `BootCommandLine: Relation<String, String>`：内核已经观察到的启动命令行键值；
 - `EarlyConTable: Map<String, EarlyConsoleBackendType>`：early console backend 注册表；
 - `SbiConsole: EarlyConsoleBackendType`：SBI early console backend；
-- `EarlyConsole: EarlyConsoleType`：根据命令行和注册表绑定 backend 的前端对象。
+- `EarlyConsole: ConsoleType`：根据命令行和注册表绑定 backend 的前端对象。
+
+此外，Kernel 持有初始 Online 的 `Printk: PrintkType` 和初始 Ready 的
+`Banner: BannerType`。Banner Enable 只确保 Printk Online；EarlyConsole Enable 在 backend
+binding 之后建立 `printk_console_registered(Printk, EarlyConsole)`。
 
 选择链固定为：
 
@@ -22,6 +26,7 @@ ChosenBootArgs["earlycon"]
     -> EarlyConTable["sbi"]
     -> SbiConsole
     -> EarlyConsole.state == State::Online
+    -> printk_console_registered(Printk, EarlyConsole)
 ```
 
 `BootCommandLine` 对象静态存在且初始为空；`DtbBlob.Enable` 增加的是 tuple 内容，
@@ -53,22 +58,24 @@ M1 证明正式启动推导可以消费已经准备好的输入：
   `ChosenBootArgs.unique_value("earlycon")` 得到同一个值，建立
   `BootCommandLine.contains("earlycon", value)`，并在源、目标 relation 都包含该值后
   进入 Online；
-- `EarlyBoot.Action::Enter` 严格依次启用 `DtbBlob`、`EarlyConsole`、
-  `Cpu0Scheduler`，最后执行 local IRQ Unmask；成功交接时三个对象均为 Online，且
-  `BootCommandLine` 包含 `earlycon=sbi`；
-- 缺失 DTB bootargs 时，DtbBlob binding 以 `relation_key_missing` 失败，不建立
-  `BootCommandLine` tuple，也不继续启用 EarlyConsole、scheduler 或打开中断。
+- `EarlyBoot.Action::Enter` 严格依次启用 `Banner`、`DtbBlob`、`EarlyConsole`、
+  `Cpu0Scheduler`，最后执行 local IRQ Unmask；成功交接时四个对象均为 Online，且
+  `BootCommandLine` 存在 `earlycon` 键；具体值属于 DTB 输入，不是 EarlyBoot 契约；
+- 缺失 DTB bootargs 时，Banner 已为 Online，DtbBlob binding 以
+  `relation_key_missing` 失败，不建立 `BootCommandLine` tuple，也不继续启用
+  EarlyConsole、scheduler 或打开中断。
 
 OpenSBI 只负责固件生命周期与 Kernel handoff，不建立上述三个 relation/map 的内容。
 本轮把 DTB 输入直接展开为 DtbBlob 的生命周期 transition，不引入仅作包装的
 `DtbProperties`、`SetupArch` 或 `parse_dtb` 具名阶段。DtbBlob Online 只表示 bootargs
-已被内核观察并复制，不表示 DTB 所在内存已经失效。M2 固定输入仅为
-`earlycon=sbi`；字符串扫描、命令行合并优先级、其他 DT 属性和 SBI capability 留给
-后续里程碑。
+已被内核观察并复制，不表示 DTB 所在内存已经失效。M2 的当前验收输入是
+`earlycon=sbi`，但 EarlyBoot 只断言键存在；字符串扫描、命令行合并优先级、其他 DT
+属性和 SBI capability 留给后续里程碑。
 
-完成标准：Setup 仅产生 chosen bootargs 与 registry 两个 relation effect；DtbBlob 的
-binding、同值 relation effect 和两项 ensures 全部通过；默认轨迹包含四步 EarlyBoot
-drive，最终保留三个 tuple、backend 字段和 registry 绑定事实。
+完成标准：Setup 仅产生 chosen bootargs 与 registry 两个 relation effect；Banner 的唯一
+ensure 与 DtbBlob 的 binding、同值 relation effect 和两项 ensures 全部通过；默认轨迹包含
+五步 EarlyBoot drive，最终保留三个 tuple、backend 字段、registry binding 和 Printk
+Console 注册事实。
 
 ## 后续里程碑
 

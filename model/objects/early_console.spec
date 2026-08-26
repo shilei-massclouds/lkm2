@@ -1,10 +1,16 @@
 /* Early console selection from the boot command line and backend registry. */
 
 use model::systems::kernel::Kernel;
+use model::objects::printk::Printk;
+use model::objects::printk::PrintkType;
 
 predicate early_console_bound_from_registry(
-    console: EarlyConsoleType,
+    console: ConsoleType,
     backend: EarlyConsoleBackendType,
+) -> bool;
+predicate printk_console_registered(
+    printk: PrintkType,
+    console: ConsoleType,
 ) -> bool;
 
 type EarlyConsoleBackendType {
@@ -21,7 +27,7 @@ type EarlyConsoleBackendType {
     }
 }
 
-type EarlyConsoleType {
+type ConsoleType {
     initial_state: State::Ready;
     mutable backend: EarlyConsoleBackendType;
 
@@ -107,7 +113,7 @@ object SbiConsole: EarlyConsoleBackendType {
     initial_state: State::Online;
 }
 
-object EarlyConsole: EarlyConsoleType {
+object EarlyConsole: ConsoleType {
     parent: Kernel;
 
     state State::Ready {
@@ -133,6 +139,7 @@ object EarlyConsole: EarlyConsoleType {
 
                 establishes {
                     early_console_bound_from_registry(self, backend);
+                    printk_console_registered(Printk, self);
                 }
             }
         }
@@ -141,6 +148,7 @@ object EarlyConsole: EarlyConsoleType {
     state State::Online {
         invariant {
             early_console_bound_from_registry(self, self.backend);
+            printk_console_registered(Printk, self);
         }
     }
 }
