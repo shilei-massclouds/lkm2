@@ -2,8 +2,11 @@
 
 ## 核心对象
 
-正式模型固定以下四个核心对象：
+正式模型当前固定以下六个核心对象：
 
+- `DtbBlob: DtbBlobType`：Kernel 持有的 DTB 输入，Online 表示 bootargs 已被观察并复制；
+- `ChosenBootArgs: Relation<String, String>`：`DtbBlob` 的子对象，表示
+  `/chosen/bootargs`；
 - `BootCommandLine: Relation<String, String>`：内核已经观察到的启动命令行键值；
 - `EarlyConTable: Map<String, EarlyConsoleBackendType>`：early console backend 注册表；
 - `SbiConsole: EarlyConsoleBackendType`：SBI early console backend；
@@ -12,18 +15,22 @@
 选择链固定为：
 
 ```text
-BootCommandLine["earlycon"]
+ChosenBootArgs["earlycon"]
+    -> DtbBlob.Enable
+    -> BootCommandLine["earlycon"]
     -> "sbi"
     -> EarlyConTable["sbi"]
     -> SbiConsole
     -> EarlyConsole.state == State::Online
 ```
 
-`EarlyConsole` 不静态引用 `SbiConsole`；具体 backend 只能来自有限关系查询。
+`BootCommandLine` 对象静态存在且初始为空；`DtbBlob.Enable` 增加的是 tuple 内容，
+不是动态创建命令行对象。`EarlyConsole` 不静态引用 `SbiConsole`；具体 backend 只能来自
+有限关系查询。
 
-## M1：输入已就绪时完成绑定
+## M1：输入已就绪时完成绑定（已完成）
 
-本里程碑只证明正式启动推导可以消费已经准备好的输入：
+M1 证明正式启动推导可以消费已经准备好的输入：
 
 - `Kernel.Transition::Setup` 原子提交
   `BootCommandLine.contains("earlycon", "sbi")` 和
@@ -33,21 +40,37 @@ BootCommandLine["earlycon"]
 - `EarlyConsole.Transition::Enable` 依次执行 `unique_value` 和 `lookup`，保存 backend，
   进入 `State::Online` 并建立绑定事实。
 
-这里的 Kernel Setup 是 M1 粗粒度的“内核输入已形成”边界，不声称描述了字符串解析、
-early-param 处理或链接表遍历。OpenSBI 只负责固件生命周期与 Kernel handoff，不建立
-内核命令行或 earlycon 注册表 tuple。
+这里的 Kernel Setup 是 M1 曾使用的粗粒度“内核输入已形成”边界。M2 已替换其中
+`BootCommandLine` tuple 的来源；M1 的 backend 查询和绑定语义保持不变。
 
-完成标准：默认推导轨迹包含两个成功 binding，最终 tuple 快照包含命令行与注册表
-条目，`EarlyConsole.backend == SbiConsole`，不存在 `SbiConsole.Transition::Enable` 推导
-unit，且 `SbiConsole` 最终仍为 Online；原有启动推导继续通过。
+## M2：从 DTB 建立 BootCommandLine（当前）
+
+- `Kernel.Transition::Setup` 原子建立
+  `ChosenBootArgs.contains("earlycon", "sbi")` 和
+  `EarlyConTable.contains("sbi", SbiConsole)`，不再建立 `BootCommandLine` tuple；
+- `DtbBlob` 属于 Kernel、初始为 Ready，`ChosenBootArgs` 是其子对象；
+- `DtbBlob.Transition::Enable` 通过
+  `ChosenBootArgs.unique_value("earlycon")` 得到同一个值，建立
+  `BootCommandLine.contains("earlycon", value)`，并在源、目标 relation 都包含该值后
+  进入 Online；
+- `EarlyBoot.Action::Enter` 严格依次启用 `DtbBlob`、`EarlyConsole`、
+  `Cpu0Scheduler`，最后执行 local IRQ Unmask；成功交接时三个对象均为 Online，且
+  `BootCommandLine` 包含 `earlycon=sbi`；
+- 缺失 DTB bootargs 时，DtbBlob binding 以 `relation_key_missing` 失败，不建立
+  `BootCommandLine` tuple，也不继续启用 EarlyConsole、scheduler 或打开中断。
+
+OpenSBI 只负责固件生命周期与 Kernel handoff，不建立上述三个 relation/map 的内容。
+本轮把 DTB 输入直接展开为 DtbBlob 的生命周期 transition，不引入仅作包装的
+`DtbProperties`、`SetupArch` 或 `parse_dtb` 具名阶段。DtbBlob Online 只表示 bootargs
+已被内核观察并复制，不表示 DTB 所在内存已经失效。M2 固定输入仅为
+`earlycon=sbi`；字符串扫描、命令行合并优先级、其他 DT 属性和 SBI capability 留给
+后续里程碑。
+
+完成标准：Setup 仅产生 chosen bootargs 与 registry 两个 relation effect；DtbBlob 的
+binding、同值 relation effect 和两项 ensures 全部通过；默认轨迹包含四步 EarlyBoot
+drive，最终保留三个 tuple、backend 字段和 registry 绑定事实。
 
 ## 后续里程碑
-
-### M2：倒推 BootCommandLine 来源
-
-确认 Linux sibling 中 `setup_arch` 的 bootargs/内建命令行合并边界，将命令行 tuple
-的建立从当前 Kernel Setup 收紧到能够说明其真实来源的 model handler。字符扫描和
-参数解析算法仍属于 coding。
 
 ### M3：倒推 EarlyConTable 来源
 
@@ -61,5 +84,6 @@ coding/impl。
 DBCN 与 SBI v0.1，并补齐缺失、歧义、未注册和 backend 不可用在正式启动链上的失败
 验证。
 
-每个里程碑独立保持可推导、可回归；后续工作替换上一阶段的抽象来源，不改变四个
-核心对象和两次查询的选择语义。
+每个里程碑独立保持可推导、可回归；后续工作替换上一阶段的抽象来源，不改变
+BootCommandLine、EarlyConTable、SbiConsole、EarlyConsole 及两次 backend 查询的选择
+语义。

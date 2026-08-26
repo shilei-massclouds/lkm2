@@ -35,6 +35,7 @@ BOOT_SETUP = ("phases", "start_kernel", "boot_setup", "BootSetup")
 USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
 BOOT_CPU = ("objects", "cpu", "BootCPU")
 EARLY_CONSOLE = ("objects", "early_console", "EarlyConsole")
+DTB_BLOB = ("objects", "early_console", "DtbBlob")
 
 
 def _all_units(units):
@@ -224,6 +225,7 @@ class BootSchedulerModelTests(unittest.TestCase):
                 for signal in early_drives
             ),
             (
+                (DTB_BLOB, ("Transition", "Enable")),
                 (EARLY_CONSOLE, ("Transition", "Enable")),
                 (CPU0_SCHEDULER, ("Transition", "Enable")),
                 (
@@ -258,9 +260,18 @@ class BootSchedulerModelTests(unittest.TestCase):
             all(check.status == "passed" for check in early_boot.depends_on)
         )
         self.assertTrue(all(check.status == "passed" for check in early_boot.ensures))
+        self.assertTrue(
+            {
+                "DtbBlob == State::Online",
+                "EarlyConsole == State::Online",
+                "Cpu0Scheduler == State::Online",
+                'BootCommandLine.contains("earlycon", "sbi")',
+            }.issubset({check.expression for check in early_boot.ensures})
+        )
         self.assertEqual(
             tuple(unit.event.signal for unit in early_boot.drives),
             (
+                ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Action", "Unmask"),
