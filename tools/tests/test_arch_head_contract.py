@@ -113,7 +113,7 @@ class ArchHeadContractGoldenTests(unittest.TestCase):
         )
         self.assertEqual(path.current_task_ref[-1], "KernelInitTask")
         self.assertEqual(path.current_cpu_ref[-1], "BootCPU")
-        self.assertEqual(path.interrupt_controls[0].mode, "Masked")
+        self.assertEqual(path.interrupt_controls[0].mode, "Unmasked")
         self.assertEqual(path.interrupt_controls[0].pending, ())
         states = {state.object[-1]: state.state for state in path.final_state}
         self.assertEqual(states["KernelImage"], ("State", "Ready"))

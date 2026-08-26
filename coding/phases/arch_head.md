@@ -43,7 +43,7 @@ ArchHead 的 model drive 与实现顺序逐项对应：
 | `arch_head_early_address_space_active()` | `setup_vm` 发布 Ready 页表后，`relocate_enable_mmu` 最终把返回的 EarlyPageTable root 写入 `satp`，并在内核虚拟映射中返回。 |
 | `arch_head_kernel_image_accessible()` | early 页表的 kernel window 覆盖 flat kernel image，虚拟 `gp`、代码和数据均可访问。 |
 | `arch_head_firmware_fdt_accessible()` | 固件 `a1` 保持为 DTB PA 并传给 `setup_vm`；FDT 所在物理区经 early direct map 可访问。FDT 身份继续由 OpenSBI handoff/ABI 约束，不新增 model 对象。 |
-| `arch_head_trap_context_ready()` | 最终 `setup_trap_vector` 将 `stvec` 安装为 early fail-stop trap target，并清零 `sscratch`。 |
+| `arch_head_trap_context_ready()` | 最终 `setup_trap_vector` 将 `stvec` 安装为 StartKernel-safe early fail-stop trap target，并清零 `sscratch`；它不表示 runtime interrupt dispatch ready。 |
 | `arch_head_soc_early_init_complete()` | `soc_early_init` 已正常返回；紧随其后的 tail call 把控制流交给唯一 `start_kernel`。 |
 
 `StartKernel.Action::Enter` 必须同时检查上述十二项事实、三对象 Ready 状态及

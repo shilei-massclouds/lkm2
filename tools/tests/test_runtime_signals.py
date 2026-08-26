@@ -104,6 +104,19 @@ class UserRuntimeSignalEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             model_root = Path(directory) / "model"
             shutil.copytree(REPOSITORY / "model", model_root)
+            early_boot_spec = (
+                model_root / "phases" / "start_kernel" / "early_boot.spec"
+            )
+            # Keep this gate-focused fixture masked until its explicit control
+            # root runs after the boot continuation.
+            early_boot_spec.write_text(
+                early_boot_spec.read_text(encoding="utf-8").replace(
+                    "CurrentCPU.InterruptControlRef.Action::Unmask;",
+                    "CurrentCPU.InterruptControlRef.Action::MaskAll;",
+                    1,
+                ),
+                encoding="utf-8",
+            )
             human_spec = model_root / "systems" / "human.spec"
             source = human_spec.read_text(encoding="utf-8")
             source = source.replace(
@@ -202,15 +215,16 @@ object RuntimeSignalControl: RuntimeSignalControlType {{}}
                 self.assertEqual(path.status, code)
                 self.assertEqual(path.event_flows, ())
 
-    def test_masked_interrupt_is_pending_and_exception_returns_locally(self) -> None:
+    def test_early_boot_unmasks_interrupt_and_exception_returns_locally(self) -> None:
         interrupt = self._derive("interrupt.timer <local>\n").paths[0]
         self.assertEqual(interrupt.status, "yielded")
-        self.assertEqual(interrupt.event_flows, ())
-        self.assertEqual(interrupt.interrupt_controls[0].mode, "Masked")
         self.assertEqual(
-            interrupt.interrupt_controls[0].pending,
+            tuple(flow.signal for flow in interrupt.event_flows),
             ("interrupt.timer",),
         )
+        self.assertEqual(interrupt.event_flows[0].outcome, "returned")
+        self.assertEqual(interrupt.interrupt_controls[0].mode, "Unmasked")
+        self.assertEqual(interrupt.interrupt_controls[0].pending, ())
 
         exception = self._derive("exception.page_fault <local>\n").paths[0]
         self.assertEqual(exception.status, "yielded")
@@ -291,6 +305,15 @@ object RuntimeSignalControl: RuntimeSignalControlType {{}}
                 arch_head.read_text(encoding="utf-8").replace(
                     "CurrentCPU.InterruptControlRef.Action::MaskAll;\n",
                     "",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            early_boot = model_root / "phases" / "start_kernel" / "early_boot.spec"
+            early_boot.write_text(
+                early_boot.read_text(encoding="utf-8").replace(
+                    "CurrentCPU.InterruptControlRef.Action::Unmask;",
+                    "CurrentCPU.InterruptControlRef.Action::ClearPending;",
                     1,
                 ),
                 encoding="utf-8",

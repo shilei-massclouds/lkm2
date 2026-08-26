@@ -15,6 +15,7 @@ from derive import (
     derive,
     load_user_runtime_signals,
 )
+from model_ir import ModelExpression
 from modelc import compile_spec
 
 
@@ -29,6 +30,8 @@ USER_APP_RUNTIME = (
 )
 KERNEL = ("systems", "kernel", "Kernel")
 BOOT_HANDOFF = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
+EARLY_BOOT = ("phases", "start_kernel", "early_boot", "EarlyBoot")
+BOOT_SETUP = ("phases", "start_kernel", "boot_setup", "BootSetup")
 USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
 BOOT_CPU = ("objects", "cpu", "BootCPU")
 
@@ -197,6 +200,134 @@ class BootSchedulerModelTests(unittest.TestCase):
         )
         self.assertEqual(_target_name(signal.target), CPU0_SCHEDULER)
         self.assertEqual(signal.signal, ("Action", "Schedule"))
+
+    def test_early_boot_owns_scheduler_enable_and_unmask_is_last(self) -> None:
+        early_boot = next(
+            item for item in self.model.objects if item.name == EARLY_BOOT
+        )
+        boot_setup = next(
+            item for item in self.model.objects if item.name == BOOT_SETUP
+        )
+        early_action = early_boot.states[0].actions[0]
+        setup_action = boot_setup.states[0].actions[0]
+        early_drives = next(
+            block.signals for block in early_action.blocks if block.kind == "drives"
+        )
+        setup_drives = next(
+            block.signals for block in setup_action.blocks if block.kind == "drives"
+        )
+
+        self.assertEqual(
+            tuple(
+                (_target_name(signal.target), signal.signal)
+                for signal in early_drives
+            ),
+            (
+                (CPU0_SCHEDULER, ("Transition", "Enable")),
+                (
+                    ("CurrentCPU", "InterruptControlRef"),
+                    ("Action", "Unmask"),
+                ),
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                (_target_name(signal.target), signal.signal)
+                for signal in setup_drives
+            ),
+            (
+                (KERNEL_INIT_TASK, ("Transition", "Preset")),
+                (KERNEL_INIT_TASK, ("Transition", "Setup")),
+                (KERNEL_INIT_TASK, ("Transition", "Enable")),
+            ),
+        )
+
+    def test_early_boot_handoff_gates_boot_setup(self) -> None:
+        path = derive(
+            self.model,
+            default_derivation_sequence(self.model),
+            user_runtime_signals=load_user_runtime_signals(StringIO("")),
+        ).paths[0]
+        units = tuple(_all_units(path.units))
+        early_boot = next(unit for unit in units if unit.event.target == EARLY_BOOT)
+        boot_setup = next(unit for unit in units if unit.event.target == BOOT_SETUP)
+
+        self.assertTrue(
+            all(check.status == "passed" for check in early_boot.depends_on)
+        )
+        self.assertTrue(all(check.status == "passed" for check in early_boot.ensures))
+        self.assertEqual(
+            tuple(unit.event.signal for unit in early_boot.drives),
+            (("Transition", "Enable"), ("Action", "Unmask")),
+        )
+        self.assertEqual(
+            tuple(check.expression for check in early_boot.establishes),
+            ("early_boot_interrupts_enabled()",),
+        )
+        self.assertTrue(
+            all(check.status == "passed" for check in boot_setup.depends_on)
+        )
+        self.assertEqual(path.interrupt_controls[0].mode, "Unmasked")
+
+    def test_failed_unmask_does_not_publish_handoff_or_run_boot_setup(self) -> None:
+        model = compile_spec(REPOSITORY / "model" / "main.spec")
+        early_boot = next(item for item in model.objects if item.name == EARLY_BOOT)
+        drives = next(
+            block
+            for block in early_boot.states[0].actions[0].blocks
+            if block.kind == "drives"
+        )
+        unmask = drives.signals[-1]
+        self.assertEqual(unmask.signal, ("Action", "Unmask"))
+
+        # Bypass compiler validation to inject a runtime failure at the exact
+        # Unmask drive without changing the repository model.
+        object.__setattr__(
+            unmask,
+            "arguments",
+            (ModelExpression("integer", 0),),
+        )
+        path = derive(
+            model,
+            default_derivation_sequence(model),
+            user_runtime_signals=load_user_runtime_signals(StringIO("")),
+        ).paths[0]
+        units = tuple(_all_units(path.units))
+
+        self.assertEqual(path.status, "unhandled_signal")
+        self.assertEqual(path.interrupt_controls[0].mode, "Masked")
+        self.assertFalse(
+            any(
+                fact.predicate[-1] == "early_boot_interrupts_enabled"
+                for fact in path.facts
+            )
+        )
+        self.assertFalse(any(unit.event.target == BOOT_SETUP for unit in units))
+
+    def test_boot_setup_rejects_a_missing_early_boot_handoff_fact(self) -> None:
+        model = compile_spec(REPOSITORY / "model" / "main.spec")
+        early_boot = next(item for item in model.objects if item.name == EARLY_BOOT)
+        action = early_boot.states[0].actions[0]
+        object.__setattr__(
+            action,
+            "blocks",
+            tuple(block for block in action.blocks if block.kind != "establishes"),
+        )
+        path = derive(
+            model,
+            default_derivation_sequence(model),
+            user_runtime_signals=load_user_runtime_signals(StringIO("")),
+        ).paths[0]
+        units = tuple(_all_units(path.units))
+        boot_setup = next(unit for unit in units if unit.event.target == BOOT_SETUP)
+
+        self.assertEqual(path.status, "depends_on_failed")
+        self.assertEqual(boot_setup.depends_on[-1].status, "failed")
+        self.assertEqual(
+            boot_setup.depends_on[-1].expression,
+            "early_boot_interrupts_enabled()",
+        )
+        self.assertEqual(boot_setup.drives, ())
 
     def test_user_run_prepares_runtime_then_yields_to_its_enter_action(self) -> None:
         phase = next(item for item in self.model.objects if item.name == USER_RUN_PHASE)

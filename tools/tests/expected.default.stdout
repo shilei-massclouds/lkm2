@@ -103,13 +103,15 @@ OpenSBI -> Kernel: emits Transition::Enable
     commit state: unchanged
   StartKernel -> EarlyBoot: resumes Action::Enter
     current state: State::Online
-    print: here
+    EarlyBoot -> Cpu0Scheduler: drives Transition::Enable
+      current state: State::Ready
+      commit state: State::Online
+    EarlyBoot -> InterruptControl: drives Action::Unmask
+      current state: State::Online
+      commit state: unchanged
     commit state: unchanged
   StartKernel -> BootSetup: resumes Action::Enter
     current state: State::Online
-    BootSetup -> Cpu0Scheduler: drives Transition::Enable
-      current state: State::Ready
-      commit state: State::Online
     BootSetup -> KernelInitTask: drives Transition::Preset
       current state: State::Base
       commit state: State::Prepared

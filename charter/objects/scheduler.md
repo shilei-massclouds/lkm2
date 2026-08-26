@@ -13,7 +13,7 @@ Scheduler 是 per-CPU 运行对象，不是整个内核共享的全局单例。�
 `Cpu0Scheduler` 的最小生命周期是：
 
 ```text
-Ready --BootSetup/Enable--> Online
+Ready --EarlyBoot/Enable--> Online
 Online --Schedule--> validate line current → Suspend(current) → switches next → Resume(next)
 ```
 
@@ -76,9 +76,9 @@ Online --Schedule--> validate line current → Suspend(current) → switches nex
 - `Task.Enable` 使普通 Task 首次进入 runnable 集合，因而触发 Enqueue。
   Suspend/Resume 不触发 Enqueue/Dequeue；未来的 Block、Exit 或其他离开 runnable
   语义才触发 Dequeue，对应的 Wakeup/Enable 语义触发 Enqueue。
-- `BootSetup` 只把 Scheduler 推进 Online，并完成 `KernelInitTask` 的 Preset、Setup
-  与 Enable。在没有 Block/Exit 的当前切片中，`KernelInitTask` 成为 current 后仍保留在
-  runq 中。
+- `EarlyBoot` 在打开全局中断前把 Scheduler 推进 Online；`BootSetup` 不再驱动
+  Scheduler，只完成 `KernelInitTask` 的 Preset、Setup 与 Enable。在没有 Block/Exit 的
+  当前切片中，`KernelInitTask` 成为 current 后仍保留在 runq 中。
 
 ## 后续 ownership
 

@@ -677,12 +677,6 @@ EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.s
                     signals=(
                         ModelSignal(
                             boot_setup_path,
-                            cpu0_scheduler_path,
-                            ("Transition", "Enable"),
-                            "drive",
-                        ),
-                        ModelSignal(
-                            boot_setup_path,
                             kernel_init_task_path,
                             ("Transition", "Preset"),
                             "drive",
@@ -708,7 +702,25 @@ EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.s
             "EarlyBoot",
             extra_blocks=(
                 ModelHandlerBlock(
-                    "print", expressions=(ModelExpression("string", "here"),)
+                    "drives",
+                    signals=(
+                        ModelSignal(
+                            early_boot_path,
+                            cpu0_scheduler_path,
+                            ("Transition", "Enable"),
+                            "drive",
+                        ),
+                        ModelSignal(
+                            early_boot_path,
+                            ModelExpression(
+                                "member",
+                                "InterruptControlRef",
+                                (ModelExpression("identifier", "CurrentCPU"),),
+                            ),
+                            ("Action", "Unmask"),
+                            "drive",
+                        ),
+                    ),
                 ),
             ),
         ),

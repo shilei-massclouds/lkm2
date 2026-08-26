@@ -30,7 +30,8 @@ ArchHead 完成时必须能分别观测并由 StartKernel 复查：
 - `CurrentTaskRef == BootTask` 且 bootstrap ResetCurrent 已完成；
 - KernelImage、BootStack 与 Vm 均为 Ready；
 - early address space 已激活，CPU 可访问 KernelImage 和 firmware FDT；
-- final trap context ready，SoC early init complete。
+- StartKernel-safe early fail-stop trap 已安装，SoC early init complete。该 trap 保证只用于
+  早期失败停机，不表示 runtime interrupt dispatch 已就绪。
 
 GP 的 MMU-off/虚拟两次加载、trampoline SATP、重定位和两阶段 stack 的指令顺序属于
 coding 契约；model 只保留最终可交接事实。ArchHead 不改变 Rust ABI、checkpoint 调用
