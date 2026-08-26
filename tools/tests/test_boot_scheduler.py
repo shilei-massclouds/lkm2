@@ -75,7 +75,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(blocks[1].switches, "next_task_ref")
         self.assertEqual(blocks[2].signals[0].target.value, "next_task_ref")
 
-    def test_cpu_and_syscall_exit_flow_protocols_are_explicit(self) -> None:
+    def test_cpu_and_event_flow_protocols_are_explicit(self) -> None:
         cpu_module = next(
             item for item in self.model.modules if item.name == ("objects", "cpu")
         )
@@ -97,6 +97,44 @@ class BootSchedulerModelTests(unittest.TestCase):
             _target_name(syscall_action.blocks[0].signals[0].target),
             ("self", "SyscallExitFlowRef"),
         )
+        for action_name, selector in (
+            ("OnInterrupt", "InterruptFlowRef"),
+            ("OnException", "ExceptionFlowRef"),
+        ):
+            action = next(
+                action
+                for state in cpu_type.states
+                for action in state.actions
+                if action.signal == ("Action", action_name)
+            )
+            self.assertEqual(
+                _target_name(action.blocks[0].signals[0].target),
+                ("self", selector),
+            )
+
+        interrupt_control = next(
+            item for item in cpu_module.types if item.name[-1] == "InterruptControl"
+        )
+        self.assertEqual(
+            tuple(action.signal for action in interrupt_control.states[0].actions),
+            (
+                ("Action", "ClearPending"),
+                ("Action", "MaskAll"),
+                ("Action", "Unmask"),
+            ),
+        )
+
+        event_module = next(
+            item
+            for item in self.model.modules
+            if item.name == ("flows", "event_flow")
+        )
+        event_types = {item.name[-1]: item for item in event_module.types}
+        self.assertTrue(event_types["EventFlow"].event_flow)
+        for name in ("InterruptFlow", "ExceptionFlow"):
+            self.assertTrue(event_types[name].event_flow)
+            self.assertTrue(event_types[name].continuation)
+        self.assertEqual(event_module.objects, ())
 
         flow_module = next(
             item
@@ -105,6 +143,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         )
         flow_type = flow_module.types[0]
         self.assertTrue(flow_type.continuation)
+        self.assertTrue(flow_type.event_flow)
         self.assertTrue(flow_type.syscall_exit_flow)
         self.assertEqual(flow_module.objects, ())
 

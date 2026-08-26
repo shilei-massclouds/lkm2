@@ -1,9 +1,10 @@
 /* Inference-owned CPU EventFlow for the non-returning exit syscall. */
 
-type SyscallExitFlow {
+use model::flows::event_flow::EventFlow;
+
+type SyscallExitFlow: EventFlow {
     continuation: true;
     syscall_exit_flow: true;
-    initial_state: State::Online;
 
     state State::Online {
         actions {

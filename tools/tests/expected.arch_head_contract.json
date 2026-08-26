@@ -1,12 +1,17 @@
 {
   "facts": [
-    "phases::start_kernel::arch_head_boot_hart_identity_ready",
+    "phases::start_kernel::arch_head_boot_hart_id_recorded",
+    "phases::start_kernel::arch_head_current_task_reset",
     "phases::start_kernel::arch_head_early_address_space_active",
-    "phases::start_kernel::arch_head_early_cpu_state_ready",
-    "phases::start_kernel::arch_head_kernel_image_execution_environment_ready",
+    "phases::start_kernel::arch_head_entry_pending_interrupts_cleared",
+    "phases::start_kernel::arch_head_firmware_fdt_accessible",
+    "phases::start_kernel::arch_head_fpu_disabled",
+    "phases::start_kernel::arch_head_interrupts_masked",
+    "phases::start_kernel::arch_head_kernel_image_accessible",
     "phases::start_kernel::arch_head_soc_early_init_complete",
     "phases::start_kernel::arch_head_trap_context_ready",
-    "phases::start_kernel::arch_head_virtual_boot_task_stack_context_ready",
+    "phases::start_kernel::arch_head_vector_disabled",
+    "phases::start_kernel::arch_head_virtual_global_pointer_ready",
     "systems::opensbi::opensbi_kernel_entry_handoff_ready"
   ],
   "handlers": [
@@ -29,11 +34,23 @@
           "status": "passed"
         },
         {
+          "expression": "(CurrentCPU == BootCPU)",
+          "status": "passed"
+        },
+        {
           "expression": "BootCPU == State::Online",
           "status": "passed"
         },
         {
           "expression": "BootTask == State::OnCpu",
+          "status": "passed"
+        },
+        {
+          "expression": "KernelImage == State::Loaded",
+          "status": "passed"
+        },
+        {
+          "expression": "BootStack == State::Base",
           "status": "passed"
         },
         {
@@ -47,21 +64,49 @@
       ],
       "ensures": [
         {
+          "expression": "(CurrentTaskRef == BootTask)",
+          "status": "passed"
+        },
+        {
+          "expression": "KernelImage == State::Ready",
+          "status": "passed"
+        },
+        {
+          "expression": "BootStack == State::Ready",
+          "status": "passed"
+        },
+        {
           "expression": "Vm == State::Ready",
           "status": "passed"
         }
       ],
       "establishes": [
         {
-          "expression": "arch_head_early_cpu_state_ready()",
+          "expression": "arch_head_interrupts_masked()",
           "status": "established"
         },
         {
-          "expression": "arch_head_kernel_image_execution_environment_ready()",
+          "expression": "arch_head_entry_pending_interrupts_cleared()",
           "status": "established"
         },
         {
-          "expression": "arch_head_boot_hart_identity_ready()",
+          "expression": "arch_head_virtual_global_pointer_ready()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_fpu_disabled()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_vector_disabled()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_boot_hart_id_recorded()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_current_task_reset()",
           "status": "established"
         },
         {
@@ -69,7 +114,11 @@
           "status": "established"
         },
         {
-          "expression": "arch_head_virtual_boot_task_stack_context_ready()",
+          "expression": "arch_head_kernel_image_accessible()",
+          "status": "established"
+        },
+        {
+          "expression": "arch_head_firmware_fdt_accessible()",
           "status": "established"
         },
         {
@@ -87,19 +136,47 @@
     {
       "depends_on": [
         {
+          "expression": "(CurrentTaskRef == BootTask)",
+          "status": "passed"
+        },
+        {
+          "expression": "KernelImage == State::Ready",
+          "status": "passed"
+        },
+        {
+          "expression": "BootStack == State::Ready",
+          "status": "passed"
+        },
+        {
           "expression": "Vm == State::Ready",
           "status": "passed"
         },
         {
-          "expression": "arch_head_early_cpu_state_ready()",
+          "expression": "arch_head_interrupts_masked()",
           "status": "passed"
         },
         {
-          "expression": "arch_head_kernel_image_execution_environment_ready()",
+          "expression": "arch_head_entry_pending_interrupts_cleared()",
           "status": "passed"
         },
         {
-          "expression": "arch_head_boot_hart_identity_ready()",
+          "expression": "arch_head_virtual_global_pointer_ready()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_fpu_disabled()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_vector_disabled()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_boot_hart_id_recorded()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_current_task_reset()",
           "status": "passed"
         },
         {
@@ -107,7 +184,11 @@
           "status": "passed"
         },
         {
-          "expression": "arch_head_virtual_boot_task_stack_context_ready()",
+          "expression": "arch_head_kernel_image_accessible()",
+          "status": "passed"
+        },
+        {
+          "expression": "arch_head_firmware_fdt_accessible()",
           "status": "passed"
         },
         {

@@ -23,6 +23,7 @@ from .model import (
     DerivationDirective,
     DerivationEvent,
     DerivationEventFlow,
+    DerivationInterruptControl,
     DerivationFact,
     DerivationFailure,
     DerivationFrame,
@@ -103,6 +104,20 @@ class _CpuRuntime:
     scheduler: tuple[str, ...] | None = None
     next_syscall_exit_flow: int = 0
     active_syscall_exit_flow: tuple[str, ...] | None = None
+    next_interrupt_flow: int = 0
+    active_interrupt_flow: tuple[str, ...] | None = None
+    next_exception_flow: int = 0
+    active_exception_flow: tuple[str, ...] | None = None
+    interrupt_mode: str = "Unknown"
+    pending_interrupts: list["_PendingInterrupt"] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingInterrupt:
+    signal: UserRuntimeSignal
+    owner: tuple[str, ...]
+    task_flow: tuple[str, ...]
+    user_runtime: tuple[str, ...]
 
 
 class _SwitchNeeded(Exception):
@@ -211,7 +226,15 @@ class _Context:
         self.task_flow_resolver = None
         self.resume_target_resolver = None
         self.current_cpu_resolver = None
+        self.interrupt_control_resolver = None
+        self.interrupt_flow_resolver = None
+        self.exception_flow_resolver = None
         self.syscall_exit_flow_resolver = None
+        self.event_flow_types = {
+            item.name[-1]: item
+            for item in self.types.values()
+            if item.event_flow and item.continuation
+        }
         self.syscall_exit_flow_type = next(
             (item for item in self.types.values() if item.syscall_exit_flow), None
         )
@@ -331,10 +354,27 @@ class _Context:
             if source is None or self.resume_target_resolver is None:
                 raise _UnsupportedExpression("self.ResumeTargetRef:unavailable")
             return self.resume_target_resolver(source)
+        if flattened == (("self", "InterruptFlowRef"), ("member",)):
+            if source is None or self.interrupt_flow_resolver is None:
+                raise _UnsupportedExpression("self.InterruptFlowRef:unavailable")
+            return self.interrupt_flow_resolver(source)
+        if flattened == (("self", "ExceptionFlowRef"), ("member",)):
+            if source is None or self.exception_flow_resolver is None:
+                raise _UnsupportedExpression("self.ExceptionFlowRef:unavailable")
+            return self.exception_flow_resolver(source)
         if flattened == (("self", "SyscallExitFlowRef"), ("member",)):
             if source is None or self.syscall_exit_flow_resolver is None:
                 raise _UnsupportedExpression("self.SyscallExitFlowRef:unavailable")
             return self.syscall_exit_flow_resolver(source)
+        if flattened == (
+            ("CurrentCPU", "InterruptControlRef"),
+            ("member",),
+        ):
+            if self.interrupt_control_resolver is None:
+                raise _UnsupportedExpression(
+                    "CurrentCPU.InterruptControlRef:unavailable"
+                )
+            return self.interrupt_control_resolver()
         if flattened == (
             ("CurrentTaskRef", "UserAppRuntimeRef"),
             ("member",),
@@ -612,32 +652,28 @@ class _Execution:
                 model_object.name, idle
             )
         self.context.schedulers = self.schedulers
-        self.current_task_ref = (
-            next(iter(self.schedulers.values())).idle_task
-            if len(self.schedulers) == 1
-            else None
-        )
+        self.current_task_ref: tuple[str, ...] | None = None
+        self.current_cpu_ref: tuple[str, ...] | None = None
         self.context.current_task_resolver = self._current_task
         for model_object in model.objects:
             if model_object.base_type.name == ("Collection",):
                 self.collections[model_object.name] = []
-        if self.current_task_ref is not None:
-            for model_object in model.objects:
-                for model_field in model_object.attrs or ():
-                    if model_field.default is None:
-                        continue
-                    value = self.context.resolve_value(
-                        model_field.default,
-                        model_object.name[:-1],
-                        model_object.name,
-                        {},
-                        self.values,
+        for model_object in model.objects:
+            for model_field in model_object.attrs or ():
+                if model_field.default is None:
+                    continue
+                value = self.context.resolve_value(
+                    model_field.default,
+                    model_object.name[:-1],
+                    model_object.name,
+                    {},
+                    self.values,
+                )
+                if value is None:
+                    raise RuntimeError(
+                        f"compiled field default {model_field.name!r} is unresolved"
                     )
-                    if value is None:
-                        raise RuntimeError(
-                            f"compiled field default {model_field.name!r} is unresolved"
-                        )
-                    self.values[(model_object.name, model_field.name)] = value
+                self.values[(model_object.name, model_field.name)] = value
         self.user_runtimes: dict[tuple[str, ...], tuple[str, ...]] = {}
         self.user_runtime_owners: dict[tuple[str, ...], tuple[str, ...]] = {}
         self.parked_user_tasks: dict[
@@ -685,8 +721,19 @@ class _Execution:
             )
             if parent in self.cpus:
                 self.cpus[parent].scheduler = scheduler_name
+                if len(self.schedulers) == 1:
+                    self.current_cpu_ref = parent
+        self.interrupt_controls = {
+            cpu_name + ("InterruptControl",): cpu_name
+            for cpu_name in self.cpus
+        }
         self.context.current_cpu_resolver = self._current_cpu
+        self.context.interrupt_control_resolver = self._interrupt_control
+        self.context.interrupt_flow_resolver = self._interrupt_flow
+        self.context.exception_flow_resolver = self._exception_flow
         self.context.syscall_exit_flow_resolver = self._syscall_exit_flow
+        self.active_event_flow: tuple[str, ...] | None = None
+        self.allow_event_cpu_entry = False
 
     def _current_user_runtime(self) -> tuple[str, ...]:
         if self.current_task_ref is None or self.context.user_runtime_type is None:
@@ -718,6 +765,52 @@ class _Execution:
         self.user_runtimes[task] = name
         self.user_runtime_owners[name] = task
         return name
+
+    def _deliver_returning_event(
+        self,
+        cpu_name: tuple[str, ...],
+        signal: UserRuntimeSignal,
+        owner: tuple[str, ...],
+        task_flow: tuple[str, ...],
+        user_runtime: tuple[str, ...],
+        path: str,
+    ) -> DerivationUnit:
+        flow = self._materialize_event_flow(cpu_name, signal.family)
+        cpu = self.cpus[cpu_name]
+        if signal.family == "interrupt":
+            cpu.active_interrupt_flow = flow
+            cpu_signal = ("Action", "OnInterrupt")
+        else:
+            cpu.active_exception_flow = flow
+            cpu_signal = ("Action", "OnException")
+        self.active_event_flow = flow
+        self.allow_event_cpu_entry = True
+        delivered = self.run_unit(
+            DerivationEvent(
+                user_runtime,
+                cpu_name,
+                cpu_signal,
+                "drive",
+            ),
+            "drive",
+            path,
+        )
+        self.allow_event_cpu_entry = False
+        self.active_event_flow = None
+        cpu.active_interrupt_flow = None
+        cpu.active_exception_flow = None
+        if self.failure is None:
+            self.event_flows.append(
+                DerivationEventFlow(
+                    flow,
+                    cpu_name,
+                    task_flow,
+                    user_runtime,
+                    signal.qualified_name,
+                    "returned",
+                )
+            )
+        return delivered
 
     def _run_user_runtime(
         self, event: DerivationEvent, kind: str, path: str
@@ -906,6 +999,116 @@ class _Execution:
                 "invalid_syscall_cpu_target",
                 "syscall signals must target the Runtime's local CPU",
             )
+        if signal.family == "exception" and target_cpu.cpu != local_cpu.cpu:
+            return runtime_failure(
+                "invalid_exception_cpu_target",
+                "exception signals must target the Runtime's local CPU",
+            )
+        if signal.family == "interrupt":
+            if target_cpu.interrupt_mode == "Unknown":
+                return runtime_failure(
+                    "unknown_interrupt_mode",
+                    "interrupt delivery requires MaskAll or Unmask to initialize the target CPU control gate",
+                )
+            if target_cpu.interrupt_mode == "Masked":
+                target_cpu.pending_interrupts.append(
+                    _PendingInterrupt(
+                        signal,
+                        owner,
+                        self._task_flow(owner),
+                        event.target,
+                    )
+                )
+                next_cursor = self.user_runtime_signal_cursors[event.target]
+                while next_cursor < len(signals):
+                    next_signal = signals[next_cursor]
+                    if next_signal.family != "interrupt":
+                        break
+                    next_target = (
+                        local_cpu
+                        if next_signal.local
+                        else self.cpus_by_logical_id.get(next_signal.cpu_target)
+                    )
+                    if (
+                        next_target is None
+                        or next_target.interrupt_mode != "Masked"
+                    ):
+                        break
+                    next_target.pending_interrupts.append(
+                        _PendingInterrupt(
+                            next_signal,
+                            owner,
+                            self._task_flow(owner),
+                            event.target,
+                        )
+                    )
+                    next_cursor += 1
+                    self.user_runtime_signal_cursors[event.target] = next_cursor
+                return self._unit(
+                    kind=kind,
+                    event=event,
+                    before=before,
+                    handler=event.signal,
+                    candidate=None,
+                    depends_on=[],
+                    drives=[],
+                    ensures=[],
+                    establishes=[],
+                    invariants=[],
+                    state_after=before,
+                    emits=[],
+                    status="passed",
+                    failure=None,
+                )
+            delivered = self._deliver_returning_event(
+                target_cpu.cpu,
+                signal,
+                owner,
+                self._task_flow(owner),
+                event.target,
+                f"{path}.drives[0]",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=event.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[delivered],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=before if self.failure is None else None,
+                emits=[],
+                status="passed" if self.failure is None else "stopped",
+                failure=None,
+            )
+        if signal.family == "exception":
+            delivered = self._deliver_returning_event(
+                target_cpu.cpu,
+                signal,
+                owner,
+                self._task_flow(owner),
+                event.target,
+                f"{path}.drives[0]",
+            )
+            return self._unit(
+                kind=kind,
+                event=event,
+                before=before,
+                handler=event.signal,
+                candidate=None,
+                depends_on=[],
+                drives=[delivered],
+                ensures=[],
+                establishes=[],
+                invariants=[],
+                state_after=before if self.failure is None else None,
+                emits=[],
+                status="passed" if self.failure is None else "stopped",
+                failure=None,
+            )
         if (signal.family, signal.name) != ("syscall", "exit"):
             return runtime_failure(
                 "unsupported_runtime_signal",
@@ -920,6 +1123,8 @@ class _Execution:
                 "the model has no syscall_exit_flow protocol type",
             )
         target_cpu.active_syscall_exit_flow = flow
+        self.active_event_flow = flow
+        self.allow_event_cpu_entry = True
         status = self._integer_expression(signal.arguments[0])
         delivered = self.run_unit(
             DerivationEvent(
@@ -932,6 +1137,8 @@ class _Execution:
             "drive",
             f"{path}.drives[0]",
         )
+        self.allow_event_cpu_entry = False
+        self.active_event_flow = None
         target_cpu.active_syscall_exit_flow = None
         unexpected_return: DerivationFailure | None = None
         if self.failure is None:
@@ -1009,18 +1216,45 @@ class _Execution:
             for runtime in self.schedulers.values()
         )
 
+    def interrupt_control_snapshots(
+        self,
+    ) -> tuple[DerivationInterruptControl, ...]:
+        return tuple(
+            DerivationInterruptControl(
+                runtime.cpu,
+                runtime.interrupt_mode,
+                tuple(
+                    item.signal.qualified_name
+                    for item in runtime.pending_interrupts
+                ),
+            )
+            for runtime in self.cpus.values()
+        )
+
     def _current_task(self) -> tuple[str, ...]:
         if self.current_task_ref is None:
             raise _UnsupportedExpression("CurrentTaskRef:unavailable")
         return self.current_task_ref
 
     def _current_cpu(self) -> tuple[str, ...]:
-        task = self._current_task()
-        flow = self._task_flow(task)
-        cpu = self.values.get((flow, "cpu_ref"))
-        if cpu is None or cpu not in self.cpus:
+        if self.current_cpu_ref is None or self.current_cpu_ref not in self.cpus:
             raise _UnsupportedExpression("CurrentCPU:invalid_current_cpu_ref")
-        return cpu
+        return self.current_cpu_ref
+
+    def _interrupt_control(self) -> tuple[str, ...]:
+        return self._current_cpu() + ("InterruptControl",)
+
+    def _interrupt_flow(self, cpu: tuple[str, ...]) -> tuple[str, ...]:
+        runtime = self.cpus.get(cpu)
+        if runtime is None or runtime.active_interrupt_flow is None:
+            raise _UnsupportedExpression("self.InterruptFlowRef:unavailable")
+        return runtime.active_interrupt_flow
+
+    def _exception_flow(self, cpu: tuple[str, ...]) -> tuple[str, ...]:
+        runtime = self.cpus.get(cpu)
+        if runtime is None or runtime.active_exception_flow is None:
+            raise _UnsupportedExpression("self.ExceptionFlowRef:unavailable")
+        return runtime.active_exception_flow
 
     def _syscall_exit_flow(self, cpu: tuple[str, ...]) -> tuple[str, ...]:
         runtime = self.cpus.get(cpu)
@@ -1057,6 +1291,42 @@ class _Execution:
             continuation=True,
         )
         self.context.objects[name] = model_object
+        self.context.object_names = _shortest_names(tuple(self.context.objects))
+        self.states[name] = flow_type.initial_state
+        return name
+
+    def _materialize_event_flow(
+        self, cpu: tuple[str, ...], family: str
+    ) -> tuple[str, ...]:
+        runtime = self.cpus[cpu]
+        if family == "interrupt":
+            flow_type = self.context.event_flow_types.get("InterruptFlow")
+            number = runtime.next_interrupt_flow
+            runtime.next_interrupt_flow += 1
+            prefix = "InterruptFlow"
+        elif family == "exception":
+            flow_type = self.context.event_flow_types.get("ExceptionFlow")
+            number = runtime.next_exception_flow
+            runtime.next_exception_flow += 1
+            prefix = "ExceptionFlow"
+        else:
+            raise _UnsupportedExpression(f"event_flow:{family}:unsupported")
+        if flow_type is None:
+            raise _UnsupportedExpression(f"{family}_flow:type_unavailable")
+        name = cpu + (f"{prefix}{number}",)
+        model_object = ModelObject(
+            name=name,
+            base_type=ModelTypeExpression(flow_type.name),
+            initial_state=flow_type.initial_state,
+            parent=self.context.object_expression(cpu),
+            source=None,
+            attrs=flow_type.fields,
+            states=flow_type.states,
+            references=(),
+            continuation=True,
+        )
+        self.context.objects[name] = model_object
+        self.context.object_names = _shortest_names(tuple(self.context.objects))
         self.states[name] = flow_type.initial_state
         return name
 
@@ -1115,6 +1385,7 @@ class _Execution:
                 for name, runtime in sorted(self.schedulers.items())
             ),
             self.current_task_ref,
+            self.current_cpu_ref,
             tuple(sorted(self.parked_user_tasks.items())),
             tuple(sorted(self.parked_user_continuations.items())),
             tuple(sorted(self.user_runtime_signal_cursors.items())),
@@ -1123,6 +1394,12 @@ class _Execution:
                     name,
                     runtime.next_syscall_exit_flow,
                     runtime.active_syscall_exit_flow,
+                    runtime.next_interrupt_flow,
+                    runtime.active_interrupt_flow,
+                    runtime.next_exception_flow,
+                    runtime.active_exception_flow,
+                    runtime.interrupt_mode,
+                    tuple(runtime.pending_interrupts),
                 )
                 for name, runtime in sorted(self.cpus.items())
             ),
@@ -1654,7 +1931,8 @@ class _Execution:
                     continue
 
                 child_path = f"{path}.drives[{len(frame.drives)}]"
-                if self.context.objects[child_event.target].continuation:
+                child_object = self.context.objects.get(child_event.target)
+                if child_object is not None and child_object.continuation:
                     if (
                         child_event.target == runtime.root
                         and child_event.signal == ("Action", "Enter")
@@ -2024,6 +2302,7 @@ class _Execution:
                 status=failure.code,
                 failure=failure,
             )
+
         item = self.context.resolve_value(
             event.arguments[0], event.target[:-1], event.target, {}, self.values
         )
@@ -2212,6 +2491,69 @@ class _Execution:
             failure=None,
         )
 
+    def _run_interrupt_control(
+        self, event: DerivationEvent, kind: str, path: str
+    ) -> DerivationUnit:
+        cpu_name = self.interrupt_controls[event.target]
+        runtime = self.cpus[cpu_name]
+        before = ("State", "Online")
+        supported = {
+            ("Action", "MaskAll"),
+            ("Action", "ClearPending"),
+            ("Action", "Unmask"),
+        }
+        if event.signal not in supported or event.arguments:
+            failure = self._set_failure(
+                "unhandled_signal",
+                f"{path}.handler",
+                "InterruptControl only accepts parameterless MaskAll, ClearPending, and Unmask actions",
+            )
+            return self._unit(
+                kind=kind, event=event, before=before, handler=None,
+                candidate=None, depends_on=[], drives=[], ensures=[],
+                establishes=[], invariants=[], state_after=None, emits=[],
+                status=failure.code, failure=failure,
+            )
+
+        drives: list[DerivationUnit] = []
+        if event.signal == ("Action", "MaskAll"):
+            runtime.interrupt_mode = "Masked"
+        elif event.signal == ("Action", "ClearPending"):
+            runtime.pending_interrupts.clear()
+        else:
+            runtime.interrupt_mode = "Unmasked"
+            pending = tuple(runtime.pending_interrupts)
+            runtime.pending_interrupts.clear()
+            for index, item in enumerate(pending):
+                drives.append(
+                    self._deliver_returning_event(
+                        cpu_name,
+                        item.signal,
+                        item.owner,
+                        item.task_flow,
+                        item.user_runtime,
+                        f"{path}.drives[{index}]",
+                    )
+                )
+                if self.failure is not None:
+                    break
+        return self._unit(
+            kind=kind,
+            event=event,
+            before=before,
+            handler=event.signal,
+            candidate=None,
+            depends_on=[],
+            drives=drives,
+            ensures=[],
+            establishes=[],
+            invariants=[],
+            state_after=before if self.failure is None else None,
+            emits=[],
+            status="passed" if self.failure is None else "stopped",
+            failure=None,
+        )
+
     def run_unit(
         self,
         event: DerivationEvent,
@@ -2220,6 +2562,42 @@ class _Execution:
         *,
         defer_resumes: bool = False,
     ) -> DerivationUnit:
+        if (
+            event.target in self.cpus
+            and event.signal
+            in {
+                ("Action", "OnInterrupt"),
+                ("Action", "OnException"),
+                ("Action", "OnSyscallExit"),
+            }
+            and self.active_event_flow is not None
+        ):
+            if self.allow_event_cpu_entry:
+                self.allow_event_cpu_entry = False
+            else:
+                failure = self._set_failure(
+                    "nested_event_flow",
+                    f"{path}.handler",
+                    "an EventFlow cannot enter another EventFlow",
+                )
+                return self._unit(
+                    kind=kind,
+                    event=event,
+                    before=self.states.get(event.target),
+                    handler=None,
+                    candidate=None,
+                    depends_on=[],
+                    drives=[],
+                    ensures=[],
+                    establishes=[],
+                    invariants=[],
+                    state_after=None,
+                    emits=[],
+                    status=failure.code,
+                    failure=failure,
+                )
+        if event.target in self.interrupt_controls:
+            return self._run_interrupt_control(event, kind, path)
         if (
             event.target in self.user_runtime_owners
             and event.signal == ("Action", "Enter")
@@ -2290,6 +2668,48 @@ class _Execution:
                 status=failure.code,
                 failure=failure,
             )
+
+        reset_current = event.signal == ("Action", "ResetCurrent")
+        if reset_current:
+            invalid_reset: tuple[str, str] | None = None
+            if self.current_task_ref is not None:
+                invalid_reset = (
+                    "invalid_current_task_ref",
+                    "ResetCurrent may initialize CurrentTaskRef only once",
+                )
+            else:
+                try:
+                    task_flow = self._task_flow(event.target)
+                    bound_cpu = self.values.get((task_flow, "cpu_ref"))
+                    if bound_cpu != self._current_cpu():
+                        invalid_reset = (
+                            "invalid_current_cpu_ref",
+                            "ResetCurrent requires BootTask TaskFlow to be bound to CurrentCPU",
+                        )
+                except _UnsupportedExpression:
+                    invalid_reset = (
+                        "invalid_current_cpu_ref",
+                        "ResetCurrent requires BootTask TaskFlow to be bound to CurrentCPU",
+                    )
+            if invalid_reset is not None:
+                code, message = invalid_reset
+                failure = self._set_failure(code, f"{path}.handler", message)
+                return self._unit(
+                    kind=kind,
+                    event=event,
+                    before=before,
+                    handler=handler.signal,
+                    candidate=None,
+                    depends_on=[],
+                    drives=[],
+                    ensures=[],
+                    establishes=[],
+                    invariants=[],
+                    state_after=None,
+                    emits=[],
+                    status=failure.code,
+                    failure=failure,
+                )
 
         if (
             self.cpus
@@ -2725,6 +3145,8 @@ class _Execution:
                 )
                 if self.failure is not None:
                     break
+        if self.failure is None and reset_current:
+            self.current_task_ref = event.target
         if self.failure is None and switched_task is not None:
             if self.cpus:
                 switch_cpu = self._current_cpu()
@@ -2832,6 +3254,12 @@ def derive(
                 "model",
                 "a CPU derivation line requires exactly one sched_core instance",
             )
+        elif execution.current_cpu_ref is None:
+            execution._set_failure(
+                "invalid_derivation_line",
+                "model",
+                "a CPU derivation line requires its sched_core instance to be owned by one cpu_core",
+            )
         elif unsupported:
             execution._set_failure(
                 "unsupported_feature",
@@ -2884,27 +3312,29 @@ def derive(
             outcome = execution.failure.code
         if execution.failure is not None and execution.failure.code == "panic":
             execution._clear_continuations_for_panic()
-        current_cpu_ref: tuple[str, ...] | None = None
-        if outcome != "invalid_derivation_line":
-            try:
-                current_cpu_ref = execution._current_cpu()
-            except _UnsupportedExpression:
-                current_cpu_ref = None
+        current_cpu_ref = (
+            None
+            if outcome == "invalid_derivation_line"
+            else execution.current_cpu_ref
+        )
         paths.append(
             DerivationPath(
-                outcome,
-                tuple(units),
-                _final_state(execution.states),
-                tuple(execution.facts),
-                execution.failure,
-                execution.continuation_snapshots(),
-                execution.final_values(),
-                ()
+                status=outcome,
+                units=tuple(units),
+                final_state=_final_state(execution.states),
+                facts=tuple(execution.facts),
+                failure=execution.failure,
+                continuations=execution.continuation_snapshots(),
+                final_values=execution.final_values(),
+                schedulers=()
                 if outcome == "invalid_derivation_line"
                 else execution.scheduler_snapshots(),
-                execution.current_task_ref,
-                current_cpu_ref,
-                tuple(execution.event_flows),
+                current_task_ref=execution.current_task_ref,
+                current_cpu_ref=current_cpu_ref,
+                event_flows=tuple(execution.event_flows),
+                interrupt_controls=()
+                if outcome == "invalid_derivation_line"
+                else execution.interrupt_control_snapshots(),
             )
         )
 

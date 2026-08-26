@@ -20,8 +20,9 @@ Online --Schedule--> validate line current → Suspend(current) → switches nex
 - `Scheduler` 声明 `sched_core: true`；model 只定义 Scheduler 生命周期、
   Schedule 的信号因果和 `switches` 发生的位置。推导器为每个 Scheduler
   实例附加 idle Task 和私有 runq 上下文，但 Scheduler 不拥有线路 current。
-- `Cpu0Scheduler.idle_task` 固定引用 `BootTask`。推导器用它预置 CPU0 线路的
-  `CurrentTaskRef`，但初始化之后 idle 与 current 完全独立。
+- `Cpu0Scheduler.idle_task` 固定引用 `BootTask`，只作为 runq 为空时的 fallback。
+  它不预置 `CurrentTaskRef`；线路 current 必须由 BootTask 的 bootstrap
+  `ResetCurrent` 首次发布，之后 idle 与 current 仍完全独立。
 
 ## 隐藏 runq 的集合语义
 
@@ -59,7 +60,8 @@ Online --Schedule--> validate line current → Suspend(current) → switches nex
 
 ## current 与切换事务
 
-- `CurrentTaskRef` 是 CPU 推导线路上下文的动态只读 Task selector，不属于
+- `CurrentCPU` 在线路构造时从 Scheduler owner 独立绑定，即使 current Task 尚不可用
+  也可读取。`CurrentTaskRef` 是同一线路上下文的动态只读 Task selector，不属于
   Scheduler。Schedule 使用它之前必须确认其指向的 Task 为 `State::OnCpu`；否则返回
   `invalid_current_task_ref`，不得执行 Suspend、switches 或 TaskFlow。
 - 每个 Task 必须有且仅有一个以它为 `parent` 的 TaskFlow。具名 TaskFlow 不得被直接

@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v11."""
+"""Strict JSON loading and canonical JSON output for Model IR v12."""
 
 from __future__ import annotations
 
@@ -146,6 +146,7 @@ def _type(value: object, path: str) -> ModelType:
                 "sched_core",
                 "user_runtime",
                 "cpu_core",
+                "event_flow",
                 "syscall_exit_flow",
                 "initial_state",
                 "states",
@@ -171,6 +172,7 @@ def _type(value: object, path: str) -> ModelType:
         user_runtime=data["user_runtime"],
         cpu_core=data["cpu_core"],
         syscall_exit_flow=data["syscall_exit_flow"],
+        event_flow=data["event_flow"],
     )
 
 
@@ -355,7 +357,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v11 JSON document."""
+    """Load and strictly validate one Model IR schema-v12 JSON document."""
 
     try:
         raw = json.load(
@@ -506,6 +508,7 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
                 "sched_core": item.sched_core,
                 "user_runtime": item.user_runtime,
                 "cpu_core": item.cpu_core,
+                "event_flow": item.event_flow,
                 "syscall_exit_flow": item.syscall_exit_flow,
                 "initial_state": None
                 if item.initial_state is None

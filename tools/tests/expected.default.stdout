@@ -52,6 +52,24 @@ OpenSBI -> Kernel: emits Transition::Enable
     commit state: unchanged
   BootInitFlow -> ArchHead: resumes Action::Enter
     current state: State::Online
+    ArchHead -> InterruptControl: drives Action::MaskAll
+      current state: State::Online
+      commit state: unchanged
+    ArchHead -> InterruptControl: drives Action::ClearPending
+      current state: State::Online
+      commit state: unchanged
+    ArchHead -> KernelImage: drives Action::ClearBss
+      current state: State::Loaded
+      KernelImage -> KernelImage: drives Transition::ClearBss
+        current state: State::Loaded
+        commit state: State::Ready
+      commit state: unchanged
+    ArchHead -> BootTask: drives Action::ResetCurrent
+      current state: State::OnCpu
+      commit state: unchanged
+    ArchHead -> BootStack: drives Transition::Preset
+      current state: State::Base
+      commit state: State::Prepared
     ArchHead -> Vm: drives Transition::Preset
       current state: State::Base
       Vm -> KernelMap: drives Transition::Preset
@@ -75,6 +93,9 @@ OpenSBI -> Kernel: emits Transition::Enable
       Vm -> EarlyPageTable: drives Transition::Setup
         current state: State::Prepared
         commit state: State::Ready
+      commit state: State::Ready
+    ArchHead -> BootStack: drives Transition::Setup
+      current state: State::Prepared
       commit state: State::Ready
     commit state: unchanged
   ArchHead -> StartKernel: resumes Action::Enter

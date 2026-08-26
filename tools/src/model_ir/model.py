@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v11."""
+"""Frozen data model and semantic validation for Model IR schema v12."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -260,6 +260,7 @@ class ModelType:
     user_runtime: bool = False
     cpu_core: bool = False
     syscall_exit_flow: bool = False
+    event_flow: bool = False
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.name, "type.name")
@@ -279,6 +280,8 @@ class ModelType:
             raise ModelIRValidationError("type.cpu_core must be a boolean")
         if type(self.syscall_exit_flow) is not bool:
             raise ModelIRValidationError("type.syscall_exit_flow must be a boolean")
+        if type(self.event_flow) is not bool:
+            raise ModelIRValidationError("type.event_flow must be a boolean")
         if self.fields is not None:
             _validate_tuple(self.fields, ModelField, "type.fields")
             names = [field.name for field in self.fields]
@@ -786,6 +789,31 @@ class ModelIR:
                 )
             return False
 
+        def object_is_event_flow(model_object: ModelObject) -> bool:
+            current = resolve_type_name(
+                model_object.base_type, model_object.name[:-1]
+            )
+            seen: set[tuple[str, ...]] = set()
+            while current is not None and current not in seen:
+                seen.add(current)
+                if type_items[current].event_flow:
+                    return True
+                base = type_items[current].base_type
+                current = (
+                    None
+                    if base is None
+                    else resolve_type_name(base, current[:-1])
+                )
+            return False
+
+        bootstrap_idle_tasks = {
+            idle
+            for scheduler in object_items.values()
+            if object_is_sched_core(scheduler) and scheduler.idle_task is not None
+            for idle in (static_target(scheduler.idle_task),)
+            if idle is not None
+        }
+
         def type_is_task(model_type: ModelType) -> bool:
             if len(task_types) != 1:
                 return False
@@ -813,6 +841,16 @@ class ModelIR:
         syscall_exit_flow_types = tuple(
             item for item in type_items.values() if item.syscall_exit_flow
         )
+        interrupt_flow_types = tuple(
+            item
+            for item in type_items.values()
+            if item.event_flow and item.continuation and item.name[-1] == "InterruptFlow"
+        )
+        exception_flow_types = tuple(
+            item
+            for item in type_items.values()
+            if item.event_flow and item.continuation and item.name[-1] == "ExceptionFlow"
+        )
         if len(cpu_core_types) > 1:
             raise ModelIRValidationError(
                 "the model may declare at most one cpu_core type"
@@ -820,6 +858,14 @@ class ModelIR:
         if len(syscall_exit_flow_types) > 1:
             raise ModelIRValidationError(
                 "the model may declare at most one syscall_exit_flow type"
+            )
+        if len(interrupt_flow_types) > 1:
+            raise ModelIRValidationError(
+                "the model may declare at most one interrupt_flow type"
+            )
+        if len(exception_flow_types) > 1:
+            raise ModelIRValidationError(
+                "the model may declare at most one exception_flow type"
             )
 
         def protocol_action(
@@ -848,6 +894,37 @@ class ModelIR:
             )
 
         for model_type in cpu_core_types:
+            for signal_name, selector, flow_types in (
+                ("OnInterrupt", "InterruptFlowRef", interrupt_flow_types),
+                ("OnException", "ExceptionFlowRef", exception_flow_types),
+            ):
+                if not flow_types:
+                    continue
+                event_action = protocol_action(
+                    model_type, ("Action", signal_name)
+                )
+                event_signals = () if event_action is None else tuple(
+                    signal
+                    for block in event_action.blocks
+                    if block.kind == "resumes"
+                    for signal in block.signals
+                )
+                if (
+                    event_action is None
+                    or event_action.abstract
+                    or event_action.parameters
+                    or len(event_signals) != 1
+                    or _expression_access(event_signals[0].target)
+                    != (("self", selector), ("member",))
+                    or event_signals[0].signal != ("Action", "Enter")
+                    or event_signals[0].mode != "resume"
+                    or event_signals[0].arguments
+                ):
+                    raise ModelIRValidationError(
+                        f"cpu_core requires Online Action::{signal_name} forwarding to self.{selector}.Action::Enter"
+                    )
+            if not syscall_exit_flow_types:
+                continue
             action = protocol_action(model_type, ("Action", "OnSyscallExit"))
             signals = () if action is None else tuple(
                 signal
@@ -871,6 +948,10 @@ class ModelIR:
                 )
 
         for model_type in syscall_exit_flow_types:
+            if not model_type.event_flow:
+                raise ModelIRValidationError(
+                    "syscall_exit_flow types must inherit the event_flow protocol"
+                )
             action = protocol_action(model_type, ("Action", "Enter"))
             signals = () if action is None else tuple(
                 signal
@@ -891,6 +972,13 @@ class ModelIR:
                 raise ModelIRValidationError(
                     "syscall_exit_flow requires Online Action::Enter(status: i32) "
                     "driving CurrentTaskRef.Action::Exit(status)"
+                )
+
+        for model_type in (*interrupt_flow_types, *exception_flow_types):
+            action = protocol_action(model_type, ("Action", "Enter"))
+            if action is None or action.abstract or action.parameters:
+                raise ModelIRValidationError(
+                    "returning event_flow types require a concrete parameterless Online Action::Enter"
                 )
 
         task_flow_types = tuple(
@@ -981,12 +1069,26 @@ class ModelIR:
             )
         for module in ordered:
             for model_type in module.types:
-                if model_type.name[-1] in {"TaskFlowRef", "ResumeTargetRef"}:
+                if any(
+                    action.signal == ("Action", "ResetCurrent")
+                    for state in model_type.states
+                    for action in state.actions
+                ):
+                    raise ModelIRValidationError(
+                        "Action::ResetCurrent may only be declared by BootTask in State::OnCpu"
+                    )
+                if model_type.name[-1] in {
+                    "TaskFlowRef", "ResumeTargetRef", "InterruptFlowRef",
+                    "ExceptionFlowRef", "SyscallExitFlowRef", "InterruptControlRef"
+                }:
                     raise ModelIRValidationError(
                         "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared"
                     )
                 if any(
-                    field.name in {"TaskFlowRef", "ResumeTargetRef"}
+                    field.name in {
+                        "TaskFlowRef", "ResumeTargetRef", "InterruptFlowRef",
+                        "ExceptionFlowRef", "SyscallExitFlowRef", "InterruptControlRef"
+                    }
                     for field in model_type.fields or ()
                 ):
                     raise ModelIRValidationError(
@@ -1023,9 +1125,21 @@ class ModelIR:
                     raise ModelIRValidationError(
                         "cpu_core cannot also be a continuation, sched_core, or user_runtime"
                     )
+                if model_type.event_flow and (
+                    model_type.cpu_core
+                    or model_type.sched_core
+                    or model_type.user_runtime
+                ):
+                    raise ModelIRValidationError(
+                        "event_flow cannot also be cpu_core, sched_core, or user_runtime"
+                    )
                 if model_type.syscall_exit_flow and not model_type.continuation:
                     raise ModelIRValidationError(
                         "syscall_exit_flow types must also be continuations"
+                    )
+                if model_type.syscall_exit_flow and not model_type.event_flow:
+                    raise ModelIRValidationError(
+                        "syscall_exit_flow types must inherit the event_flow protocol"
                     )
                 if model_type.sched_core and any(
                     action.signal in {
@@ -1061,9 +1175,15 @@ class ModelIR:
                                     (("self", "TaskFlowRef"), ("member",)),
                                     (("self", "ResumeTargetRef"), ("member",)),
                                 }
-                                syscall_flow_selector = target_access == (
-                                    ("self", "SyscallExitFlowRef"),
-                                    ("member",),
+                                event_flow_selector = (
+                                    target_access is not None
+                                    and target_access[0]
+                                    in {
+                                        ("self", "InterruptFlowRef"),
+                                        ("self", "ExceptionFlowRef"),
+                                        ("self", "SyscallExitFlowRef"),
+                                    }
+                                    and target_access[1] == ("member",)
                                 )
                                 mentions_task_selector = (
                                     target_access is not None
@@ -1107,14 +1227,29 @@ class ModelIR:
                                     raise ModelIRValidationError(
                                         "TaskFlow Action::Enter must use a Task-owned TaskFlowRef or ResumeTargetRef selector"
                                     )
-                                if syscall_flow_selector:
+                                if event_flow_selector:
+                                    expected_handler = {
+                                        "InterruptFlowRef": ("Action", "OnInterrupt"),
+                                        "ExceptionFlowRef": ("Action", "OnException"),
+                                        "SyscallExitFlowRef": ("Action", "OnSyscallExit"),
+                                    }[target_access[0][-1]]
+                                    invalid_arguments = (
+                                        bool(signal.arguments)
+                                        if target_access[0][-1]
+                                        != "SyscallExitFlowRef"
+                                        else len(signal.arguments)
+                                        != len(handler.parameters)
+                                    )
                                     if (
                                         not model_type.cpu_core
+                                        or handler.signal != expected_handler
+                                        or block.kind != "resumes"
                                         or signal.mode != "resume"
                                         or signal.signal != ("Action", "Enter")
+                                        or invalid_arguments
                                     ):
                                         raise ModelIRValidationError(
-                                            "SyscallExitFlowRef is only available as resumes Action::Enter in CPU handlers"
+                                            "Event FlowRef selectors are only available in their matching CPU receive handler"
                                         )
                                     continue
                                 if not task_owned_selector:
@@ -1199,7 +1334,10 @@ class ModelIR:
                     "CurrentCPU",
                     "TaskFlowRef",
                     "ResumeTargetRef",
+                    "InterruptFlowRef",
+                    "ExceptionFlowRef",
                     "SyscallExitFlowRef",
+                    "InterruptControlRef",
                 }:
                     raise ModelIRValidationError(
                         f"{model_object.name[-1]} is a reserved runtime selector and must not be "
@@ -1210,9 +1348,9 @@ class ModelIR:
                         "user_runtime instances are inference-owned Task children and "
                         "must not be declared as model objects"
                     )
-                if object_is_syscall_exit_flow(model_object):
+                if object_is_event_flow(model_object):
                     raise ModelIRValidationError(
-                        "syscall_exit_flow instances are inference-owned CPU children and "
+                        "event_flow instances are inference-owned CPU children and "
                         "must not be declared as model objects"
                     )
                 if any(
@@ -1222,7 +1360,10 @@ class ModelIR:
                             "CurrentCPU",
                             "TaskFlowRef",
                             "ResumeTargetRef",
+                            "InterruptFlowRef",
+                            "ExceptionFlowRef",
                             "SyscallExitFlowRef",
+                            "InterruptControlRef",
                         }
                         for segment in (
                             _expression_access(assignment.target) or ((), ())
@@ -1240,7 +1381,10 @@ class ModelIR:
                         "CurrentCPU",
                         "TaskFlowRef",
                         "ResumeTargetRef",
+                        "InterruptFlowRef",
+                        "ExceptionFlowRef",
                         "SyscallExitFlowRef",
+                        "InterruptControlRef",
                     }
                     for field in model_object.attrs or ()
                 ) or any(
@@ -1249,7 +1393,10 @@ class ModelIR:
                         "CurrentCPU",
                         "TaskFlowRef",
                         "ResumeTargetRef",
+                        "InterruptFlowRef",
+                        "ExceptionFlowRef",
                         "SyscallExitFlowRef",
+                        "InterruptControlRef",
                     }
                     for reference in model_object.references
                 ):
@@ -1426,8 +1573,18 @@ class ModelIR:
                                     (("self", "TaskFlowRef"), ("member",)),
                                     (("self", "ResumeTargetRef"), ("member",)),
                                 }
-                                syscall_flow_selector = target_access == (
-                                    ("self", "SyscallExitFlowRef"),
+                                event_flow_selector = (
+                                    target_access is not None
+                                    and target_access[0]
+                                    in {
+                                        ("self", "InterruptFlowRef"),
+                                        ("self", "ExceptionFlowRef"),
+                                        ("self", "SyscallExitFlowRef"),
+                                    }
+                                    and target_access[1] == ("member",)
+                                )
+                                interrupt_control_selector = target_access == (
+                                    ("CurrentCPU", "InterruptControlRef"),
                                     ("member",),
                                 )
                                 if task_owned_selector:
@@ -1447,17 +1604,32 @@ class ModelIR:
                                             "Task-owned resume selector Action::Enter must use resumes"
                                         )
                                     continue
-                                if syscall_flow_selector:
+                                if event_flow_selector:
+                                    expected_handler = {
+                                        "InterruptFlowRef": ("Action", "OnInterrupt"),
+                                        "ExceptionFlowRef": ("Action", "OnException"),
+                                        "SyscallExitFlowRef": ("Action", "OnSyscallExit"),
+                                    }[target_access[0][-1]]
+                                    invalid_arguments = (
+                                        bool(signal.arguments)
+                                        if target_access[0][-1]
+                                        != "SyscallExitFlowRef"
+                                        else len(signal.arguments)
+                                        != len(handler.parameters)
+                                    )
                                     if (
                                         not cpu_core
+                                        or handler.signal != expected_handler
+                                        or block.kind != "resumes"
                                         or signal.mode != "resume"
                                         or signal.signal != ("Action", "Enter")
+                                        or invalid_arguments
                                     ):
                                         raise ModelIRValidationError(
-                                            "SyscallExitFlowRef is only available as resumes Action::Enter in CPU handlers"
+                                            "Event FlowRef selectors are only available in their matching CPU receive handler"
                                         )
                                     continue
-                                dynamic = runtime_selector or dynamic_name in {
+                                dynamic = runtime_selector or interrupt_control_selector or dynamic_name in {
                                     "CurrentTaskRef",
                                     "CurrentCPU",
                                     *switched_bindings,
@@ -1493,7 +1665,22 @@ class ModelIR:
                                         dynamic_name == "CurrentCPU"
                                         and not signal.arguments
                                     )
-                                    if not (valid_runtime or valid_task or valid_cpu):
+                                    valid_interrupt_control = (
+                                        interrupt_control_selector
+                                        and not signal.arguments
+                                        and signal.signal
+                                        in {
+                                            ("Action", "MaskAll"),
+                                            ("Action", "ClearPending"),
+                                            ("Action", "Unmask"),
+                                        }
+                                    )
+                                    if not (
+                                        valid_runtime
+                                        or valid_task
+                                        or valid_cpu
+                                        or valid_interrupt_control
+                                    ):
                                         raise ModelIRValidationError(
                                             "dynamic signal target is unavailable or has arguments"
                                         )
@@ -1583,6 +1770,19 @@ class ModelIR:
                                     raise ModelIRValidationError(
                                         "TaskFlowRef and ResumeTargetRef are read-only and cannot be updated"
                                     )
+        for model_object in object_items.values():
+            for state in model_object.states:
+                for action in state.actions:
+                    if action.signal != ("Action", "ResetCurrent"):
+                        continue
+                    if (
+                        model_object.name not in bootstrap_idle_tasks
+                        or state.name != ("State", "OnCpu")
+                        or action.parameters
+                    ):
+                        raise ModelIRValidationError(
+                            "Action::ResetCurrent may only be declared by BootTask in State::OnCpu"
+                        )
         tasks = tuple(
             item for item in object_items.values() if object_has_type(item, "Task")
         )

@@ -10,17 +10,19 @@
 ## CPU 推导线路
 
 公开推导执行必须先建立一条 CPU 推导线路。当前单 CPU 阶段中，一条有效线路恰有一个
-逻辑 CPU、一个 CPU-owned `sched_core` Scheduler 和一个推导器 owned
-`CurrentTaskRef`。线路从
-Scheduler 的 `idle_task` 预置 current；缺少 Scheduler 或存在多个 Scheduler 都是
-线路构造失败，而不是合法运行状态。
+逻辑 CPU、一个 CPU-owned `sched_core` Scheduler，以及推导器 owned 的
+`CurrentCPU` 与 `CurrentTaskRef` selector。线路创建时立即从 Scheduler owner 绑定
+`CurrentCPU`；`CurrentTaskRef` 初始 unavailable，直到 BootTask 在 OnCpu 状态成功执行
+bootstrap `ResetCurrent`。缺少 Scheduler、存在多个 Scheduler或缺少 CPU owner 都是
+线路构造失败；尚未初始化 current Task 本身是合法线路状态。
 
 `CurrentTaskRef` 是 model 可读、推导器维护的动态 Task selector。任意 handler 均可
 把它作为 signal target 或参数读取，但 model 不得声明、赋值、更新或以其他方式改变
 它。每条候选推导路径独立维护 current；推导器只在完整调度切换成功后原子提交。
 
 model 负责声明对象生命周期、信号因果和何时发生调度切换；推导器负责
-CPU 线路 current、Scheduler 的隐藏 runnable 集合、全候选分支展开、切换提交以及
+CPU 线路身份与 current、per-CPU interrupt control、Scheduler 的隐藏 runnable 集合、
+全候选分支展开、切换提交以及
 Task-owned 恢复 selector 的动态解析。model 不声明调度优先级或候选队列；
 成功 Resume 后是否进入恢复点由 model handler 显式声明。两层职责不得互相替代。
 

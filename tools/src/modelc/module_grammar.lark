@@ -26,6 +26,7 @@ type_base: ":" type_expression
           | sched_core_property
           | user_runtime_property
           | cpu_core_property
+          | event_flow_property
           | syscall_exit_flow_property
           | initial_state_property
           | state_declaration
@@ -49,6 +50,7 @@ continuation_property: "continuation" ":" IDENTIFIER ";"
 sched_core_property: "sched_core" ":" IDENTIFIER ";"
 user_runtime_property: "user_runtime" ":" IDENTIFIER ";"
 cpu_core_property: "cpu_core" ":" IDENTIFIER ";"
+event_flow_property: "event_flow" ":" IDENTIFIER ";"
 syscall_exit_flow_property: "syscall_exit_flow" ":" IDENTIFIER ";"
 parent_property: "parent" ":" expression ";"
 source_property: "source" ":" expression ";"

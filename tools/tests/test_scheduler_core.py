@@ -21,6 +21,12 @@ from modelc import CompilationError, compile_spec
 
 
 BASE = """
+type CPU {
+    cpu_core: true;
+    initial_state: State::Online;
+    state State::Online {}
+}
+object CPU0: CPU { logical_id: 0; }
 type Task {
     initial_state: State::Ready;
     state State::Ready {
@@ -39,6 +45,7 @@ type Task {
 }
 type TaskFlow {
     continuation: true;
+    mutable cpu_ref: CPU = CPU0;
     initial_state: State::Online;
     state State::Online { actions { on Action::Enter; } }
 }
@@ -48,6 +55,9 @@ object Boot: Task {
         override on Transition::Resume -> State::OnCpu {
             resumes self.ResumeTargetRef.Action::Enter;
         }
+    } }
+    state State::OnCpu { actions {
+        on Action::ResetCurrent { drives {} }
     } }
 }
 object A: Task {}
@@ -70,7 +80,7 @@ type Scheduler {
         drives next.Transition::Resume;
     } } }
 }
-object Scheduler0: Scheduler { idle_task: Boot; }
+object Scheduler0: Scheduler { parent: CPU0; idle_task: Boot; }
 """
 
 
@@ -83,12 +93,18 @@ def _all_units(units):
         yield from _all_units(unit.resumes)
 
 
-def _compile(body: str):
+def _compile(body: str, *, bootstrap_current: bool = True):
     directory = tempfile.TemporaryDirectory()
     root = Path(directory.name)
     (root / "main.spec").write_text(
         "spec root;\norigin root.Human;\n", encoding="utf-8"
     )
+    if bootstrap_current and "object Boot: Task" in body:
+        body = body.replace(
+            "external Human {",
+            "external Human { drives Boot.Action::ResetCurrent;",
+            1,
+        )
     (root / "root.spec").write_text(body, encoding="utf-8")
     return directory, compile_spec(root / "main.spec")
 
@@ -106,9 +122,9 @@ class SchedulerCoreEngineTests(unittest.TestCase):
 
         directory2, two_schedulers = _compile(
             BASE.replace(
-                "object Scheduler0: Scheduler { idle_task: Boot; }",
-                """object Scheduler0: Scheduler { idle_task: Boot; }
-                object Scheduler1: Scheduler { idle_task: Boot; }""",
+                "object Scheduler0: Scheduler { parent: CPU0; idle_task: Boot; }",
+                """object Scheduler0: Scheduler { parent: CPU0; idle_task: Boot; }
+                object Scheduler1: Scheduler { parent: CPU0; idle_task: Boot; }""",
             )
             + "external Human {}"
         )
@@ -123,13 +139,73 @@ class SchedulerCoreEngineTests(unittest.TestCase):
     def test_schedule_requires_line_current_to_be_on_cpu(self) -> None:
         directory, model = _compile(
             BASE.replace("initial_state: State::OnCpu;", "initial_state: State::Online;", 1)
-            + "external Human { drives Scheduler0.Action::Schedule; }"
+            + "external Human { drives Scheduler0.Action::Schedule; }",
+            bootstrap_current=False,
         )
         self.addCleanup(directory.cleanup)
         path = derive(model, default_derivation_sequence(model)).paths[0]
         self.assertEqual(path.status, "invalid_current_task_ref")
-        self.assertEqual(path.current_task_ref[-1], "Boot")
+        self.assertIsNone(path.current_task_ref)
         self.assertEqual(path.units[0].drives, ())
+
+    def test_current_cpu_exists_before_current_task_is_published(self) -> None:
+        body = BASE.replace(
+            "state State::Online {}",
+            """state State::Online { actions {
+                on Action::Observe { drives {} }
+            } }""",
+            1,
+        ) + """object Controller: T { state State::Base { actions {
+            on Action::Probe { drives CurrentCPU.Action::Observe; }
+        } } }
+        external Human { drives Controller.Action::Probe; }"""
+        directory, model = _compile(body, bootstrap_current=False)
+        self.addCleanup(directory.cleanup)
+        path = derive(model, default_derivation_sequence(model)).paths[0]
+
+        self.assertEqual(path.status, "passed")
+        self.assertEqual(path.current_cpu_ref[-1], "CPU0")
+        self.assertIsNone(path.current_task_ref)
+        self.assertEqual(path.units[0].drives[0].event.target[-1], "CPU0")
+
+    def test_current_task_is_unavailable_until_successful_reset_current(self) -> None:
+        directory, unavailable = _compile(
+            BASE
+            + """object Controller: T { state State::Base { actions {
+                on Action::Probe { drives CurrentTaskRef.Transition::Suspend; }
+            } } }
+            external Human { drives Controller.Action::Probe; }""",
+            bootstrap_current=False,
+        )
+        self.addCleanup(directory.cleanup)
+        before = derive(
+            unavailable, default_derivation_sequence(unavailable)
+        ).paths[0]
+        self.assertEqual(before.status, "invalid_current_task_ref")
+        self.assertIsNone(before.current_task_ref)
+        self.assertEqual(before.current_cpu_ref[-1], "CPU0")
+
+        directory2, repeated = _compile(
+            BASE + "external Human { drives Boot.Action::ResetCurrent; }",
+            bootstrap_current=True,
+        )
+        self.addCleanup(directory2.cleanup)
+        after = derive(repeated, default_derivation_sequence(repeated)).paths[0]
+        self.assertEqual(after.status, "invalid_current_task_ref")
+        self.assertEqual(after.current_task_ref[-1], "Boot")
+
+        failed_body = BASE.replace(
+            "on Action::ResetCurrent { drives {} }",
+            "on Action::ResetCurrent { ensures { false; } }",
+        )
+        directory3, failed = _compile(
+            failed_body + "external Human { drives Boot.Action::ResetCurrent; }",
+            bootstrap_current=False,
+        )
+        self.addCleanup(directory3.cleanup)
+        failed_path = derive(failed, default_derivation_sequence(failed)).paths[0]
+        self.assertEqual(failed_path.status, "ensures_failed")
+        self.assertIsNone(failed_path.current_task_ref)
 
     def test_current_task_ref_is_readable_from_any_handler_and_as_argument(self) -> None:
         body = BASE.replace(
@@ -154,7 +230,7 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         path = derive(model, default_derivation_sequence(model)).paths[0]
         self.assertEqual(path.status, "passed")
-        self.assertEqual(path.units[0].drives[0].event.target[-1], "Boot")
+        self.assertEqual(path.units[-1].drives[0].event.target[-1], "Boot")
         queue = next(value for value in path.final_values if value.collection)
         self.assertEqual(queue.values[0][-1], "Boot")
 
@@ -210,15 +286,13 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         self.assertEqual(result.status, "passed")
         self.assertEqual(path.current_task_ref[-1], "Boot")
         self.assertEqual(path.schedulers[0].runq, ())
-        self.assertTrue(path.units[0].switches[0].idle_fallback)
+        self.assertTrue(path.units[-1].switches[0].idle_fallback)
 
     def test_idle_task_cannot_be_enqueued(self) -> None:
         body = BASE.replace(
-            "object Boot: Task {",
-            """object Boot: Task {
-            state State::OnCpu { actions { on Action::Queue {
-                drives Scheduler0.Action::Enqueue;
-            } } }""",
+            "on Action::ResetCurrent { drives {} }",
+            """on Action::ResetCurrent { drives {} }
+            on Action::Queue { drives Scheduler0.Action::Enqueue; }""",
         )
         directory, model = _compile(
             body + "external Human { drives Boot.Action::Queue; }"
@@ -388,7 +462,8 @@ class SchedulerCoreEngineTests(unittest.TestCase):
         directory, model = _compile(
             body + """external Human { drives {
                 Boot.Transition::Resume;
-            } }"""
+            } }""",
+            bootstrap_current=False,
         )
         self.addCleanup(directory.cleanup)
         result = derive(model, default_derivation_sequence(model))
@@ -555,7 +630,10 @@ class SchedulerCoreCompilerTests(unittest.TestCase):
 
     def test_sched_core_requires_idle_task(self) -> None:
         self._rejects(
-            BASE.replace("object Scheduler0: Scheduler { idle_task: Boot; }", "object Scheduler0: Scheduler {}")
+            BASE.replace(
+                "object Scheduler0: Scheduler { parent: CPU0; idle_task: Boot; }",
+                "object Scheduler0: Scheduler { parent: CPU0; }",
+            )
             + "external Human {}",
             "requires idle_task",
         )
@@ -620,6 +698,26 @@ class SchedulerCoreCompilerTests(unittest.TestCase):
             )
             + "external Human {}",
             "read-only",
+        )
+
+    def test_reset_current_is_bootstrap_task_only(self) -> None:
+        self._rejects(
+            BASE.replace(
+                "object A: Task {}",
+                """object A: Task { state State::OnCpu { actions {
+                    on Action::ResetCurrent { drives {} }
+                } } }""",
+            )
+            + "external Human {}",
+            "ResetCurrent may only be declared by BootTask",
+        )
+        self._rejects(
+            BASE.replace(
+                "on Action::ResetCurrent { drives {} }",
+                """on Action::ResetCurrent(value: i32) { drives {} }""",
+            )
+            + "external Human {}",
+            "ResetCurrent may only be declared by BootTask",
         )
 
     def test_core_actions_cannot_be_declared_by_the_model(self) -> None:

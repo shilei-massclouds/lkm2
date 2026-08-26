@@ -2,11 +2,11 @@
   "paths": [
     {
       "continuations": [],
-      "current_cpu_ref": null,
-      "current_task_ref": [
+      "current_cpu_ref": [
         "root",
-        "__HarnessBootTask"
+        "__HarnessCPU0"
       ],
+      "current_task_ref": null,
       "event_flows": [],
       "facts": [],
       "failure": {
@@ -43,13 +43,23 @@
           ],
           "state": [
             "State",
-            "Online"
+            "OnCpu"
           ]
         },
         {
           "object": [
             "root",
             "__HarnessBootTaskFlow"
+          ],
+          "state": [
+            "State",
+            "Online"
+          ]
+        },
+        {
+          "object": [
+            "root",
+            "__HarnessCPU0"
           ],
           "state": [
             "State",
@@ -67,7 +77,32 @@
           ]
         }
       ],
-      "final_values": [],
+      "final_values": [
+        {
+          "collection": false,
+          "field": "cpu_ref",
+          "object": [
+            "root",
+            "__HarnessBootTaskFlow"
+          ],
+          "values": [
+            [
+              "root",
+              "__HarnessCPU0"
+            ]
+          ]
+        }
+      ],
+      "interrupt_controls": [
+        {
+          "cpu": [
+            "root",
+            "__HarnessCPU0"
+          ],
+          "mode": "Unknown",
+          "pending": []
+        }
+      ],
       "schedulers": [
         {
           "idle_task": [
@@ -140,6 +175,6 @@
       ]
     }
   ],
-  "schema_version": 10,
+  "schema_version": 11,
   "status": "failed"
 }

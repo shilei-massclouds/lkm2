@@ -98,6 +98,60 @@ class UserRuntimeSignalEngineTests(unittest.TestCase):
             user_runtime_signals=load_user_runtime_signals(StringIO(text)),
         )
 
+    def _derive_with_interrupt_control(
+        self, text: str, *, clear: bool = False, nested: bool = False
+    ):
+        with tempfile.TemporaryDirectory() as directory:
+            model_root = Path(directory) / "model"
+            shutil.copytree(REPOSITORY / "model", model_root)
+            human_spec = model_root / "systems" / "human.spec"
+            source = human_spec.read_text(encoding="utf-8")
+            source = source.replace(
+                "\n}\n",
+                "\n    drives RuntimeSignalControl.Action::Apply;\n}\n",
+                1,
+            )
+            clear_signal = (
+                "CurrentCPU.InterruptControlRef.Action::ClearPending;"
+                if clear
+                else ""
+            )
+            source += f"""
+
+type RuntimeSignalControlType {{
+    initial_state: State::Online;
+    state State::Online {{ actions {{
+        on Action::Apply {{ drives {{
+            {clear_signal}
+            CurrentCPU.InterruptControlRef.Action::Unmask;
+        }} }}
+    }} }}
+}}
+object RuntimeSignalControl: RuntimeSignalControlType {{}}
+"""
+            human_spec.write_text(source, encoding="utf-8")
+            if nested:
+                flow_spec = model_root / "flows" / "event_flow.spec"
+                flow_source = flow_spec.read_text(encoding="utf-8")
+                flow_source = flow_source.replace(
+                    "predicate event_flow_handled<F>",
+                    "use model::objects::cpu::BootCPU;\n\npredicate event_flow_handled<F>",
+                    1,
+                ).replace(
+                    "on Action::Enter {\n                establishes",
+                    """on Action::Enter {
+                drives BootCPU.Action::OnException;
+                establishes""",
+                    1,
+                )
+                flow_spec.write_text(flow_source, encoding="utf-8")
+            model = compile_spec(model_root / "main.spec")
+        return derive(
+            model,
+            default_derivation_sequence(model),
+            user_runtime_signals=load_user_runtime_signals(StringIO(text)),
+        )
+
     def test_empty_program_parks_without_cpu_or_scheduler_entry(self) -> None:
         path = self._derive("").paths[0]
         self.assertEqual(path.status, "yielded")
@@ -137,11 +191,9 @@ class UserRuntimeSignalEngineTests(unittest.TestCase):
         self.assertEqual(states[KERNEL_INIT_TASK], ("State", "OnCpu"))
         self.assertEqual(path.schedulers[0].runq, (KERNEL_INIT_TASK,))
 
-    def test_unknown_and_unsupported_signals_fail_at_consumption(self) -> None:
+    def test_unknown_cpu_and_unsupported_syscall_fail_at_consumption(self) -> None:
         cases = (
             ("syscall.exit 9 0\n", "unknown_cpu_target"),
-            ("interrupt.timer <local>\n", "unsupported_runtime_signal"),
-            ("exception.page_fault <local>\n", "unsupported_runtime_signal"),
             ("syscall.write <local> 1\n", "unsupported_runtime_signal"),
         )
         for source, code in cases:
@@ -149,6 +201,55 @@ class UserRuntimeSignalEngineTests(unittest.TestCase):
                 path = self._derive(source).paths[0]
                 self.assertEqual(path.status, code)
                 self.assertEqual(path.event_flows, ())
+
+    def test_masked_interrupt_is_pending_and_exception_returns_locally(self) -> None:
+        interrupt = self._derive("interrupt.timer <local>\n").paths[0]
+        self.assertEqual(interrupt.status, "yielded")
+        self.assertEqual(interrupt.event_flows, ())
+        self.assertEqual(interrupt.interrupt_controls[0].mode, "Masked")
+        self.assertEqual(
+            interrupt.interrupt_controls[0].pending,
+            ("interrupt.timer",),
+        )
+
+        exception = self._derive("exception.page_fault <local>\n").paths[0]
+        self.assertEqual(exception.status, "yielded")
+        self.assertEqual(exception.current_task_ref, KERNEL_INIT_TASK)
+        self.assertEqual(exception.event_flows[0].cpu, BOOT_CPU)
+        self.assertEqual(exception.event_flows[0].signal, "exception.page_fault")
+        self.assertEqual(exception.event_flows[0].outcome, "returned")
+        self.assertTrue(
+            any(fact.predicate[-1] == "event_flow_handled" for fact in exception.facts)
+        )
+
+    def test_clear_pending_discards_and_unmask_delivers_fifo(self) -> None:
+        program = "interrupt.timer <local>\ninterrupt.external <local>\n"
+        cleared = self._derive_with_interrupt_control(
+            program, clear=True
+        ).paths[0]
+        self.assertEqual(cleared.status, "yielded")
+        self.assertEqual(cleared.event_flows, ())
+        self.assertEqual(cleared.interrupt_controls[0].mode, "Unmasked")
+        self.assertEqual(cleared.interrupt_controls[0].pending, ())
+
+        delivered = self._derive_with_interrupt_control(program).paths[0]
+        self.assertEqual(delivered.status, "yielded")
+        self.assertEqual(
+            tuple(flow.signal for flow in delivered.event_flows),
+            ("interrupt.timer", "interrupt.external"),
+        )
+        self.assertTrue(
+            all(flow.outcome == "returned" for flow in delivered.event_flows)
+        )
+        self.assertEqual(delivered.interrupt_controls[0].mode, "Unmasked")
+        self.assertEqual(delivered.interrupt_controls[0].pending, ())
+
+    def test_nested_event_flow_is_rejected(self) -> None:
+        path = self._derive_with_interrupt_control(
+            "interrupt.timer <local>\n", nested=True
+        ).paths[0]
+        self.assertEqual(path.status, "nested_event_flow")
+        self.assertEqual(path.event_flows, ())
 
     def test_existing_nonlocal_cpu_is_rejected_for_syscall(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -169,6 +270,42 @@ class UserRuntimeSignalEngineTests(unittest.TestCase):
             ),
         )
         self.assertEqual(result.paths[0].status, "invalid_syscall_cpu_target")
+        exception = derive(
+            model,
+            default_derivation_sequence(model),
+            user_runtime_signals=load_user_runtime_signals(
+                StringIO("exception.page_fault 1\n")
+            ),
+        )
+        self.assertEqual(
+            exception.paths[0].status,
+            "invalid_exception_cpu_target",
+        )
+
+    def test_interrupt_fails_while_control_mode_is_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_root = Path(directory) / "model"
+            shutil.copytree(REPOSITORY / "model", model_root)
+            arch_head = model_root / "phases" / "arch_head.spec"
+            arch_head.write_text(
+                arch_head.read_text(encoding="utf-8").replace(
+                    "CurrentCPU.InterruptControlRef.Action::MaskAll;\n",
+                    "",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            model = compile_spec(model_root / "main.spec")
+        result = derive(
+            model,
+            default_derivation_sequence(model),
+            user_runtime_signals=load_user_runtime_signals(
+                StringIO("interrupt.timer <local>\n")
+            ),
+        )
+        path = result.paths[0]
+        self.assertEqual(path.status, "unknown_interrupt_mode")
+        self.assertEqual(path.interrupt_controls[0].mode, "Unknown")
 
     def test_repeated_derivations_restart_cursor_and_flow_number(self) -> None:
         program = load_user_runtime_signals(StringIO("syscall.exit <local> -7\n"))

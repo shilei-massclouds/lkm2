@@ -81,7 +81,7 @@ class ModelDirectiveTests(unittest.TestCase):
             tuple(action.blocks[0].kind for action in actions), ("print", "panic")
         )
 
-    def test_directives_lower_to_strict_model_ir_v11_blocks(self) -> None:
+    def test_directives_lower_to_strict_model_ir_v12_blocks(self) -> None:
         directory, _, model = _compile_text(
             """
             object Computer: T {
@@ -94,7 +94,7 @@ class ModelDirectiveTests(unittest.TestCase):
         )
         self.addCleanup(directory.cleanup)
         blocks = model.objects[0].states[0].actions[0].blocks
-        self.assertEqual(model.schema_version, 11)
+        self.assertEqual(model.schema_version, 12)
         self.assertEqual(tuple(block.kind for block in blocks), ("print", "panic"))
         self.assertEqual(
             tuple(block.expressions[0].value for block in blocks), ("你好", "停止")
@@ -103,7 +103,7 @@ class ModelDirectiveTests(unittest.TestCase):
         output = StringIO()
         dump_model_ir(model, output)
         document = json.loads(output.getvalue())
-        self.assertEqual(document["schema_version"], 11)
+        self.assertEqual(document["schema_version"], 12)
         self.assertEqual(load_model_ir(StringIO(output.getvalue())), model)
 
         action = document["modules"][0]["objects"][0]["states"][0]["actions"][0]
@@ -219,7 +219,7 @@ class DerivationDirectiveTests(unittest.TestCase):
         serialized = StringIO()
         dump_derivation_result(result, serialized)
         document = json.loads(serialized.getvalue())
-        self.assertEqual(document["schema_version"], 10)
+        self.assertEqual(document["schema_version"], 11)
         self.assertEqual(load_derivation_result(StringIO(serialized.getvalue())), result)
 
         missing_directives = json.loads(serialized.getvalue())

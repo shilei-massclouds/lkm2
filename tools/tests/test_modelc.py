@@ -517,7 +517,7 @@ boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
 EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.spec"))(
-    schema_version=11,
+    schema_version=12,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -1925,6 +1925,73 @@ object Probe: T {}
             with self.assertRaisesRegex(CompilationError, "resumes"):
                 compile_spec(path)
 
+    def test_event_flow_and_interrupt_control_selectors_are_strict(self) -> None:
+        mismatched_flow = """
+            type EventFlow {
+                event_flow: true;
+                initial_state: State::Online;
+                state State::Online {}
+            }
+            type InterruptFlow: EventFlow {
+                continuation: true;
+                state State::Online { actions {
+                    on Action::Enter { drives {} }
+                } }
+            }
+            type ExceptionFlow: EventFlow {
+                continuation: true;
+                state State::Online { actions {
+                    on Action::Enter { drives {} }
+                } }
+            }
+            type CPU {
+                cpu_core: true;
+                initial_state: State::Online;
+                state State::Online { actions {
+                    on Action::OnInterrupt {
+                        resumes self.ExceptionFlowRef.Action::Enter;
+                    }
+                    on Action::OnException {
+                        resumes self.ExceptionFlowRef.Action::Enter;
+                    }
+                } }
+            }
+            object CPU0: CPU { logical_id: 0; }
+            external Human {}
+        """
+        invalid_control = """
+            type CPU {
+                cpu_core: true;
+                initial_state: State::Online;
+                state State::Online {}
+            }
+            object CPU0: CPU { logical_id: 0; }
+            type InterruptControl {
+                initial_state: State::Online;
+                state State::Online { actions {
+                    on Action::MaskAll;
+                    on Action::ClearPending;
+                    on Action::Unmask;
+                } }
+            }
+            type Driver {
+                initial_state: State::Online;
+                state State::Online { actions { on Action::Go {
+                    drives CurrentCPU.InterruptControlRef.Action::Bogus;
+                } } }
+            }
+            object Driver0: Driver {}
+            external Human { drives Driver0.Action::Go; }
+        """
+        for source, message in (
+            (mismatched_flow, "cpu_core requires Online Action::OnInterrupt"),
+            (invalid_control, "InterruptControlRef only accepts"),
+        ):
+            with self.subTest(message=message):
+                with model_tree({"root.spec": source}) as (_, path):
+                    with self.assertRaisesRegex(CompilationError, message):
+                        compile_spec(path)
+
 
 class ModelIRJSONTests(unittest.TestCase):
     def test_canonical_output_is_repeatable_and_round_trips(self) -> None:
@@ -1943,6 +2010,45 @@ class ModelIRJSONTests(unittest.TestCase):
             ],
             ["State", "Base"],
         )
+
+    def test_event_flow_and_interrupt_control_selectors_are_strict_in_model_ir(self) -> None:
+        mismatched_flow = json.loads(EXPECTED_JSON)
+        cpu = _json_module(mismatched_flow, "objects", "cpu")["objects"][0]
+        on_interrupt = next(
+            action
+            for state in cpu["states"]
+            for action in state["actions"]
+            if action["signal"] == ["Action", "OnInterrupt"]
+        )
+        on_interrupt["blocks"][0]["signals"][0]["target"]["value"] = (
+            "ExceptionFlowRef"
+        )
+
+        invalid_control = json.loads(EXPECTED_JSON)
+        arch_head = _json_module(
+            invalid_control, "phases", "arch_head"
+        )["objects"][0]
+        enter = next(
+            action
+            for state in arch_head["states"]
+            for action in state["actions"]
+            if action["signal"] == ["Action", "Enter"]
+        )
+        control_signal = next(
+            signal
+            for block in enter["blocks"]
+            for signal in block["signals"]
+            if signal["target"].get("value") == "InterruptControlRef"
+        )
+        control_signal["signal"] = ["Action", "Bogus"]
+
+        for document, message in (
+            (mismatched_flow, "matching CPU receive handler"),
+            (invalid_control, "dynamic signal target"),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(ModelIRValidationError, message):
+                    load_model_ir(StringIO(json.dumps(document)))
 
     def test_initial_state_json_field_remains_strict(self) -> None:
         missing = json.loads(EXPECTED_JSON)
@@ -2135,10 +2241,13 @@ class ModelIRJSONTests(unittest.TestCase):
             tuple(module.name for module in model.modules),
             (
                 ("flows",),
+                ("flows", "event_flow"),
                 ("flows", "syscall_exit_flow"),
                 ("flows", "task_flow"),
                 ("objects",),
+                ("objects", "boot_stack"),
                 ("objects", "cpu"),
+                ("objects", "kernel_image"),
                 ("objects", "scheduler"),
                 ("objects", "task"),
                 ("objects", "user_app_runtime"),
@@ -2199,9 +2308,9 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
             legacy_selects_field,
-            EXPECTED_JSON.replace('"schema_version": 11', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 12', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":11,"schema_version":11}',
+            '{"schema_version":12,"schema_version":12}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -2210,7 +2319,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=11,
+            schema_version=12,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -2218,14 +2327,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=11,
+                schema_version=12,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=11,
+                schema_version=12,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

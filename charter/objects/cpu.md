@@ -1,44 +1,51 @@
 # CPU 与 EventFlow 章程
 
-## CPU 身份与 current
+## CPU 身份、线路与 current
 
 `CPU` 以 `cpu_core: true` 标记；每个实例必须声明唯一、非负的 `logical_id`。
 当前只物化 `BootCPU`（逻辑 CPU0），`Cpu0Scheduler` 以 `parent: BootCPU` 明确归属。
-`CurrentCPU` 不是对象实例，而是推导线路只读 selector：推导器从当前 Task 的唯一
-TaskFlow 读取 mutable `cpu_ref`。未绑定或指向非 CPU 时必须返回
-`invalid_current_cpu_ref`。
+推导线路创建时即把 `CurrentCPU` 绑定为该 Scheduler 的 CPU owner。它是独立、只读的
+线路 selector，不依赖 `CurrentTaskRef`，也不通过 TaskFlow 反向推断。因此启动早期
+current Task 尚不可用时，CPU 身份仍必须可解析。
 
-`BootInitFlow.Action::Enter` 在进入 ArchHead 前把 `cpu_ref` 绑定为 `BootCPU`；每次
-Scheduler 成功提交 next Task 后，推导器在执行其延迟 ResumeTarget 前把 next TaskFlow
-绑定到同一 CPU。该绑定不改变 Task 状态或 runq membership。
+`CurrentTaskRef` 在线路创建时为 unavailable。只有 `BootTask` 在 `State::OnCpu`
+声明的 `Action::ResetCurrent` 可以首次发布它；成功前必须确认 BootTask 的唯一
+TaskFlow 已绑定 `CurrentCPU`。重复 Reset、错误对象、错误状态、CPU 未绑定或 handler
+失败都不得改变 current。正常调度切换仍在完整事务成功后提交 next current，并先把
+next TaskFlow 绑定到该线路的 `CurrentCPU`。
 
-## 运行时信号接收
+## per-CPU interrupt control
 
-运行时输入的 `interrupt.*`、`exception.*` 与 `syscall.*` 在 CPU 接收边界并列。
-当前唯一执行协议是：
+`CurrentCPU.InterruptControlRef` 是推导器提供的动态 selector，每个 CPU 独立拥有
+`Unknown`、`Masked`、`Unmasked` 模式和 FIFO pending 集合：
 
-```text
-UserAppRuntime
-  -> target CPU.Action::OnSyscallExit(status)
-  -> suspend source TaskFlow 用户态坐标
-  -> materialize CPU.SyscallExitFlow<N>
-  -> SyscallExitFlow.Action::Enter(status)
-  -> CurrentTaskRef.Action::Exit(status)
-```
+- `MaskAll` 只切换到 `Masked`，不清除已经 pending 的输入；
+- `ClearPending` 只丢弃当前集合，不改变模式；
+- `Unmask` 切换到 `Unmasked`，并按输入到达顺序逐一投递 pending interrupt。
 
-`syscall.*` 只能发往 Runtime 的本地 CPU。`<local>` 在消费时从 TaskFlow `cpu_ref`
-解析；显式逻辑编号必须存在且等于本地 CPU。
+`Unknown` 模式收到 interrupt 必须失败。`Masked` 模式收到的输入已被消费到目标 CPU
+的 pending 集合，但不物化 EventFlow。该 FIFO 是确定性推导协议，不声称复刻硬件中断
+优先级。Exception 和 syscall 不受 interrupt mode 控制。
 
-## SyscallExitFlow
+## 统一 EventFlow
 
-`SyscallExitFlow` 以 `continuation: true` 和 `syscall_exit_flow: true` 标记，不声明
-具名实例。推导器为每次 exit 创建以目标 CPU 为 parent 的 fresh 实例，编号从 0
-确定性递增，例如 `BootCPU.SyscallExitFlow0`。CPU handler 通过只读动态 selector
-`self.SyscallExitFlowRef` 进入当前实例。
+`EventFlow` 是统一基类；`InterruptFlow`、`ExceptionFlow` 与 `SyscallExitFlow` 都以
+`event_flow: true` 标记且不声明具名实例。CPU 分别由 `Action::OnInterrupt`、
+`Action::OnException`、`Action::OnSyscallExit` 接收，并通过动态只读 selector
+`self.InterruptFlowRef`、`self.ExceptionFlowRef`、`self.SyscallExitFlowRef` 进入 fresh
+CPU-owned 实例。实例编号按 CPU、类型确定性递增；事件名称保留在推导结果元数据，首版
+不向 model 暴露 cause 分派。
 
-EventFlow 执行不调用 Scheduler，不驱动 Task Suspend，也不改变 runq。框架记录
-被暂停的 TaskFlow、UserAppRuntime 坐标、flow enter 以及 returned/terminal 结果；
-可返回 EventFlow 完成后保留原坐标供恢复。`syscall.exit` 是 terminal，不走恢复路径。
+Interrupt 可以显式投递到任一已存在 CPU，受目标 CPU control gate 约束，处理后返回
+原 TaskFlow/UserAppRuntime 坐标。Exception 绕过 mask，但只能投递到 Runtime 所属的
+本地 CPU，抽象处理后同样返回。SyscallExit 也必须本地投递，并保持 terminal 语义，
+最终驱动 `CurrentTaskRef.Action::Exit(status)`，不走恢复路径。
+
+EventFlow 不调用 Scheduler、不驱动 Task Suspend，也不改变 runq 或 TaskFlow CPU
+绑定。进入时建立实例级 `event_flow_handled(self)` fact；可返回 flow 仅在 handler
+成功后恢复原坐标。任何 EventFlow 活跃期间再次进入 EventFlow 必须以
+`nested_event_flow` 失败。
 
 临时模型映射：[CPU](../../model/objects/cpu.spec)、
+[EventFlow](../../model/flows/event_flow.spec)、
 [SyscallExitFlow](../../model/flows/syscall_exit_flow.spec)。

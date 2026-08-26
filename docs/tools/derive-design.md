@@ -14,7 +14,7 @@
 
 2. 推导工具内置的推导机制
 
-   推导工具产生若干独立的推导线路，每条线路对应于实际环境中的一个**CPU**；每条线路恰有一个 CPU-owned **Scheduler** 和一个线路级只读 `CurrentTaskRef`。推导器为 Scheduler 维护 model 不可见的 idle 上下文和 runq 集合，并负责 current、全候选分支隔离和切换提交。runq 无顺序，`switches` 对其全部成员各展开一条推导线路；model 不能观测 runq，也不提供可以排除 current 或缩小候选集的策略数据结构。当前实现仅构造 CPU0 单线路，要求模型恰有一个 sched_core 实例；未来 SMP 必须按 CPU 建立独立线路和独立 Scheduler。推导的起点是外部信号，包括开机启动信号和环境信号，前者是推导的原始推动力，后者将以中断信号的形式触发推导的临时分支路径。
+   推导工具产生若干独立的推导线路，每条线路对应于实际环境中的一个**CPU**；每条线路恰有一个 CPU-owned **Scheduler**、一个从线路创建起可用的只读 `CurrentCPU` 和一个初始 unavailable 的只读 `CurrentTaskRef`。BootTask 的 bootstrap `ResetCurrent` 成功后才首次发布 current Task。推导器还维护 per-CPU interrupt mode/pending FIFO，以及 model 不可见的 idle 上下文和 runq 集合，并负责 current、全候选分支隔离和切换提交。runq 无顺序，`switches` 对其全部成员各展开一条推导线路；model 不能观测 runq，也不提供可以排除 current 或缩小候选集的策略数据结构。当前实现仅构造 CPU0 单线路，要求模型恰有一个 sched_core 实例；未来 SMP 必须按 CPU 建立独立线路、interrupt control 和 Scheduler。推导的起点是外部信号，包括开机启动信号和环境信号；运行时 interrupt、exception 与 syscall 通过统一 EventFlow 框架进入 CPU。
 
 
 

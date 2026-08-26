@@ -1,4 +1,4 @@
-"""Data model for derivation root selection and schema-v10 path results."""
+"""Data model for derivation root selection and schema-v11 path results."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from model_ir import ModelExpression, canonicalize_signal_name
 
 
 SEQUENCE_SCHEMA_VERSION = 3
-RESULT_SCHEMA_VERSION = 10
+RESULT_SCHEMA_VERSION = 11
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MODES = frozenset({"drive", "emit", "yield", "resume"})
 _UNIT_KINDS = frozenset({"root", "drive", "emit", "yield", "resume"})
@@ -30,7 +30,10 @@ _FAILURE_CODES = frozenset(
         "invalid_current_task_ref",
         "invalid_current_cpu_ref",
         "invalid_syscall_cpu_target",
+        "invalid_exception_cpu_target",
         "unknown_cpu_target",
+        "unknown_interrupt_mode",
+        "nested_event_flow",
         "unsupported_runtime_signal",
         "unimplemented_task_exit",
         "invalid_derivation_line",
@@ -539,6 +542,26 @@ class DerivationEventFlow:
 
 
 @dataclass(frozen=True, slots=True)
+class DerivationInterruptControl:
+    cpu: tuple[str, ...]
+    mode: str
+    pending: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _name(self.cpu, "interrupt_control.cpu")
+        if self.mode not in {"Unknown", "Masked", "Unmasked"}:
+            raise DerivationValidationError(
+                "interrupt_control.mode must be 'Unknown', 'Masked', or 'Unmasked'"
+            )
+        if type(self.pending) is not tuple or any(
+            type(item) is not str or not item for item in self.pending
+        ):
+            raise DerivationValidationError(
+                "interrupt_control.pending must be a tuple of non-empty signal names"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class DerivationPath:
     status: str
     units: tuple[DerivationUnit, ...]
@@ -551,6 +574,7 @@ class DerivationPath:
     current_task_ref: tuple[str, ...] | None = None
     current_cpu_ref: tuple[str, ...] | None = None
     event_flows: tuple[DerivationEventFlow, ...] = ()
+    interrupt_controls: tuple[DerivationInterruptControl, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in {"passed", "yielded", "cycle_closed", *_FAILURE_CODES}:
@@ -562,6 +586,21 @@ class DerivationPath:
         _tuple_of(self.final_values, DerivationValue, "final_values")
         _tuple_of(self.schedulers, DerivationScheduler, "schedulers")
         _tuple_of(self.event_flows, DerivationEventFlow, "event_flows")
+        _tuple_of(
+            self.interrupt_controls,
+            DerivationInterruptControl,
+            "interrupt_controls",
+        )
+        interrupt_cpus = [item.cpu for item in self.interrupt_controls]
+        if len(set(interrupt_cpus)) != len(interrupt_cpus):
+            raise DerivationValidationError(
+                "interrupt_controls contains a duplicate CPU"
+            )
+        object.__setattr__(
+            self,
+            "interrupt_controls",
+            tuple(sorted(self.interrupt_controls, key=lambda item: item.cpu)),
+        )
         if self.current_task_ref is not None:
             _name(self.current_task_ref, "current_task_ref")
         if self.current_cpu_ref is not None:
@@ -645,9 +684,17 @@ class DerivationPath:
                 raise DerivationValidationError(
                     "invalid_derivation_line must not expose scheduler snapshots"
                 )
-        elif self.current_task_ref is None:
+            if self.interrupt_controls:
+                raise DerivationValidationError(
+                    "invalid_derivation_line must not expose interrupt control snapshots"
+                )
+        elif self.current_cpu_ref is None:
             raise DerivationValidationError(
-                "a valid derivation line requires a concrete current_task_ref"
+                "a valid derivation line requires a concrete current_cpu_ref"
+            )
+        elif self.current_cpu_ref not in interrupt_cpus:
+            raise DerivationValidationError(
+                "a valid derivation line requires an interrupt control snapshot for CurrentCPU"
             )
         if self.status != "invalid_derivation_line" and len(self.schedulers) != 1:
             raise DerivationValidationError(
@@ -712,9 +759,17 @@ class DerivationResult:
         return self.paths[0].schedulers
 
     @property
+    def current_task_ref(self) -> tuple[str, ...] | None:
+        return self.paths[0].current_task_ref
+
+    @property
     def current_cpu_ref(self) -> tuple[str, ...] | None:
         return self.paths[0].current_cpu_ref
 
     @property
     def event_flows(self) -> tuple[DerivationEventFlow, ...]:
         return self.paths[0].event_flows
+
+    @property
+    def interrupt_controls(self) -> tuple[DerivationInterruptControl, ...]:
+        return self.paths[0].interrupt_controls

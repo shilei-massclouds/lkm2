@@ -60,6 +60,15 @@ object BootTask: Task {
         }
     }
 
+    state State::OnCpu {
+        actions {
+            on Action::ResetCurrent {
+                drives {
+                }
+            }
+        }
+    }
+
 }
 
 object KernelInitTask: Task {

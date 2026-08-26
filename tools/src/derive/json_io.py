@@ -1,4 +1,4 @@
-"""Strict JSON boundaries for sequence schema v3 and result schema v10."""
+"""Strict JSON boundaries for sequence schema v3 and result schema v11."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from .model import (
     DerivationDirective,
     DerivationEvent,
     DerivationEventFlow,
+    DerivationInterruptControl,
     DerivationFact,
     DerivationFailure,
     DerivationFrame,
@@ -372,6 +373,19 @@ def _event_flow(value: object, path: str) -> DerivationEventFlow:
     )
 
 
+def _interrupt_control(value: object, path: str) -> DerivationInterruptControl:
+    data = _object(
+        value,
+        frozenset({"cpu", "mode", "pending"}),
+        path,
+    )
+    return DerivationInterruptControl(
+        _name(data["cpu"], f"{path}.cpu"),
+        _string(data["mode"], f"{path}.mode"),
+        _array(data["pending"], f"{path}.pending", _string),
+    )
+
+
 def _path(value: object, path: str) -> DerivationPath:
     data = _object(
         value,
@@ -387,6 +401,7 @@ def _path(value: object, path: str) -> DerivationPath:
                 "current_task_ref",
                 "current_cpu_ref",
                 "event_flows",
+                "interrupt_controls",
             }
         ),
         path,
@@ -410,11 +425,16 @@ def _path(value: object, path: str) -> DerivationPath:
             data["current_cpu_ref"], f"{path}.current_cpu_ref"
         ),
         event_flows=_array(data["event_flows"], f"{path}.event_flows", _event_flow),
+        interrupt_controls=_array(
+            data["interrupt_controls"],
+            f"{path}.interrupt_controls",
+            _interrupt_control,
+        ),
     )
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v10 result document."""
+    """Load and strictly validate one schema-v11 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -541,7 +561,7 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v10 derivation result followed by a newline."""
+    """Write one canonical schema-v11 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")
@@ -596,6 +616,14 @@ def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
                     "outcome": item.outcome,
                 }
                 for item in path.event_flows
+            ],
+            "interrupt_controls": [
+                {
+                    "cpu": list(item.cpu),
+                    "mode": item.mode,
+                    "pending": list(item.pending),
+                }
+                for item in path.interrupt_controls
             ],
         }
         if path.failure is not None:

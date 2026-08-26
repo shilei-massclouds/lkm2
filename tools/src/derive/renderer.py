@@ -1,4 +1,4 @@
-"""Stable human rendering for schema-v10 multi-path derivation results."""
+"""Stable human rendering for schema-v11 multi-path derivation results."""
 
 from __future__ import annotations
 

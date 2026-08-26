@@ -38,11 +38,15 @@ Online 状态；只有 `Action::Enter` 表示控制到达用户态执行坐标�
 
 ## trap 与 exit 边界
 
-输入信号分为并列的 `interrupt.*`、`exception.*` 与 `syscall.*`。首版只执行
-`syscall.exit(status)`；其他合法信号在消费时返回 `unsupported_runtime_signal`。
-信号先路由到目标 CPU，再由 CPU 创建 owned `SyscallExitFlow<N>` 并进入
-`CurrentTaskRef.Action::Exit(status)`。syscall 只能投递到 Runtime 所属 TaskFlow
-`cpu_ref` 指向的本地 CPU。
+输入信号分为并列的 `interrupt.*`、`exception.*` 与 `syscall.*`。三类信号先路由到
+目标 CPU，再分别创建 owned `InterruptFlow<N>`、`ExceptionFlow<N>` 或
+`SyscallExitFlow<N>`。事件名称保留在结果元数据，首版不向 model 暴露 cause 分派。
+
+Interrupt 受目标 CPU control gate 约束，可跨 CPU 指定目标；Masked 时进入该 CPU 的
+pending FIFO，Unmask 时依输入顺序投递。Exception 绕过 mask，但必须投递到 Runtime
+所属 TaskFlow `cpu_ref` 指向的本地 CPU。两者处理后恢复相同 Runtime 坐标。
+`syscall.exit(status)` 同样仅限本地 CPU，最终进入
+`CurrentTaskRef.Action::Exit(status)`，保持 terminal 语义。
 
 当前不实现用户指令、普通 syscall 返回、Runtime Disable/Cleanup 或 Task 回收。
 

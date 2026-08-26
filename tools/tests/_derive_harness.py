@@ -19,12 +19,24 @@ type Task {
         on Transition::Suspend -> State::Online {}
     } }
 }
+type __HarnessCPU {
+    cpu_core: true;
+    initial_state: State::Online;
+    state State::Online {}
+}
+object __HarnessCPU0: __HarnessCPU { logical_id: 0; }
 type TaskFlow {
     continuation: true;
+    mutable cpu_ref: __HarnessCPU = __HarnessCPU0;
     initial_state: State::Online;
     state State::Online { actions { on Action::Enter; } }
 }
-object __HarnessBootTask: Task {}
+object __HarnessBootTask: Task {
+    initial_state: State::OnCpu;
+    state State::OnCpu { actions {
+        on Action::ResetCurrent { drives {} }
+    } }
+}
 object __HarnessBootTaskFlow: TaskFlow {
     parent: __HarnessBootTask;
     state State::Online { actions {
@@ -37,6 +49,7 @@ type __HarnessScheduler {
     state State::Online {}
 }
 object __HarnessCpu0Scheduler: __HarnessScheduler {
+    parent: __HarnessCPU0;
     idle_task: __HarnessBootTask;
 }
 """
