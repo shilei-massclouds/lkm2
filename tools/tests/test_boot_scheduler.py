@@ -34,6 +34,7 @@ EARLY_BOOT = ("phases", "start_kernel", "early_boot", "EarlyBoot")
 BOOT_SETUP = ("phases", "start_kernel", "boot_setup", "BootSetup")
 USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
 BOOT_CPU = ("objects", "cpu", "BootCPU")
+EARLY_CONSOLE = ("objects", "early_console", "EarlyConsole")
 
 
 def _all_units(units):
@@ -223,6 +224,7 @@ class BootSchedulerModelTests(unittest.TestCase):
                 for signal in early_drives
             ),
             (
+                (EARLY_CONSOLE, ("Transition", "Enable")),
                 (CPU0_SCHEDULER, ("Transition", "Enable")),
                 (
                     ("CurrentCPU", "InterruptControlRef"),
@@ -258,7 +260,11 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertTrue(all(check.status == "passed" for check in early_boot.ensures))
         self.assertEqual(
             tuple(unit.event.signal for unit in early_boot.drives),
-            (("Transition", "Enable"), ("Action", "Unmask")),
+            (
+                ("Transition", "Enable"),
+                ("Transition", "Enable"),
+                ("Action", "Unmask"),
+            ),
         )
         self.assertEqual(
             tuple(check.expression for check in early_boot.establishes),

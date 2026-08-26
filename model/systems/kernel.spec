@@ -1,6 +1,9 @@
 /* Kernel - core of lkm2 */
 
 use model::objects::task::BootTask;
+use model::objects::early_console::BootCommandLine;
+use model::objects::early_console::EarlyConTable;
+use model::objects::early_console::SbiConsole;
 
 type KernelType;
 
@@ -17,6 +20,10 @@ object Kernel: KernelType {
     state State::Prepared {
         transitions {
             on Transition::Setup -> State::Ready {
+                establishes {
+                    BootCommandLine.contains("earlycon", "sbi");
+                    EarlyConTable.contains("sbi", SbiConsole);
+                }
             }
         }
     }
