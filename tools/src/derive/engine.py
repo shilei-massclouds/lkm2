@@ -7,6 +7,7 @@ import json
 
 from model_ir import (
     ModelAction,
+    ModelBinding,
     ModelExpression,
     ModelHandlerBlock,
     ModelIR,
@@ -19,6 +20,7 @@ from .model import (
     RESULT_SCHEMA_VERSION,
     DerivationCheck,
     DerivationBinding,
+    DerivationBindingResult,
     DerivationContinuation,
     DerivationDirective,
     DerivationEvent,
@@ -31,6 +33,9 @@ from .model import (
     DerivationResult,
     DerivationScheduler,
     DerivationSwitch,
+    DerivationTerm,
+    DerivationTuple,
+    DerivationRelationEffect,
     DerivationSequence,
     DerivationState,
     DerivationUnit,
@@ -60,9 +65,13 @@ class _ResumeFrame:
     emits: list[DerivationUnit] = field(default_factory=list)
     yields: list[DerivationUnit] = field(default_factory=list)
     directives: list[DerivationDirective] = field(default_factory=list)
-    bindings: dict[str, tuple[str, ...] | ModelExpression] = field(
+    bindings: dict[str, DerivationTerm | ModelExpression] = field(
         default_factory=dict
     )
+    binding_results: list[DerivationBindingResult] = field(default_factory=list)
+    relation_effects: list[DerivationRelationEffect] = field(default_factory=list)
+    staged_tuples: set[DerivationTuple] = field(default_factory=set)
+    staged_values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None
     resumes: list[DerivationUnit] = field(default_factory=list)
 
     def reset_segment(self) -> None:
@@ -238,6 +247,32 @@ class _Context:
         self.syscall_exit_flow_type = next(
             (item for item in self.types.values() if item.syscall_exit_flow), None
         )
+        self.containers: dict[
+            tuple[str, ...], tuple[str, tuple[str, ...], tuple[str, ...]]
+        ] = {}
+        for model_object in model.objects:
+            if model_object.base_type.name not in {("Relation",), ("Map",)}:
+                continue
+            key_type, value_type = model_object.base_type.arguments
+            self.containers[model_object.name] = (
+                model_object.base_type.name[0],
+                self.canonical_type(key_type, model_object.name[:-1]),
+                self.canonical_type(value_type, model_object.name[:-1]),
+            )
+        self.tuples: set[DerivationTuple] = set()
+        self.query_tuples: set[DerivationTuple] = self.tuples
+
+    def canonical_type(
+        self, expression: ModelTypeExpression, module: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        if expression.name == ("String",):
+            return ("String",)
+        resolved = self._type_name(expression.name, module)
+        if resolved is None:
+            raise RuntimeError(
+                f"compiled type {'::'.join(expression.name)!r} is unresolved"
+            )
+        return resolved
 
     def _type_name(
         self, raw: tuple[str, ...], module: tuple[str, ...]
@@ -327,14 +362,20 @@ class _Context:
         expression: ModelExpression,
         module: tuple[str, ...],
         source: tuple[str, ...] | None,
-        bindings: dict[str, tuple[str, ...]],
+        bindings: dict[str, DerivationTerm | ModelExpression],
         values: dict[tuple[tuple[str, ...], str], tuple[str, ...]],
     ) -> tuple[str, ...] | None:
         if expression.kind == "identifier":
             identifier = str(expression.value)
             if identifier in bindings:
                 bound = bindings[identifier]
-                return bound if isinstance(bound, tuple) else None
+                return (
+                    bound.value
+                    if isinstance(bound, DerivationTerm)
+                    and bound.kind == "object"
+                    and isinstance(bound.value, tuple)
+                    else None
+                )
             if identifier == "self":
                 return source
             if identifier == "CurrentTaskRef":
@@ -346,6 +387,20 @@ class _Context:
                     raise _UnsupportedExpression("CurrentCPU:unavailable")
                 return self.current_cpu_resolver()
         flattened = _access(expression)
+        if (
+            flattened is not None
+            and len(flattened[0]) == 2
+            and flattened[0][1] == "state"
+            and flattened[1] == ("member",)
+            and flattened[0][0] in bindings
+        ):
+            bound = bindings[flattened[0][0]]
+            if (
+                isinstance(bound, DerivationTerm)
+                and bound.kind == "object"
+                and isinstance(bound.value, tuple)
+            ):
+                return bound.value
         if flattened == (("self", "TaskFlowRef"), ("member",)):
             if source is None or self.task_flow_resolver is None:
                 raise _UnsupportedExpression("self.TaskFlowRef:unavailable")
@@ -410,7 +465,7 @@ class _Context:
         signal: ModelSignal,
         module: tuple[str, ...],
         source: tuple[str, ...] | None,
-        bindings: dict[str, tuple[str, ...]],
+        bindings: dict[str, DerivationTerm | ModelExpression],
         values: dict[tuple[tuple[str, ...], str], tuple[str, ...]],
     ) -> DerivationEvent:
         arguments: list[ModelExpression] = []
@@ -419,8 +474,11 @@ class _Context:
                 bound = bindings[str(argument.value)]
                 if isinstance(bound, ModelExpression):
                     arguments.append(bound)
+                elif bound.kind == "string":
+                    arguments.append(ModelExpression("string", str(bound.value)))
                 else:
-                    arguments.append(self.object_expression(bound))
+                    assert isinstance(bound.value, tuple)
+                    arguments.append(self.object_expression(bound.value))
                 continue
             if argument.kind == "integer" or (
                 argument.kind == "unary"
@@ -463,7 +521,7 @@ class _Context:
         expression: ModelExpression,
         module: tuple[str, ...],
         source: tuple[str, ...] | None = None,
-        bindings: dict[str, tuple[str, ...]] | None = None,
+        bindings: dict[str, DerivationTerm | ModelExpression] | None = None,
         values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None,
     ) -> str:
         bindings = {} if bindings is None else bindings
@@ -472,6 +530,13 @@ class _Context:
             return str(expression.value)
         if expression.kind == "string":
             return json.dumps(expression.value, ensure_ascii=False)
+        if expression.kind == "identifier" and str(expression.value) in bindings:
+            bound = bindings[str(expression.value)]
+            if isinstance(bound, DerivationTerm):
+                if bound.kind == "string":
+                    return json.dumps(bound.value, ensure_ascii=False)
+                assert isinstance(bound.value, tuple)
+                return self.object_names[bound.value]
         if expression.kind == "identifier" and expression.value in {"true", "false"}:
             return str(expression.value)
         state = self.state_reference(expression)
@@ -494,7 +559,7 @@ class _Context:
         expression: ModelExpression,
         module: tuple[str, ...],
         source: tuple[str, ...] | None = None,
-        bindings: dict[str, tuple[str, ...]] | None = None,
+        bindings: dict[str, DerivationTerm | ModelExpression] | None = None,
         values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None,
     ) -> DerivationFact:
         if expression.kind != "call":
@@ -523,11 +588,36 @@ class _Context:
         expression: ModelExpression,
         module: tuple[str, ...],
         source: tuple[str, ...] | None = None,
-        bindings: dict[str, tuple[str, ...]] | None = None,
+        bindings: dict[str, DerivationTerm | ModelExpression] | None = None,
         values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None,
     ) -> str:
         bindings = {} if bindings is None else bindings
         values = {} if values is None else values
+        relation = self.relation_call(expression, module)
+        if relation is not None:
+            owner, method, arguments = relation
+            rendered: list[str] = []
+            _, key_type, value_type = self.containers[owner]
+            for index, argument in enumerate(arguments):
+                expected = key_type if index == 0 else value_type
+                try:
+                    rendered.append(
+                        self.term_text(
+                            self.typed_term(
+                                argument,
+                                expected,
+                                module,
+                                source,
+                                bindings,
+                                values,
+                            )
+                        )
+                    )
+                except _UnsupportedExpression:
+                    rendered.append(_format_expression(argument))
+            return (
+                f"{self.object_names[owner]}.{method}({', '.join(rendered)})"
+            )
         if expression.kind == "call":
             try:
                 return self.fact_text(
@@ -568,7 +658,7 @@ class _Context:
         states: dict[tuple[str, ...], tuple[str, ...] | None],
         facts: set[DerivationFact],
         source: tuple[str, ...] | None = None,
-        bindings: dict[str, tuple[str, ...]] | None = None,
+        bindings: dict[str, DerivationTerm | ModelExpression] | None = None,
         values: dict[tuple[tuple[str, ...], str], tuple[str, ...]] | None = None,
     ) -> bool:
         bindings = {} if bindings is None else bindings
@@ -576,6 +666,28 @@ class _Context:
         if expression.kind == "identifier" and expression.value in {"true", "false"}:
             return expression.value == "true"
         if expression.kind == "call":
+            relation = self.relation_call(expression, module)
+            if relation is not None:
+                owner, method, arguments = relation
+                container, key_type, value_type = self.containers[owner]
+                key = self.typed_term(
+                    arguments[0], key_type, module, source, bindings, values
+                )
+                matches = tuple(
+                    item
+                    for item in self.query_tuples
+                    if item.owner == owner and item.key == key
+                )
+                if method == "has_key":
+                    return bool(matches)
+                if method == "contains":
+                    value = self.typed_term(
+                        arguments[1], value_type, module, source, bindings, values
+                    )
+                    return any(item.value == value for item in matches)
+                raise _UnsupportedExpression(
+                    f"{container}.{method}:witness_only"
+                )
             return self.normalize_fact(
                 expression, module, source, bindings, values
             ) in facts
@@ -611,6 +723,54 @@ class _Context:
             feature += f":{expression.value}"
         raise _UnsupportedExpression(feature)
 
+    def relation_call(
+        self, expression: ModelExpression, module: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], str, tuple[ModelExpression, ...]] | None:
+        if expression.kind != "call" or expression.children[0].kind != "member":
+            return None
+        callee = expression.children[0]
+        owner = self.object_reference(callee.children[0], module)
+        if owner not in self.containers:
+            return None
+        return owner, str(callee.value), expression.children[1:]
+
+    def typed_term(
+        self,
+        expression: ModelExpression,
+        expected_type: tuple[str, ...],
+        module: tuple[str, ...],
+        source: tuple[str, ...] | None,
+        bindings: dict[str, DerivationTerm | ModelExpression],
+        values: dict[tuple[tuple[str, ...], str], tuple[str, ...]],
+    ) -> DerivationTerm:
+        if expression.kind == "identifier" and str(expression.value) in bindings:
+            bound = bindings[str(expression.value)]
+            if isinstance(bound, DerivationTerm):
+                if bound.type != expected_type:
+                    # The compiler already proved assignment compatibility.  A
+                    # witness is retagged with the receiving static type so tuple
+                    # equality remains declared-container typed.
+                    return DerivationTerm(bound.kind, expected_type, bound.value)
+                return bound
+        if expected_type == ("String",):
+            if expression.kind != "string":
+                raise _UnsupportedExpression(
+                    f"String_term:{_format_expression(expression)}"
+                )
+            return DerivationTerm("string", expected_type, str(expression.value))
+        value = self.resolve_value(expression, module, source, bindings, values)
+        if value is None:
+            raise _UnsupportedExpression(
+                f"object_term:{_format_expression(expression)}"
+            )
+        return DerivationTerm("object", expected_type, value)
+
+    def term_text(self, term: DerivationTerm) -> str:
+        if term.kind == "string":
+            return json.dumps(term.value, ensure_ascii=False)
+        assert isinstance(term.value, tuple)
+        return self.object_names[term.value]
+
 
 class _Execution:
     def __init__(
@@ -629,6 +789,9 @@ class _Execution:
         self.event_flows: list[DerivationEventFlow] = []
         self.states = _states(model)
         self.facts: set[DerivationFact] = set()
+        self.tuples: set[DerivationTuple] = set()
+        self.context.tuples = self.tuples
+        self.context.query_tuples = self.tuples
         self.failure: DerivationFailure | None = None
         self.continuations: dict[tuple[str, ...], _ContinuationRuntime] = {}
         self.values: dict[
@@ -1206,6 +1369,9 @@ class _Execution:
         )
         return fields + collections
 
+    def tuple_snapshots(self) -> tuple[DerivationTuple, ...]:
+        return tuple(self.tuples)
+
     def scheduler_snapshots(self) -> tuple[DerivationScheduler, ...]:
         return tuple(
             DerivationScheduler(
@@ -1374,6 +1540,21 @@ class _Execution:
             position,
             tuple(sorted(self.states.items())),
             tuple(sorted(self.facts, key=lambda item: (item.predicate, item.arguments))),
+            tuple(
+                sorted(
+                    self.tuples,
+                    key=lambda item: (
+                        item.owner,
+                        item.container,
+                        item.key.kind,
+                        item.key.type,
+                        item.key.value,
+                        item.value.kind,
+                        item.value.type,
+                        item.value.value,
+                    ),
+                )
+            ),
             tuple(sorted(self.values.items())),
             tuple((name, tuple(values)) for name, values in sorted(self.collections.items())),
             tuple(
@@ -1411,12 +1592,17 @@ class _Execution:
         self,
         event: DerivationEvent,
         handler: object,
-    ) -> dict[str, tuple[str, ...] | ModelExpression]:
+    ) -> dict[str, DerivationTerm | ModelExpression]:
         parameters = handler.parameters
         if len(parameters) != len(event.arguments):
             return {}
-        result: dict[str, tuple[str, ...] | ModelExpression] = {}
+        result: dict[str, DerivationTerm | ModelExpression] = {}
         for parameter, argument in zip(parameters, event.arguments, strict=True):
+            if argument.kind == "string" and parameter.type.name == ("String",):
+                result[parameter.name] = DerivationTerm(
+                    "string", ("String",), str(argument.value)
+                )
+                continue
             value = self.context.resolve_value(
                 argument,
                 event.target[:-1],
@@ -1433,14 +1619,19 @@ class _Execution:
                     result[parameter.name] = argument
                     continue
                 raise _UnsupportedExpression(f"handler_argument:{parameter.name}")
-            result[parameter.name] = value
+            parameter_type = self.context.canonical_type(
+                parameter.type, event.target[:-1]
+            )
+            result[parameter.name] = DerivationTerm(
+                "object", parameter_type, value
+            )
         return result
 
     def _signal_event(
         self,
         signal: ModelSignal,
         source: tuple[str, ...],
-        bindings: dict[str, tuple[str, ...]],
+        bindings: dict[str, DerivationTerm | ModelExpression],
     ) -> DerivationEvent:
         return self.context.instantiate_signal(
             signal, source[:-1], source, bindings, self.values
@@ -1458,7 +1649,7 @@ class _Execution:
                         tuple(
                             DerivationBinding(name, value)
                             for name, value in sorted(frame.bindings.items())
-                            if isinstance(value, tuple)
+                            if isinstance(value, DerivationTerm)
                         ),
                     )
                     for frame in runtime.frames
@@ -1509,6 +1700,8 @@ class _Execution:
         directives: list[DerivationDirective] | None = None,
         resumes: list[DerivationUnit] | None = None,
         switches: list[DerivationSwitch] | None = None,
+        bindings: list[DerivationBindingResult] | None = None,
+        relation_effects: list[DerivationRelationEffect] | None = None,
     ) -> DerivationUnit:
         return DerivationUnit(
             kind=kind,
@@ -1529,6 +1722,10 @@ class _Execution:
             directives=() if directives is None else tuple(directives),
             resumes=() if resumes is None else tuple(resumes),
             switches=() if switches is None else tuple(switches),
+            bindings=() if bindings is None else tuple(bindings),
+            relation_effects=()
+            if relation_effects is None
+            else tuple(relation_effects),
         )
 
     def _clear_continuations_for_panic(self) -> None:
@@ -1549,7 +1746,7 @@ class _Execution:
         self,
         model_object: ModelObject,
         handler: object,
-        bindings: dict[str, tuple[str, ...]],
+        bindings: dict[str, DerivationTerm | ModelExpression],
     ) -> dict[tuple[tuple[str, ...], str], tuple[str, ...]]:
         candidate = dict(self.values)
         for block in handler.blocks:
@@ -1572,6 +1769,231 @@ class _Execution:
                     )
                 candidate[(model_object.name, flattened[0][-1])] = value
         return candidate
+
+    @staticmethod
+    def _term_sort_key(term: DerivationTerm) -> tuple[object, ...]:
+        return (term.kind, term.type, term.value)
+
+    def _object_term(self, value: tuple[str, ...]) -> DerivationTerm:
+        model_object = self.context.objects[value]
+        return DerivationTerm(
+            "object",
+            self.context.canonical_type(model_object.base_type, value[:-1]),
+            value,
+        )
+
+    @staticmethod
+    def _handler_bindings(handler: object) -> tuple[ModelBinding, ...]:
+        return tuple(
+            binding
+            for block in handler.blocks
+            if block.kind == "binds"
+            for binding in block.bindings
+        )
+
+    @staticmethod
+    def _uses_binding(
+        expression: ModelExpression, names: frozenset[str]
+    ) -> bool:
+        return bool(
+            expression.kind == "identifier" and str(expression.value) in names
+            or any(
+                _Execution._uses_binding(child, names)
+                for child in expression.children
+            )
+        )
+
+    def _evaluate_handler_bindings(
+        self,
+        model_object: ModelObject,
+        handler: object,
+        bindings: dict[str, DerivationTerm | ModelExpression],
+        results: list[DerivationBindingResult],
+        path: str,
+    ) -> DerivationFailure | None:
+        module = model_object.name[:-1]
+        for index, binding in enumerate(self._handler_bindings(handler)):
+            relation = self.context.relation_call(binding.expression, module)
+            if relation is None:
+                raise RuntimeError("compiled binding expression is not a relation lookup")
+            owner, method, arguments = relation
+            container, key_type, value_type = self.context.containers[owner]
+            key = self.context.typed_term(
+                arguments[0],
+                key_type,
+                module,
+                model_object.name,
+                bindings,
+                self.values,
+            )
+            candidates = tuple(
+                sorted(
+                    {
+                        item.value
+                        for item in self.tuples
+                        if item.owner == owner and item.key == key
+                    },
+                    key=self._term_sort_key,
+                )
+            )
+            code: str | None = None
+            if not candidates:
+                code = (
+                    "relation_key_missing"
+                    if container == "Relation"
+                    else "map_key_missing"
+                )
+            elif method == "unique_value" and len(candidates) != 1:
+                code = "relation_key_ambiguous"
+            if code is not None:
+                results.append(
+                    DerivationBindingResult(
+                        binding.name,
+                        self.context.canonical_type(binding.type, module),
+                        binding.expression,
+                        owner,
+                        key,
+                        None,
+                        "failed",
+                        code,
+                        candidates,
+                    )
+                )
+                candidate_text = ", ".join(
+                    self.context.term_text(item) for item in candidates
+                )
+                detail = (
+                    f"; candidates: {candidate_text}" if candidate_text else ""
+                )
+                return self._set_failure(
+                    code,
+                    f"{path}.bindings[{index}]",
+                    f"{self.context.object_names[owner]}.{method} key "
+                    f"{self.context.term_text(key)} failed{detail}",
+                )
+            value = candidates[0]
+            # The tuple already carries the container's declared V type.
+            if value.type != value_type:
+                value = DerivationTerm(value.kind, value_type, value.value)
+            bindings[binding.name] = value
+            results.append(
+                DerivationBindingResult(
+                    binding.name,
+                    self.context.canonical_type(binding.type, module),
+                    binding.expression,
+                    owner,
+                    key,
+                    value,
+                    "passed",
+                )
+            )
+        return None
+
+    def _stage_relation_effects(
+        self,
+        model_object: ModelObject,
+        handler: object,
+        bindings: dict[str, DerivationTerm | ModelExpression],
+        candidate_values: dict[tuple[tuple[str, ...], str], tuple[str, ...]],
+        effects: list[DerivationRelationEffect],
+        path: str,
+    ) -> tuple[set[DerivationTuple], DerivationFailure | None]:
+        staged: set[DerivationTuple] = set()
+        parsed: list[DerivationTuple] = []
+        module = model_object.name[:-1]
+        for expression in (
+            expression
+            for block in handler.blocks
+            if block.kind == "establishes"
+            for expression in block.expressions
+        ):
+            relation = self.context.relation_call(expression, module)
+            if relation is None:
+                continue
+            owner, method, arguments = relation
+            if method != "contains":
+                raise RuntimeError("compiled relation effect is not contains")
+            container, key_type, value_type = self.context.containers[owner]
+            key = self.context.typed_term(
+                arguments[0],
+                key_type,
+                module,
+                model_object.name,
+                bindings,
+                candidate_values,
+            )
+            value = self.context.typed_term(
+                arguments[1],
+                value_type,
+                module,
+                model_object.name,
+                bindings,
+                candidate_values,
+            )
+            item = DerivationTuple(owner, container, key, value)
+            parsed.append(item)
+            staged.add(item)
+
+        conflict_groups: list[
+            tuple[tuple[str, ...], DerivationTerm, tuple[DerivationTerm, ...]]
+        ] = []
+        map_keys = sorted(
+            {
+                (item.owner, item.key)
+                for item in parsed
+                if item.container == "Map"
+            },
+            key=lambda item: (item[0], self._term_sort_key(item[1])),
+        )
+        for owner, key in map_keys:
+            values = tuple(
+                sorted(
+                    {
+                        item.value
+                        for item in self.tuples | staged
+                        if item.owner == owner and item.key == key
+                    },
+                    key=self._term_sort_key,
+                )
+            )
+            if len(values) > 1:
+                conflict_groups.append((owner, key, values))
+
+        conflict_keys = {(owner, key) for owner, key, _ in conflict_groups}
+        conflict_values = {
+            (owner, key): values for owner, key, values in conflict_groups
+        }
+        for item in parsed:
+            conflicting = conflict_values.get((item.owner, item.key), ())
+            effects.append(
+                DerivationRelationEffect(
+                    item.owner,
+                    item.container,
+                    item.key,
+                    item.value,
+                    "failed" if (item.owner, item.key) in conflict_keys else "established",
+                    tuple(value for value in conflicting if value != item.value),
+                )
+            )
+        effects.sort(
+            key=lambda effect: (
+                effect.owner,
+                effect.container,
+                self._term_sort_key(effect.key),
+                self._term_sort_key(effect.value),
+                effect.status,
+            )
+        )
+        if conflict_groups:
+            owner, key, values = conflict_groups[0]
+            return staged, self._set_failure(
+                "map_key_conflict",
+                f"{path}.relation_effects[0]",
+                f"{self.context.object_names[owner]} key "
+                f"{self.context.term_text(key)} conflicts across "
+                + ", ".join(self.context.term_text(term) for term in values),
+            )
+        return staged, None
 
     def undeclared_root(self, event: DerivationEvent, path: str) -> DerivationUnit:
         failure = self._set_failure(
@@ -1727,6 +2149,8 @@ class _Execution:
             yields=frame.yields,
             directives=frame.directives,
             resumes=frame.resumes,
+            bindings=frame.binding_results,
+            relation_effects=frame.relation_effects,
         )
 
     def _finish_runtime(
@@ -1745,6 +2169,7 @@ class _Execution:
         status: str,
         failure: DerivationFailure | None,
     ) -> None:
+        self.context.query_tuples = self.tuples
         frame = runtime.frames.pop()
         unit = self._frame_unit(frame, status, failure)
         while runtime.frames:
@@ -1843,45 +2268,125 @@ class _Execution:
                     if block.kind == "depends_on"
                     for expression in block.expressions
                 )
-                for index, expression in enumerate(depends):
-                    text = self.context.expression_text(
-                        expression,
-                        module,
-                        model_object.name,
-                        frame.bindings,
-                        self.values,
-                    )
-                    try:
-                        passed = self.context.evaluate(
+                binding_names = frozenset(
+                    binding.name for binding in self._handler_bindings(handler)
+                )
+
+                def check_depends(
+                    selected: tuple[tuple[int, ModelExpression], ...]
+                ) -> DerivationFailure | None:
+                    for index, expression in selected:
+                        text = self.context.expression_text(
                             expression,
                             module,
-                            self.states,
-                            self.facts,
                             model_object.name,
                             frame.bindings,
                             self.values,
                         )
-                    except _UnsupportedExpression as exc:
-                        frame.depends_on.append(DerivationCheck(text, "unsupported"))
-                        failure = self._set_failure(
-                            "unsupported_feature",
-                            f"{path}.depends_on[{index}]",
-                            "depends_on expression is not supported",
-                            (exc.feature,),
+                        try:
+                            passed = self.context.evaluate(
+                                expression,
+                                module,
+                                self.states,
+                                self.facts,
+                                model_object.name,
+                                frame.bindings,
+                                self.values,
+                            )
+                        except _UnsupportedExpression as exc:
+                            frame.depends_on.append(
+                                DerivationCheck(text, "unsupported")
+                            )
+                            return self._set_failure(
+                                "unsupported_feature",
+                                f"{path}.depends_on[{index}]",
+                                "depends_on expression is not supported",
+                                (exc.feature,),
+                            )
+                        frame.depends_on.append(
+                            DerivationCheck(text, "passed" if passed else "failed")
                         )
-                        self._abort_frame(runtime, failure.code, failure)
-                        return
-                    frame.depends_on.append(
-                        DerivationCheck(text, "passed" if passed else "failed")
+                        if not passed:
+                            return self._set_failure(
+                                "depends_on_failed",
+                                f"{path}.depends_on[{index}]",
+                                "depends_on condition is false",
+                            )
+                    return None
+
+                indexed = tuple(enumerate(depends))
+                independent = tuple(
+                    item
+                    for item in indexed
+                    if not self._uses_binding(item[1], binding_names)
+                )
+                dependent = tuple(
+                    item
+                    for item in indexed
+                    if self._uses_binding(item[1], binding_names)
+                )
+                failure = check_depends(independent)
+                if failure is not None:
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
+                try:
+                    failure = self._evaluate_handler_bindings(
+                        model_object,
+                        handler,
+                        frame.bindings,
+                        frame.binding_results,
+                        path,
                     )
-                    if not passed:
-                        failure = self._set_failure(
-                            "depends_on_failed",
-                            f"{path}.depends_on[{index}]",
-                            "depends_on condition is false",
+                except _UnsupportedExpression as exc:
+                    failure = self._set_failure(
+                        "unsupported_feature",
+                        f"{path}.bindings[{len(frame.binding_results)}]",
+                        "binding key cannot be resolved",
+                        (exc.feature,),
+                    )
+                if failure is not None:
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
+                failure = check_depends(dependent)
+                if failure is not None:
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
+                try:
+                    preflight_values = self._candidate_values(
+                        model_object, handler, frame.bindings
+                    )
+                    frame.staged_values = {
+                        key: value
+                        for key, value in preflight_values.items()
+                        if self.values.get(key) != value
+                    }
+                    frame.staged_tuples, failure = self._stage_relation_effects(
+                        model_object,
+                        handler,
+                        frame.bindings,
+                        preflight_values,
+                        frame.relation_effects,
+                        path,
+                    )
+                except _UnsupportedExpression as exc:
+                    failure = self._set_failure(
+                        "unsupported_feature",
+                        f"{path}.relation_effects[{len(frame.relation_effects)}]",
+                        "handler preflight term cannot be resolved",
+                        (exc.feature,),
+                    )
+                if failure is not None:
+                    self._abort_frame(runtime, failure.code, failure)
+                    return
+                for effect in frame.relation_effects:
+                    frame.establishes.append(
+                        DerivationCheck(
+                            f"{self.context.object_names[effect.owner]}.contains("
+                            f"{self.context.term_text(effect.key)}, "
+                            f"{self.context.term_text(effect.value)})",
+                            "established",
                         )
-                        self._abort_frame(runtime, failure.code, failure)
-                        return
+                    )
                 frame.entered = True
 
             controls = self._control_items(handler)
@@ -1958,19 +2463,45 @@ class _Execution:
                     return
                 continue
 
-            try:
-                candidate_values = self._candidate_values(
-                    model_object, handler, frame.bindings
+            candidate_values = dict(self.values)
+            candidate_values.update(frame.staged_values or {})
+            for staged_item in frame.staged_tuples:
+                if staged_item.container != "Map":
+                    continue
+                late_conflicts = tuple(
+                    sorted(
+                        {
+                            item.value
+                            for item in self.tuples
+                            if item.owner == staged_item.owner
+                            and item.key == staged_item.key
+                            and item.value != staged_item.value
+                        },
+                        key=self._term_sort_key,
+                    )
                 )
-            except _UnsupportedExpression as exc:
+                if not late_conflicts:
+                    continue
+                frame.relation_effects[:] = [
+                    replace(
+                        effect,
+                        status="failed",
+                        conflict_values=late_conflicts,
+                    )
+                    if effect.owner == staged_item.owner
+                    and effect.key == staged_item.key
+                    and effect.value == staged_item.value
+                    else effect
+                    for effect in frame.relation_effects
+                ]
                 failure = self._set_failure(
-                    self._resolution_failure_code(exc.feature),
-                    f"{path}.updates",
-                    "updates value cannot be resolved",
-                    (exc.feature,),
+                    "map_key_conflict",
+                    f"{path}.relation_effects",
+                    "Map key became conflicting while the continuation was suspended",
                 )
                 self._abort_frame(runtime, failure.code, failure)
                 return
+            self.context.query_tuples = self.tuples | frame.staged_tuples
 
             ensures = tuple(
                 expression
@@ -2026,6 +2557,8 @@ class _Execution:
                 for expression in block.expressions
             )
             for index, expression in enumerate(establishes):
+                if self.context.relation_call(expression, module) is not None:
+                    continue
                 text = self.context.expression_text(
                     expression,
                     module,
@@ -2102,6 +2635,8 @@ class _Execution:
                     self._abort_frame(runtime, failure.code, failure)
                     return
             self.facts.update(staged_facts)
+            self.tuples.update(frame.staged_tuples)
+            self.context.query_tuples = self.tuples
             self.values = candidate_values
 
             completed = runtime.frames.pop()
@@ -2637,12 +3172,14 @@ class _Execution:
         resumes: list[DerivationUnit] = []
         directives: list[DerivationDirective] = []
         switches: list[DerivationSwitch] = []
+        binding_results: list[DerivationBindingResult] = []
+        relation_effects: list[DerivationRelationEffect] = []
         switched_task: tuple[str, ...] | None = None
         deferred_resume_units: list[
             tuple[
                 int,
                 tuple[ModelSignal, ...],
-                dict[str, tuple[str, ...]],
+                dict[str, DerivationTerm | ModelExpression],
             ]
         ] = []
         if handler is None:
@@ -2667,6 +3204,8 @@ class _Execution:
                 emits=emits,
                 status=failure.code,
                 failure=failure,
+                bindings=binding_results,
+                relation_effects=relation_effects,
             )
 
         reset_current = event.signal == ("Action", "ResetCurrent")
@@ -2824,6 +3363,7 @@ class _Execution:
         )
 
         def failed_unit(failure: DerivationFailure) -> DerivationUnit:
+            self.context.query_tuples = self.tuples
             return self._unit(
                 kind=kind,
                 event=event,
@@ -2842,41 +3382,132 @@ class _Execution:
                 directives=directives,
                 resumes=resumes,
                 switches=switches,
+                bindings=binding_results,
+                relation_effects=relation_effects,
             )
 
-        for index, expression in enumerate(expressions["depends_on"]):
-            text = self.context.expression_text(
-                expression, module, model_object.name, bindings, self.values
-            )
-            try:
-                passed = self.context.evaluate(
-                    expression,
-                    module,
-                    self.states,
-                    self.facts,
-                    model_object.name,
-                    bindings,
-                    self.values,
+        relation_binding_names = frozenset(
+            binding.name for binding in self._handler_bindings(handler)
+        )
+
+        def evaluate_depends(
+            selected: tuple[tuple[int, ModelExpression], ...]
+        ) -> DerivationFailure | None:
+            for index, expression in selected:
+                text = self.context.expression_text(
+                    expression, module, model_object.name, bindings, self.values
                 )
-            except _UnsupportedExpression as exc:
-                checks["depends_on"].append(DerivationCheck(text, "unsupported"))
-                failure = self._set_failure(
+                try:
+                    passed = self.context.evaluate(
+                        expression,
+                        module,
+                        self.states,
+                        self.facts,
+                        model_object.name,
+                        bindings,
+                        self.values,
+                    )
+                except _UnsupportedExpression as exc:
+                    checks["depends_on"].append(DerivationCheck(text, "unsupported"))
+                    return self._set_failure(
+                        "unsupported_feature",
+                        f"{path}.depends_on[{index}]",
+                        "depends_on expression is not supported",
+                        (exc.feature,),
+                    )
+                checks["depends_on"].append(
+                    DerivationCheck(text, "passed" if passed else "failed")
+                )
+                if not passed:
+                    return self._set_failure(
+                        "depends_on_failed",
+                        f"{path}.depends_on[{index}]",
+                        "depends_on condition is false",
+                    )
+            return None
+
+        indexed_depends = tuple(enumerate(expressions["depends_on"]))
+        independent = tuple(
+            item
+            for item in indexed_depends
+            if not self._uses_binding(item[1], relation_binding_names)
+        )
+        dependent = tuple(
+            item
+            for item in indexed_depends
+            if self._uses_binding(item[1], relation_binding_names)
+        )
+        dependency_failure = evaluate_depends(independent)
+        if dependency_failure is not None:
+            return failed_unit(dependency_failure)
+
+        try:
+            binding_failure = self._evaluate_handler_bindings(
+                model_object, handler, bindings, binding_results, path
+            )
+        except _UnsupportedExpression as exc:
+            return failed_unit(
+                self._set_failure(
                     "unsupported_feature",
-                    f"{path}.depends_on[{index}]",
-                    "depends_on expression is not supported",
+                    f"{path}.bindings[{len(binding_results)}]",
+                    "binding key cannot be resolved",
                     (exc.feature,),
                 )
-                return failed_unit(failure)
-            checks["depends_on"].append(
-                DerivationCheck(text, "passed" if passed else "failed")
             )
-            if not passed:
-                failure = self._set_failure(
-                    "depends_on_failed",
-                    f"{path}.depends_on[{index}]",
-                    "depends_on condition is false",
+        if binding_failure is not None:
+            return failed_unit(binding_failure)
+
+        dependency_failure = evaluate_depends(dependent)
+        if dependency_failure is not None:
+            return failed_unit(dependency_failure)
+
+        try:
+            preflight_values = self._candidate_values(
+                model_object, handler, bindings
+            )
+        except _UnsupportedExpression as exc:
+            return failed_unit(
+                self._set_failure(
+                    self._resolution_failure_code(exc.feature),
+                    f"{path}.updates",
+                    "updates value cannot be resolved",
+                    (exc.feature,),
                 )
-                return failed_unit(failure)
+            )
+        staged_value_updates = {
+            key: value
+            for key, value in preflight_values.items()
+            if self.values.get(key) != value
+        }
+        try:
+            staged_tuples, relation_failure = self._stage_relation_effects(
+                model_object,
+                handler,
+                bindings,
+                preflight_values,
+                relation_effects,
+                path,
+            )
+        except _UnsupportedExpression as exc:
+            return failed_unit(
+                self._set_failure(
+                    "unsupported_feature",
+                    f"{path}.relation_effects[{len(relation_effects)}]",
+                    "relation effect term cannot be resolved",
+                    (exc.feature,),
+                )
+            )
+        if relation_failure is not None:
+            return failed_unit(relation_failure)
+        for effect in relation_effects:
+            checks["establishes"].append(
+                DerivationCheck(
+                    f"{self.context.object_names[effect.owner]}.contains("
+                    f"{self.context.term_text(effect.key)}, "
+                    f"{self.context.term_text(effect.value)})",
+                    "established",
+                )
+            )
 
         controls: list[
             ModelSignal | ModelHandlerBlock | DerivationDirective
@@ -2917,7 +3548,7 @@ class _Execution:
                 self.switch_cursor += 1
                 if switched_task not in candidates:
                     raise RuntimeError("scheduler replay selected a stale candidate")
-                bindings[control.switches] = switched_task
+                bindings[control.switches] = self._object_term(switched_task)
                 switches.append(
                     DerivationSwitch(
                         control.switches,
@@ -2948,7 +3579,7 @@ class _Execution:
             )
             drive_index = len(drives)
             deferred_signals: tuple[ModelSignal, ...] = ()
-            deferred_bindings: dict[str, tuple[str, ...]] = {}
+            deferred_bindings: dict[str, DerivationTerm | ModelExpression] = {}
             if defer_child_resumes:
                 _, child_handler = self._find_handler(child_event)
                 if child_handler is not None:
@@ -2992,24 +3623,51 @@ class _Execution:
                     directives=directives,
                     resumes=resumes,
                     switches=switches,
+                    bindings=binding_results,
+                    relation_effects=relation_effects,
                 )
 
         candidate_states = dict(self.states)
         if candidate_state is not None:
             candidate_states[event.target] = candidate_state
-        try:
-            candidate_values = self._candidate_values(
-                model_object, handler, bindings
-            )
-        except _UnsupportedExpression as exc:
-            return failed_unit(
-                self._set_failure(
-                    self._resolution_failure_code(exc.feature),
-                    f"{path}.updates",
-                    "updates value cannot be resolved",
-                    (exc.feature,),
+        candidate_values = dict(self.values)
+        candidate_values.update(staged_value_updates)
+        for staged_item in staged_tuples:
+            if staged_item.container != "Map":
+                continue
+            late_conflicts = tuple(
+                sorted(
+                    {
+                        item.value
+                        for item in self.tuples
+                        if item.owner == staged_item.owner
+                        and item.key == staged_item.key
+                        and item.value != staged_item.value
+                    },
+                    key=self._term_sort_key,
                 )
             )
+            if late_conflicts:
+                relation_effects[:] = [
+                    replace(
+                        effect,
+                        status="failed",
+                        conflict_values=late_conflicts,
+                    )
+                    if effect.owner == staged_item.owner
+                    and effect.key == staged_item.key
+                    and effect.value == staged_item.value
+                    else effect
+                    for effect in relation_effects
+                ]
+                return failed_unit(
+                    self._set_failure(
+                        "map_key_conflict",
+                        f"{path}.relation_effects",
+                        "Map key became conflicting during nested drives",
+                    )
+                )
+        self.context.query_tuples = self.tuples | staged_tuples
 
         for index, expression in enumerate(expressions["ensures"]):
             text = self.context.expression_text(
@@ -3047,6 +3705,8 @@ class _Execution:
 
         staged_facts: set[DerivationFact] = set()
         for index, expression in enumerate(expressions["establishes"]):
+            if self.context.relation_call(expression, module) is not None:
+                continue
             text = self.context.expression_text(
                 expression, module, model_object.name, bindings, candidate_values
             )
@@ -3129,6 +3789,8 @@ class _Execution:
         if candidate_state is not None:
             self.states[event.target] = candidate_state
         self.facts.update(staged_facts)
+        self.tuples.update(staged_tuples)
+        self.context.query_tuples = self.tuples
         self.values = candidate_values
         for index, signal in enumerate(emit_signals):
             child_event = self._signal_event(signal, model_object.name, bindings)
@@ -3219,6 +3881,8 @@ class _Execution:
             directives=directives,
             resumes=resumes,
             switches=switches,
+            bindings=binding_results,
+            relation_effects=relation_effects,
         )
 
 
@@ -3335,6 +3999,7 @@ def derive(
                 interrupt_controls=()
                 if outcome == "invalid_derivation_line"
                 else execution.interrupt_control_snapshots(),
+                tuples=execution.tuple_snapshots(),
             )
         )
 

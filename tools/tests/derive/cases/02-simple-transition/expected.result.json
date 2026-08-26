@@ -101,8 +101,10 @@
         }
       ],
       "status": "passed",
+      "tuples": [],
       "units": [
         {
+          "bindings": [],
           "candidate_state": [
             "State",
             "Ready"
@@ -135,6 +137,7 @@
           ],
           "invariants": [],
           "kind": "root",
+          "relation_effects": [],
           "resumes": [],
           "state_after": [
             "State",
@@ -151,6 +154,6 @@
       ]
     }
   ],
-  "schema_version": 11,
+  "schema_version": 12,
   "status": "passed"
 }

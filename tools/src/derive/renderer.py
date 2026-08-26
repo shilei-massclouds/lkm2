@@ -1,11 +1,11 @@
-"""Stable human rendering for schema-v11 multi-path derivation results."""
+"""Stable human rendering for schema-v12 multi-path derivation results."""
 
 from __future__ import annotations
 
 import unicodedata
 from typing import TextIO
 
-from .model import DerivationPath, DerivationResult, DerivationUnit
+from .model import DerivationPath, DerivationResult, DerivationTerm, DerivationUnit
 from model_ir import ModelExpression
 
 
@@ -87,6 +87,13 @@ def _expression(expression: ModelExpression) -> str:
     return f"<{expression.kind}>"
 
 
+def _term(term: DerivationTerm) -> str:
+    if term.kind == "string":
+        return repr(term.value)
+    assert isinstance(term.value, tuple)
+    return "::".join(term.value)
+
+
 def _render_unit(
     unit: DerivationUnit,
     depth: int,
@@ -105,6 +112,36 @@ def _render_unit(
         f"{event.mode}s {'::'.join(event.signal)}{arguments}"
     ]
     lines.append(f"{detail_indent}current state: {_special(unit.state_before)}")
+    for binding in unit.bindings:
+        query = (
+            f"{'::'.join(binding.owner)} key {_term(binding.key)}"
+        )
+        if binding.status == "passed":
+            assert binding.value is not None
+            lines.append(
+                f"{detail_indent}binds {binding.name} = {_term(binding.value)} "
+                f"({query})"
+            )
+        else:
+            candidates = (
+                "; candidates: "
+                + ", ".join(_term(item) for item in binding.candidates)
+                if binding.candidates
+                else ""
+            )
+            lines.append(
+                f"{detail_indent}binds {binding.name}: {query}: "
+                f"{binding.failure_code}{candidates} ✗"
+            )
+    for effect in unit.relation_effects:
+        if effect.status != "failed":
+            continue
+        conflicts = ", ".join(_term(item) for item in effect.conflict_values)
+        lines.append(
+            f"{detail_indent}{'::'.join(effect.owner)}.contains("
+            f"{_term(effect.key)}, {_term(effect.value)}): "
+            f"map_key_conflict with {conflicts} ✗"
+        )
     for drive_index in range(len(unit.drives) + 1):
         for switch in unit.switches:
             if switch.after_drives != drive_index:

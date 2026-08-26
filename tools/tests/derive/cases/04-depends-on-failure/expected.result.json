@@ -117,8 +117,10 @@
         }
       ],
       "status": "depends_on_failed",
+      "tuples": [],
       "units": [
         {
+          "bindings": [],
           "candidate_state": [
             "State",
             "Ready"
@@ -162,6 +164,7 @@
           ],
           "invariants": [],
           "kind": "root",
+          "relation_effects": [],
           "resumes": [],
           "state_after": null,
           "state_before": [
@@ -175,6 +178,6 @@
       ]
     }
   ],
-  "schema_version": 11,
+  "schema_version": 12,
   "status": "failed"
 }

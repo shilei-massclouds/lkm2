@@ -4,6 +4,9 @@
 
 推导过程中的信号投递、状态迁移、调度、确定性与穷尽搜索语义以[《信号与系统推导引擎设计备忘录》](../tools/signal-system-inference-engine.md)为准。本文不重复这些语义细节，只规定各工具如何共享模型及如何分阶段落地。
 
+在该总体架构上增加有限 `Relation<K, V>`、`Map<K, V>` 查询与 handler witness
+绑定的增量路线，见[《derive 有限 Relation/Map 逻辑里程碑计划》](finite-relational-derive.md)。
+
 ## 1. 目标与范围
 
 首期工具链分为编译和推导两段：

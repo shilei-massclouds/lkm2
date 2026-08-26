@@ -1,4 +1,4 @@
-"""Data model for derivation root selection and schema-v11 path results."""
+"""Data model for derivation root selection and schema-v12 path results."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from model_ir import ModelExpression, canonicalize_signal_name
 
 
 SEQUENCE_SCHEMA_VERSION = 3
-RESULT_SCHEMA_VERSION = 11
+RESULT_SCHEMA_VERSION = 12
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _MODES = frozenset({"drive", "emit", "yield", "resume"})
 _UNIT_KINDS = frozenset({"root", "drive", "emit", "yield", "resume"})
@@ -40,6 +40,10 @@ _FAILURE_CODES = frozenset(
         "duplicate_runq_task",
         "idle_task_not_queueable",
         "task_not_queued",
+        "relation_key_missing",
+        "relation_key_ambiguous",
+        "map_key_missing",
+        "map_key_conflict",
     }
 )
 _UNIT_STATUSES = frozenset(
@@ -176,6 +180,123 @@ class DerivationFailure:
 
 
 @dataclass(frozen=True, slots=True)
+class DerivationTerm:
+    """A typed String or object-reference runtime term."""
+
+    kind: str
+    type: tuple[str, ...]
+    value: str | tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"string", "object"}:
+            raise DerivationValidationError("term.kind must be 'string' or 'object'")
+        _name(self.type, "term.type")
+        if self.kind == "string":
+            if self.type != ("String",) or type(self.value) is not str:
+                raise DerivationValidationError(
+                    "string term requires type String and a string value"
+                )
+        else:
+            if type(self.value) is not tuple:
+                raise DerivationValidationError("object term value must be a qualified name")
+            _name(self.value, "term.value")
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationBindingResult:
+    name: str
+    type: tuple[str, ...]
+    expression: ModelExpression
+    owner: tuple[str, ...]
+    key: DerivationTerm
+    value: DerivationTerm | None
+    status: str
+    failure_code: str | None = None
+    candidates: tuple[DerivationTerm, ...] = ()
+
+    def __post_init__(self) -> None:
+        if type(self.name) is not str or _IDENTIFIER.fullmatch(self.name) is None:
+            raise DerivationValidationError("binding_result.name must be an identifier")
+        _name(self.type, "binding_result.type")
+        if not isinstance(self.expression, ModelExpression):
+            raise DerivationValidationError(
+                "binding_result.expression must be a ModelExpression"
+            )
+        _name(self.owner, "binding_result.owner")
+        if not isinstance(self.key, DerivationTerm):
+            raise DerivationValidationError("binding_result.key must be a DerivationTerm")
+        if self.value is not None and not isinstance(self.value, DerivationTerm):
+            raise DerivationValidationError(
+                "binding_result.value must be a DerivationTerm or null"
+            )
+        if self.status not in {"passed", "failed"}:
+            raise DerivationValidationError(
+                "binding_result.status must be 'passed' or 'failed'"
+            )
+        allowed_failures = {
+            "relation_key_missing",
+            "relation_key_ambiguous",
+            "map_key_missing",
+        }
+        if (self.status == "passed") != (self.failure_code is None):
+            raise DerivationValidationError(
+                "binding_result failure_code must be null exactly on success"
+            )
+        if self.failure_code is not None and self.failure_code not in allowed_failures:
+            raise DerivationValidationError("invalid binding_result.failure_code")
+        _tuple_of(self.candidates, DerivationTerm, "binding_result.candidates")
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationRelationEffect:
+    owner: tuple[str, ...]
+    container: str
+    key: DerivationTerm
+    value: DerivationTerm
+    status: str
+    conflict_values: tuple[DerivationTerm, ...] = ()
+
+    def __post_init__(self) -> None:
+        _name(self.owner, "relation_effect.owner")
+        if self.container not in {"Relation", "Map"}:
+            raise DerivationValidationError(
+                "relation_effect.container must be Relation or Map"
+            )
+        if not isinstance(self.key, DerivationTerm) or not isinstance(
+            self.value, DerivationTerm
+        ):
+            raise DerivationValidationError(
+                "relation_effect key/value must be DerivationTerm values"
+            )
+        if self.status not in {"established", "failed"}:
+            raise DerivationValidationError(
+                "relation_effect.status must be established or failed"
+            )
+        _tuple_of(
+            self.conflict_values,
+            DerivationTerm,
+            "relation_effect.conflict_values",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DerivationTuple:
+    owner: tuple[str, ...]
+    container: str
+    key: DerivationTerm
+    value: DerivationTerm
+
+    def __post_init__(self) -> None:
+        _name(self.owner, "tuple.owner")
+        if self.container not in {"Relation", "Map"}:
+            raise DerivationValidationError("tuple.container must be Relation or Map")
+        if not isinstance(self.key, DerivationTerm) or not isinstance(
+            self.value, DerivationTerm
+        ):
+            raise DerivationValidationError("tuple key/value must be DerivationTerm values")
+
+
+@dataclass(frozen=True, slots=True)
 class DerivationFrame:
     object: tuple[str, ...]
     handler: tuple[str, ...]
@@ -203,12 +324,13 @@ class DerivationFrame:
 @dataclass(frozen=True, slots=True)
 class DerivationBinding:
     name: str
-    value: tuple[str, ...]
+    term: DerivationTerm
 
     def __post_init__(self) -> None:
         if type(self.name) is not str or _IDENTIFIER.fullmatch(self.name) is None:
             raise DerivationValidationError("binding.name must be an identifier")
-        _name(self.value, "binding.value")
+        if not isinstance(self.term, DerivationTerm):
+            raise DerivationValidationError("binding.term must be a DerivationTerm")
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,6 +413,8 @@ class DerivationUnit:
     directives: tuple[DerivationDirective, ...] = ()
     resumes: tuple[DerivationUnit, ...] = ()
     switches: tuple[DerivationSwitch, ...] = ()
+    bindings: tuple[DerivationBindingResult, ...] = ()
+    relation_effects: tuple[DerivationRelationEffect, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _UNIT_KINDS:
@@ -335,6 +459,32 @@ class DerivationUnit:
         _tuple_of(self.directives, DerivationDirective, "unit.directives")
         _tuple_of(self.resumes, DerivationUnit, "unit.resumes")
         _tuple_of(self.switches, DerivationSwitch, "unit.switches")
+        _tuple_of(self.bindings, DerivationBindingResult, "unit.bindings")
+        _tuple_of(
+            self.relation_effects,
+            DerivationRelationEffect,
+            "unit.relation_effects",
+        )
+        object.__setattr__(
+            self,
+            "relation_effects",
+            tuple(
+                sorted(
+                    self.relation_effects,
+                    key=lambda item: (
+                        item.owner,
+                        item.container,
+                        item.key.kind,
+                        item.key.type,
+                        item.key.value,
+                        item.value.kind,
+                        item.value.type,
+                        item.value.value,
+                        item.status,
+                    ),
+                )
+            ),
+        )
         if self.handler is not None and self.handler != self.event.signal:
             raise DerivationValidationError("unit.handler must match unit.event.signal")
         if self.handler is None and self.candidate_state is not None:
@@ -575,6 +725,7 @@ class DerivationPath:
     current_cpu_ref: tuple[str, ...] | None = None
     event_flows: tuple[DerivationEventFlow, ...] = ()
     interrupt_controls: tuple[DerivationInterruptControl, ...] = ()
+    tuples: tuple[DerivationTuple, ...] = ()
 
     def __post_init__(self) -> None:
         if self.status not in {"passed", "yielded", "cycle_closed", *_FAILURE_CODES}:
@@ -590,6 +741,28 @@ class DerivationPath:
             self.interrupt_controls,
             DerivationInterruptControl,
             "interrupt_controls",
+        )
+        _tuple_of(self.tuples, DerivationTuple, "tuples")
+        if len(set(self.tuples)) != len(self.tuples):
+            raise DerivationValidationError("tuples contains a duplicate tuple")
+        object.__setattr__(
+            self,
+            "tuples",
+            tuple(
+                sorted(
+                    self.tuples,
+                    key=lambda item: (
+                        item.owner,
+                        item.container,
+                        item.key.kind,
+                        item.key.type,
+                        item.key.value,
+                        item.value.kind,
+                        item.value.type,
+                        item.value.value,
+                    ),
+                )
+            ),
         )
         interrupt_cpus = [item.cpu for item in self.interrupt_controls]
         if len(set(interrupt_cpus)) != len(interrupt_cpus):

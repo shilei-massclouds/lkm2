@@ -1,4 +1,4 @@
-"""Strict JSON boundaries for sequence schema v3 and result schema v11."""
+"""Strict JSON boundaries for sequence schema v3 and result schema v12."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from model_ir import ModelExpression, canonicalize_signal_name
 from .model import (
     DerivationCheck,
     DerivationBinding,
+    DerivationBindingResult,
     DerivationContinuation,
     DerivationDirective,
     DerivationEvent,
@@ -22,6 +23,9 @@ from .model import (
     DerivationResult,
     DerivationScheduler,
     DerivationSwitch,
+    DerivationTerm,
+    DerivationTuple,
+    DerivationRelationEffect,
     DerivationSequence,
     DerivationState,
     DerivationUnit,
@@ -215,10 +219,85 @@ def _frame(value: object, path: str) -> DerivationFrame:
 
 
 def _binding(value: object, path: str) -> DerivationBinding:
-    data = _object(value, frozenset({"name", "value"}), path)
+    data = _object(value, frozenset({"name", "term"}), path)
     return DerivationBinding(
         _string(data["name"], f"{path}.name"),
-        _name(data["value"], f"{path}.value"),
+        _term(data["term"], f"{path}.term"),
+    )
+
+
+def _term(value: object, path: str) -> DerivationTerm:
+    data = _object(value, frozenset({"kind", "type", "value"}), path)
+    kind = _string(data["kind"], f"{path}.kind")
+    raw_value = data["value"]
+    if kind == "object":
+        raw_value = _name(raw_value, f"{path}.value")
+    else:
+        raw_value = _string(raw_value, f"{path}.value")
+    return DerivationTerm(kind, _name(data["type"], f"{path}.type"), raw_value)
+
+
+def _binding_result(value: object, path: str) -> DerivationBindingResult:
+    data = _object(
+        value,
+        frozenset(
+            {
+                "name",
+                "type",
+                "expression",
+                "owner",
+                "key",
+                "value",
+                "status",
+                "failure_code",
+                "candidates",
+            }
+        ),
+        path,
+    )
+    failure_code = data["failure_code"]
+    if failure_code is not None:
+        failure_code = _string(failure_code, f"{path}.failure_code")
+    return DerivationBindingResult(
+        _string(data["name"], f"{path}.name"),
+        _name(data["type"], f"{path}.type"),
+        _expression(data["expression"], f"{path}.expression"),
+        _name(data["owner"], f"{path}.owner"),
+        _term(data["key"], f"{path}.key"),
+        None if data["value"] is None else _term(data["value"], f"{path}.value"),
+        _string(data["status"], f"{path}.status"),
+        failure_code,
+        _array(data["candidates"], f"{path}.candidates", _term),
+    )
+
+
+def _relation_effect(value: object, path: str) -> DerivationRelationEffect:
+    data = _object(
+        value,
+        frozenset(
+            {"owner", "container", "key", "value", "status", "conflict_values"}
+        ),
+        path,
+    )
+    return DerivationRelationEffect(
+        _name(data["owner"], f"{path}.owner"),
+        _string(data["container"], f"{path}.container"),
+        _term(data["key"], f"{path}.key"),
+        _term(data["value"], f"{path}.value"),
+        _string(data["status"], f"{path}.status"),
+        _array(data["conflict_values"], f"{path}.conflict_values", _term),
+    )
+
+
+def _tuple(value: object, path: str) -> DerivationTuple:
+    data = _object(
+        value, frozenset({"owner", "container", "key", "value"}), path
+    )
+    return DerivationTuple(
+        _name(data["owner"], f"{path}.owner"),
+        _string(data["container"], f"{path}.container"),
+        _term(data["key"], f"{path}.key"),
+        _term(data["value"], f"{path}.value"),
     )
 
 
@@ -272,6 +351,8 @@ def _unit(value: object, path: str) -> DerivationUnit:
                 "yields",
                 "resumes",
                 "switches",
+                "bindings",
+                "relation_effects",
                 "status",
             }
         ),
@@ -313,6 +394,12 @@ def _unit(value: object, path: str) -> DerivationUnit:
         yields=_array(data["yields"], f"{path}.yields", _unit),
         resumes=_array(data["resumes"], f"{path}.resumes", _unit),
         switches=_array(data["switches"], f"{path}.switches", _switch),
+        bindings=_array(data["bindings"], f"{path}.bindings", _binding_result),
+        relation_effects=_array(
+            data["relation_effects"],
+            f"{path}.relation_effects",
+            _relation_effect,
+        ),
     )
 
 
@@ -402,6 +489,7 @@ def _path(value: object, path: str) -> DerivationPath:
                 "current_cpu_ref",
                 "event_flows",
                 "interrupt_controls",
+                "tuples",
             }
         ),
         path,
@@ -430,11 +518,12 @@ def _path(value: object, path: str) -> DerivationPath:
             f"{path}.interrupt_controls",
             _interrupt_control,
         ),
+        tuples=_array(data["tuples"], f"{path}.tuples", _tuple),
     )
 
 
 def load_derivation_result(stream: TextIO) -> DerivationResult:
-    """Load and strictly validate one schema-v11 result document."""
+    """Load and strictly validate one schema-v12 result document."""
 
     raw = _load_json(stream)
     document = _object(
@@ -499,12 +588,45 @@ def _continuation_data(item: DerivationContinuation) -> dict[str, Any]:
                 "handler": list(frame.handler),
                 "control_index": frame.control_index,
                 "bindings": [
-                    {"name": binding.name, "value": list(binding.value)}
+                    {"name": binding.name, "term": _term_data(binding.term)}
                     for binding in frame.bindings
                 ],
             }
             for frame in item.frames
         ],
+    }
+
+
+def _term_data(term: DerivationTerm) -> dict[str, Any]:
+    return {
+        "kind": term.kind,
+        "type": list(term.type),
+        "value": list(term.value) if term.kind == "object" else term.value,
+    }
+
+
+def _binding_result_data(item: DerivationBindingResult) -> dict[str, Any]:
+    return {
+        "name": item.name,
+        "type": list(item.type),
+        "expression": _expression_data(item.expression),
+        "owner": list(item.owner),
+        "key": _term_data(item.key),
+        "value": None if item.value is None else _term_data(item.value),
+        "status": item.status,
+        "failure_code": item.failure_code,
+        "candidates": [_term_data(term) for term in item.candidates],
+    }
+
+
+def _relation_effect_data(item: DerivationRelationEffect) -> dict[str, Any]:
+    return {
+        "owner": list(item.owner),
+        "container": item.container,
+        "key": _term_data(item.key),
+        "value": _term_data(item.value),
+        "status": item.status,
+        "conflict_values": [_term_data(term) for term in item.conflict_values],
     }
 
 
@@ -537,6 +659,10 @@ def _unit_data(unit: DerivationUnit) -> dict[str, Any]:
             }
             for item in unit.switches
         ],
+        "bindings": [_binding_result_data(item) for item in unit.bindings],
+        "relation_effects": [
+            _relation_effect_data(item) for item in unit.relation_effects
+        ],
         "status": unit.status,
     }
     if unit.failure is not None:
@@ -561,7 +687,7 @@ def dump_derivation_sequence(sequence: DerivationSequence, stream: TextIO) -> No
 
 
 def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
-    """Write one canonical schema-v11 derivation result followed by a newline."""
+    """Write one canonical schema-v12 derivation result followed by a newline."""
 
     if not isinstance(result, DerivationResult):
         raise TypeError("result must be a DerivationResult")
@@ -624,6 +750,15 @@ def dump_derivation_result(result: DerivationResult, stream: TextIO) -> None:
                     "pending": list(item.pending),
                 }
                 for item in path.interrupt_controls
+            ],
+            "tuples": [
+                {
+                    "owner": list(item.owner),
+                    "container": item.container,
+                    "key": _term_data(item.key),
+                    "value": _term_data(item.value),
+                }
+                for item in path.tuples
             ],
         }
         if path.failure is not None:

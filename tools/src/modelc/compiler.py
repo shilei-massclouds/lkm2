@@ -1,7 +1,8 @@
-"""Compilation pipeline from a model-root specification to Model IR v12."""
+"""Compilation pipeline from a model-root specification to Model IR v13."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from lark import Token, Tree
 from model_ir import (
     SCHEMA_VERSION,
     ModelAction,
+    ModelBinding,
     ModelDeferred,
     ModelEntry,
     ModelExpression,
@@ -150,6 +152,12 @@ def _lower_expression(node: Tree | Token) -> ModelExpression:
     if isinstance(node, Token):
         return _token_expression(node)
     raise RuntimeError(f"unexpected expression node {node!r}")
+
+
+def _walk_expression(expression: ModelExpression):
+    yield expression
+    for child in expression.children:
+        yield from _walk_expression(child)
 
 
 def _expression_block(node: Tree) -> tuple[ModelExpression, ...]:
@@ -431,6 +439,27 @@ def _handler_blocks(
 ) -> tuple[ModelHandlerBlock, ...]:
     result: list[ModelHandlerBlock] = []
     bindings: set[str] = set()
+    binding_blocks = tuple(
+        child
+        for child in owner.children
+        if isinstance(child, Tree) and child.data == "binds_block"
+    )
+    if len(binding_blocks) > 1:
+        raise _semantic_error(module, binding_blocks[1], "duplicate binds block")
+    binding_names = tuple(
+        str(statement.children[0])
+        for block in binding_blocks
+        for statement in block.children
+        if isinstance(statement, Tree) and statement.data == "binding_statement"
+    )
+    duplicate_binding = next(
+        (name for index, name in enumerate(binding_names) if name in binding_names[:index]),
+        None,
+    )
+    if duplicate_binding is not None:
+        raise _semantic_error(
+            module, binding_blocks[0], f"duplicate binding {duplicate_binding!r}"
+        )
     switch_names = frozenset(
         str(child.children[0])
         for child in owner.children
@@ -488,6 +517,35 @@ def _handler_blocks(
                     ),
                 )
             )
+        elif rule == "binds_block":
+            declared: list[ModelBinding] = []
+            seen: set[str] = set()
+            all_names = set(binding_names)
+            for statement in child.children:
+                assert isinstance(statement, Tree)
+                name = str(statement.children[0])
+                expression = _lower_expression(statement.children[1])
+                referenced = {
+                    str(node.value)
+                    for node in _walk_expression(expression)
+                    if node.kind == "identifier"
+                }
+                forward = sorted((referenced & all_names) - seen)
+                if forward:
+                    raise _semantic_error(
+                        module,
+                        statement,
+                        f"binding {name!r} references later binding {forward[0]!r}",
+                    )
+                declared.append(
+                    ModelBinding(
+                        name,
+                        ModelTypeExpression(("UnresolvedBinding",)),
+                        expression,
+                    )
+                )
+                seen.add(name)
+            result.append(ModelHandlerBlock("binds", bindings=tuple(declared)))
         elif rule in {"print_statement", "panic_statement"}:
             expression = _lower_expression(child.children[0])
             kind = rule.removesuffix("_statement")
@@ -1028,6 +1086,7 @@ def _rebind_states(
                 block.deferred,
                 block.updates,
                 block.switches,
+                block.bindings,
             )
             for block in values
         )
@@ -1408,17 +1467,40 @@ def _expand_inheritance(
     def resolve_type(
         expression: ModelTypeExpression, module_name: tuple[str, ...]
     ) -> TypeKey:
-        if expression.name == ("Collection",):
-            if len(expression.arguments) != 1:
+        if expression.name in {("Collection",), ("Relation",), ("Map",)}:
+            arity = 1 if expression.name == ("Collection",) else 2
+            if len(expression.arguments) != arity:
                 raise _semantic_error(
                     loaded[module_name],
                     loaded[module_name].tree,
-                    "Collection requires exactly one type argument",
+                    f"{expression.name[0]} requires exactly {arity} type argument(s)",
                 )
-            return (
-                ("Collection",),
-                tuple(resolve_type(item, module_name) for item in expression.arguments),
+            arguments = tuple(
+                resolve_type(item, module_name) for item in expression.arguments
             )
+            if expression.name in {("Relation",), ("Map",)}:
+                for argument in arguments:
+                    if argument[1] or (
+                        argument[0] not in raw_types
+                        and argument[0] != ("String",)
+                    ):
+                        raise _semantic_error(
+                            loaded[module_name],
+                            loaded[module_name].tree,
+                            f"{expression.name[0]} only supports String or object types",
+                        )
+            return (
+                expression.name,
+                arguments,
+            )
+        if expression.name == ("String",):
+            if expression.arguments:
+                raise _semantic_error(
+                    loaded[module_name],
+                    loaded[module_name].tree,
+                    "String does not accept type arguments",
+                )
+            return (("String",), ())
         name = resolve_base(expression, module_name)
         if expression.arguments:
             raise _semantic_error(
@@ -1437,7 +1519,7 @@ def _expand_inheritance(
             return True
         actual_name, actual_arguments = actual
         expected_name, _ = expected
-        if actual_arguments or actual_name == ("Collection",):
+        if actual_arguments or actual_name in {("Collection",), ("Relation",), ("Map",), ("String",)}:
             return False
         cursor = actual_name
         seen: set[tuple[str, ...]] = set()
@@ -1453,6 +1535,18 @@ def _expand_inheritance(
             if arguments:
                 return False
         return False
+
+    for type_name, model_type in expanded_types.items():
+        for field in model_type.fields or ():
+            if field.mutable and resolve_type(field.type, type_name[:-1]) == (
+                ("String",),
+                (),
+            ):
+                raise _semantic_error(
+                    loaded[type_name[:-1]],
+                    type_nodes[type_name],
+                    "mutable String fields are not supported",
+                )
 
     task_types = tuple(name for name in raw_types if name[-1] == "Task")
     task_flow_types = tuple(name for name in raw_types if name[-1] == "TaskFlow")
@@ -2142,6 +2236,60 @@ def _expand_inheritance(
         parameters: dict[str, TypeKey],
         fields: dict[str, ModelField],
     ) -> TypeKey | None:
+        if expression.kind == "string":
+            return (("String",), ())
+        if expression.kind == "call":
+            callee = expression.children[0]
+            if callee.kind == "member":
+                owner = resolve_object_expression(callee.children[0], module_name)
+                if owner is not None:
+                    container = object_type(owner)
+                    if container[0] in {("Relation",), ("Map",)}:
+                        method = str(callee.value)
+                        arguments = expression.children[1:]
+                        allowed = (
+                            {"contains", "has_key", "unique_value"}
+                            if container[0] == ("Relation",)
+                            else {"contains", "has_key", "lookup"}
+                        )
+                        if method not in allowed:
+                            raise _semantic_error(
+                                loaded[module_name],
+                                object_nodes[source] if source in object_nodes else loaded[module_name].tree,
+                                f"{container[0][0]} has no method {method!r}",
+                            )
+                        expected_arity = 2 if method == "contains" else 1
+                        if len(arguments) != expected_arity:
+                            raise _semantic_error(
+                                loaded[module_name],
+                                object_nodes[source] if source in object_nodes else loaded[module_name].tree,
+                                f"{container[0][0]}.{method} expects {expected_arity} argument(s)",
+                            )
+                        expected_types = container[1] if method == "contains" else container[1][:1]
+                        for index, (argument, expected) in enumerate(
+                            zip(arguments, expected_types, strict=True)
+                        ):
+                            actual = expression_type(
+                                argument, module_name, source, parameters, fields
+                            )
+                            if actual is None or not compatible(actual, expected):
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    object_nodes[source] if source in object_nodes else loaded[module_name].tree,
+                                    f"{container[0][0]}.{method} argument {index + 1} has incompatible type",
+                                )
+                        return (
+                            container[1][1]
+                            if method in {"unique_value", "lookup"}
+                            else (("bool",), ())
+                        )
+        if expression.kind == "unary" and expression.value == "!":
+            expression_type(expression.children[0], module_name, source, parameters, fields)
+            return (("bool",), ())
+        if expression.kind == "binary":
+            expression_type(expression.children[0], module_name, source, parameters, fields)
+            expression_type(expression.children[1], module_name, source, parameters, fields)
+            return (("bool",), ())
         access = _flatten_access(expression)
         if access in task_owned_selectors:
             if source is None or not is_task_object(source):
@@ -2233,6 +2381,160 @@ def _expand_inheritance(
             return None if field is None else resolve_type(field.type, source[:-1])
         object_name = resolve_object_expression(expression, module_name)
         return None if object_name is None else object_type(object_name)
+
+    def binding_type_expression(value: TypeKey) -> ModelTypeExpression:
+        name, arguments = value
+        return ModelTypeExpression(
+            name,
+            tuple(binding_type_expression(argument) for argument in arguments),
+        )
+
+    def rewrite_handler_bindings(
+        model_object: ModelObject, handler: ModelTransition | ModelAction
+    ) -> ModelTransition | ModelAction:
+        module_name = model_object.name[:-1]
+        fields = {field.name: field for field in model_object.attrs or ()}
+        environment = {
+            parameter.name: resolve_type(parameter.type, module_name)
+            for parameter in handler.parameters
+        }
+        environment["self"] = object_type(model_object.name)
+        binding_blocks = tuple(block for block in handler.blocks if block.kind == "binds")
+        if len(binding_blocks) > 1:
+            raise _semantic_error(
+                loaded[module_name], object_nodes[model_object.name], "duplicate binds block"
+            )
+        rewritten: dict[int, ModelHandlerBlock] = {}
+        for block in binding_blocks:
+            values: list[ModelBinding] = []
+            for binding in block.bindings:
+                if binding.name in environment:
+                    raise _semantic_error(
+                        loaded[module_name],
+                        object_nodes[model_object.name],
+                        f"binding {binding.name!r} conflicts with a handler parameter or local binding",
+                    )
+                expression = binding.expression
+                if expression.kind != "call" or expression.children[0].kind != "member":
+                    raise _semantic_error(
+                        loaded[module_name],
+                        object_nodes[model_object.name],
+                        "binding right-hand side must be Relation.unique_value or Map.lookup",
+                    )
+                callee = expression.children[0]
+                owner = resolve_object_expression(callee.children[0], module_name)
+                container = None if owner is None else object_type(owner)
+                method = str(callee.value)
+                if container is None or not (
+                    container[0] == ("Relation",) and method == "unique_value"
+                    or container[0] == ("Map",) and method == "lookup"
+                ):
+                    raise _semantic_error(
+                        loaded[module_name],
+                        object_nodes[model_object.name],
+                        "binding right-hand side must match Relation.unique_value or Map.lookup",
+                    )
+                inferred = expression_type(
+                    expression, module_name, model_object.name, environment, fields
+                )
+                assert inferred is not None
+                values.append(replace(binding, type=binding_type_expression(inferred)))
+                environment[binding.name] = inferred
+            rewritten[id(block)] = replace(block, bindings=tuple(values))
+        blocks = tuple(rewritten.get(id(block), block) for block in handler.blocks)
+        return replace(handler, blocks=blocks)
+
+    # Binding types are part of schema-v13 IR, so infer and freeze them before
+    # the ordinary handler expression/signature validation below.
+    for name, model_object in tuple(expanded_objects.items()):
+        states = tuple(
+            replace(
+                state,
+                transitions=tuple(
+                    rewrite_handler_bindings(model_object, handler)
+                    for handler in state.transitions
+                ),
+                actions=tuple(
+                    rewrite_handler_bindings(model_object, handler)
+                    for handler in state.actions
+                ),
+            )
+            for state in model_object.states
+        )
+        expanded_objects[name] = replace(model_object, states=states)
+
+    def rewrite_type_handler_bindings(
+        model_type: ModelType, handler: ModelTransition | ModelAction
+    ) -> ModelTransition | ModelAction:
+        module_name = model_type.name[:-1]
+        fields = {field.name: field for field in model_type.fields or ()}
+        environment = {
+            parameter.name: resolve_type(parameter.type, module_name)
+            for parameter in handler.parameters
+        }
+        environment["self"] = (model_type.name, ())
+        rewritten: dict[int, ModelHandlerBlock] = {}
+        for block in (item for item in handler.blocks if item.kind == "binds"):
+            values: list[ModelBinding] = []
+            for binding in block.bindings:
+                if binding.name in environment:
+                    raise _semantic_error(
+                        loaded[module_name],
+                        type_nodes[model_type.name],
+                        f"binding {binding.name!r} conflicts with a handler parameter or local binding",
+                    )
+                expression = binding.expression
+                if expression.kind != "call" or expression.children[0].kind != "member":
+                    raise _semantic_error(
+                        loaded[module_name],
+                        type_nodes[model_type.name],
+                        "binding right-hand side must be Relation.unique_value or Map.lookup",
+                    )
+                callee = expression.children[0]
+                relation_owner = resolve_object_expression(
+                    callee.children[0], module_name
+                )
+                container = (
+                    None if relation_owner is None else object_type(relation_owner)
+                )
+                method = str(callee.value)
+                if container is None or not (
+                    container[0] == ("Relation",) and method == "unique_value"
+                    or container[0] == ("Map",) and method == "lookup"
+                ):
+                    raise _semantic_error(
+                        loaded[module_name],
+                        type_nodes[model_type.name],
+                        "binding right-hand side must match Relation.unique_value or Map.lookup",
+                    )
+                inferred = expression_type(
+                    expression, module_name, None, environment, fields
+                )
+                assert inferred is not None
+                values.append(replace(binding, type=binding_type_expression(inferred)))
+                environment[binding.name] = inferred
+            rewritten[id(block)] = replace(block, bindings=tuple(values))
+        return replace(
+            handler,
+            blocks=tuple(rewritten.get(id(block), block) for block in handler.blocks),
+        )
+
+    for name, model_type in tuple(expanded_types.items()):
+        states = tuple(
+            replace(
+                state,
+                transitions=tuple(
+                    rewrite_type_handler_bindings(model_type, handler)
+                    for handler in state.transitions
+                ),
+                actions=tuple(
+                    rewrite_type_handler_bindings(model_type, handler)
+                    for handler in state.actions
+                ),
+            )
+            for state in model_type.states
+        )
+        expanded_types[name] = replace(model_type, states=states)
 
     signatures: dict[
         tuple[tuple[str, ...], tuple[str, ...]], tuple[ModelParameter, ...]
@@ -2363,8 +2665,39 @@ def _expand_inheritance(
         owner = object_nodes[name]
         module_name = name[:-1]
         fields = {field.name: field for field in model_object.attrs or ()}
+        for invariant in (
+            expression
+            for state in model_object.states
+            for block in state.invariants
+            for expression in block
+        ):
+            for nested in _walk_expression(invariant):
+                if nested.kind != "call" or nested.children[0].kind != "member":
+                    continue
+                callee = nested.children[0]
+                relation_owner = resolve_object_expression(
+                    callee.children[0], module_name
+                )
+                if relation_owner is None or object_type(relation_owner)[0] not in {
+                    ("Relation",),
+                    ("Map",),
+                }:
+                    continue
+                if str(callee.value) in {"unique_value", "lookup"}:
+                    raise _semantic_error(
+                        loaded[module_name],
+                        owner,
+                        "unique_value and lookup may only appear in a binds block",
+                    )
+                expression_type(nested, module_name, name, {}, fields)
         for field in fields.values():
             declared_type = resolve_type(field.type, module_name)
+            if field.mutable and declared_type == (("String",), ()):
+                raise _semantic_error(
+                    loaded[module_name],
+                    owner,
+                    "mutable String fields are not supported",
+                )
             if field.default is not None:
                 actual = expression_type(
                     field.default, module_name, name, {}, fields
@@ -2378,8 +2711,52 @@ def _expand_inheritance(
         for state in model_object.states:
             for handler in (*state.transitions, *state.actions):
                 environment = parameter_types(handler.parameters, module_name)
+                relation_binding_names: set[str] = set()
+                for binding in (
+                    binding
+                    for block in handler.blocks
+                    if block.kind == "binds"
+                    for binding in block.bindings
+                ):
+                    environment[binding.name] = resolve_type(binding.type, module_name)
+                    relation_binding_names.add(binding.name)
                 switch_count = 0
                 for block in handler.blocks:
+                    if block.kind == "binds":
+                        continue
+                    for expression in block.expressions:
+                        for nested in _walk_expression(expression):
+                            if nested.kind != "call" or nested.children[0].kind != "member":
+                                continue
+                            callee = nested.children[0]
+                            relation_owner = resolve_object_expression(
+                                callee.children[0], module_name
+                            )
+                            if relation_owner is None or object_type(relation_owner)[0] not in {
+                                ("Relation",),
+                                ("Map",),
+                            }:
+                                continue
+                            method = str(callee.value)
+                            if method in {"unique_value", "lookup"}:
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "unique_value and lookup may only appear in a binds block",
+                                )
+                            if block.kind == "establishes" and method != "contains":
+                                raise _semantic_error(
+                                    loaded[module_name],
+                                    owner,
+                                    "establishes only accepts Relation/Map.contains effects",
+                                )
+                            expression_type(
+                                nested,
+                                module_name,
+                                name,
+                                environment,
+                                fields,
+                            )
                     if block.kind == "switches":
                         switch_count += 1
                         if (
@@ -2544,6 +2921,17 @@ def _expand_inheritance(
                         )
                     for update in block.updates:
                         access = _flatten_access(update.target)
+                        if (
+                            access is not None
+                            and len(access[0]) == 1
+                            and not access[1]
+                            and access[0][0] in relation_binding_names
+                        ):
+                            raise _semantic_error(
+                                loaded[module_name],
+                                owner,
+                                f"binding {access[0][0]!r} is read-only and cannot be updated",
+                            )
                         if access is not None and any(
                             segment
                             in {

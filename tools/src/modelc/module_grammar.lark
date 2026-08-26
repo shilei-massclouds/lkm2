@@ -90,6 +90,7 @@ handler_body: "{" handler_item* "}"
              | resumes_statement
              | switches_statement
              | updates_block
+             | binds_block
              | deferred_declaration
 depends_on_block: "depends_on" expression_block
 may_change_block: "may_change" expression_block
@@ -105,6 +106,8 @@ emits_block: "emits" signal_body
 ?signal_body: expression_block | expression ";" -> single_signal_body
 updates_block: "updates" "{" update_statement* "}"
 update_statement: assignable_expression "=" expression ";"
+binds_block: "binds" "{" binding_statement+ "}"
+binding_statement: IDENTIFIER ":=" expression ";"
 expression_block: "{" expression_statement* "}"
 
 deferred_declaration: "deferred" IDENTIFIER "." DECIMAL_INTEGER "{" deferred_item* "}"

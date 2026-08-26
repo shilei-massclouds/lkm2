@@ -121,8 +121,10 @@
         }
       ],
       "status": "passed",
+      "tuples": [],
       "units": [
         {
+          "bindings": [],
           "candidate_state": [
             "State",
             "Done"
@@ -131,6 +133,7 @@
           "directives": [],
           "drives": [
             {
+              "bindings": [],
               "candidate_state": [
                 "State",
                 "Done"
@@ -140,6 +143,7 @@
               "drives": [],
               "emits": [
                 {
+                  "bindings": [],
                   "candidate_state": [
                     "State",
                     "Done"
@@ -172,6 +176,7 @@
                   ],
                   "invariants": [],
                   "kind": "emit",
+                  "relation_effects": [],
                   "resumes": [],
                   "state_after": [
                     "State",
@@ -210,6 +215,7 @@
               ],
               "invariants": [],
               "kind": "drive",
+              "relation_effects": [],
               "resumes": [],
               "state_after": [
                 "State",
@@ -254,6 +260,7 @@
           ],
           "invariants": [],
           "kind": "root",
+          "relation_effects": [],
           "resumes": [],
           "state_after": [
             "State",
@@ -270,6 +277,6 @@
       ]
     }
   ],
-  "schema_version": 11,
+  "schema_version": 12,
   "status": "passed"
 }

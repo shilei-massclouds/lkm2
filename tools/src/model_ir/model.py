@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v12."""
+"""Frozen data model and semantic validation for Model IR schema v13."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -27,6 +27,7 @@ _BLOCK_KINDS = frozenset(
         "panic",
         "deferred",
         "switches",
+        "binds",
     }
 )
 _SIGNAL_MODES = frozenset({"drive", "emit", "yield", "resume"})
@@ -342,6 +343,22 @@ class ModelUpdate:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelBinding:
+    """One ordered, read-only handler-local lookup binding."""
+
+    name: str
+    type: ModelTypeExpression
+    expression: ModelExpression
+
+    def __post_init__(self) -> None:
+        _validate_identifier(self.name, "binding.name")
+        if not isinstance(self.type, ModelTypeExpression):
+            raise ModelIRValidationError("binding.type must be a ModelTypeExpression")
+        if not isinstance(self.expression, ModelExpression):
+            raise ModelIRValidationError("binding.expression must be a ModelExpression")
+
+
+@dataclass(frozen=True, slots=True)
 class ModelDeferred:
     name: str
     number: str
@@ -371,6 +388,7 @@ class ModelHandlerBlock:
     deferred: ModelDeferred | None = None
     updates: tuple[ModelUpdate, ...] = ()
     switches: str | None = None
+    bindings: tuple[ModelBinding, ...] = ()
 
     def __post_init__(self) -> None:
         if self.kind not in _BLOCK_KINDS:
@@ -378,10 +396,11 @@ class ModelHandlerBlock:
         _validate_tuple(self.expressions, ModelExpression, "handler_block.expressions")
         _validate_tuple(self.signals, ModelSignal, "handler_block.signals")
         _validate_tuple(self.updates, ModelUpdate, "handler_block.updates")
+        _validate_tuple(self.bindings, ModelBinding, "handler_block.bindings")
         if self.switches is not None:
             _validate_identifier(self.switches, "handler_block.switches")
         if self.kind in {"drives", "yields", "emits", "resumes"}:
-            if self.expressions or self.deferred is not None or self.updates or self.switches is not None:
+            if self.expressions or self.deferred is not None or self.updates or self.switches is not None or self.bindings:
                 raise ModelIRValidationError(f"{self.kind} block may only contain signals")
             expected_mode = {
                 "drives": "drive",
@@ -392,18 +411,26 @@ class ModelHandlerBlock:
             if any(signal.mode != expected_mode for signal in self.signals):
                 raise ModelIRValidationError(f"{self.kind} block has a mismatched signal mode")
         elif self.kind == "deferred":
-            if self.expressions or self.signals or self.deferred is None or self.updates or self.switches is not None:
+            if self.expressions or self.signals or self.deferred is None or self.updates or self.switches is not None or self.bindings:
                 raise ModelIRValidationError("deferred block must contain one deferred declaration")
         elif self.kind == "updates":
-            if self.expressions or self.signals or self.deferred is not None or self.switches is not None:
+            if self.expressions or self.signals or self.deferred is not None or self.switches is not None or self.bindings:
                 raise ModelIRValidationError("updates block may only contain updates")
         elif self.kind == "switches":
-            if self.expressions or self.signals or self.deferred is not None or self.updates or self.switches is None:
+            if self.expressions or self.signals or self.deferred is not None or self.updates or self.switches is None or self.bindings:
                 raise ModelIRValidationError(
                     "switches block must contain exactly one binding"
                 )
+        elif self.kind == "binds":
+            if self.expressions or self.signals or self.deferred is not None or self.updates or self.switches is not None:
+                raise ModelIRValidationError("binds block may only contain bindings")
+            if not self.bindings:
+                raise ModelIRValidationError("binds block must contain at least one binding")
+            names = tuple(binding.name for binding in self.bindings)
+            if len(set(names)) != len(names):
+                raise ModelIRValidationError("binds block contains a duplicate binding")
         elif self.kind in {"print", "panic"}:
-            if self.signals or self.deferred is not None or self.updates or self.switches is not None:
+            if self.signals or self.deferred is not None or self.updates or self.switches is not None or self.bindings:
                 raise ModelIRValidationError(
                     f"{self.kind} block may only contain one string expression"
                 )
@@ -411,8 +438,70 @@ class ModelHandlerBlock:
                 raise ModelIRValidationError(
                     f"{self.kind} block requires exactly one string expression"
                 )
-        elif self.signals or self.deferred is not None or self.updates or self.switches is not None:
+        elif self.signals or self.deferred is not None or self.updates or self.switches is not None or self.bindings:
             raise ModelIRValidationError(f"{self.kind} block may only contain expressions")
+
+
+def _expression_identifiers(expression: ModelExpression) -> set[str]:
+    result = (
+        {str(expression.value)} if expression.kind == "identifier" else set()
+    )
+    for child in expression.children:
+        result.update(_expression_identifiers(child))
+    return result
+
+
+def _validate_handler_locals(
+    blocks: tuple[ModelHandlerBlock, ...],
+    parameters: tuple[ModelParameter, ...],
+) -> None:
+    binding_blocks = tuple(block for block in blocks if block.kind == "binds")
+    if len(binding_blocks) > 1:
+        raise ModelIRValidationError("handler may contain at most one binds block")
+    bindings = tuple(
+        binding for block in binding_blocks for binding in block.bindings
+    )
+    names = tuple(binding.name for binding in bindings)
+    reserved = {
+        "self",
+        "CurrentTaskRef",
+        "CurrentCPU",
+        "TaskFlowRef",
+        "ResumeTargetRef",
+        "InterruptFlowRef",
+        "ExceptionFlowRef",
+        "SyscallExitFlowRef",
+        "InterruptControlRef",
+    }
+    parameter_names = {parameter.name for parameter in parameters}
+    switch_names = {
+        block.switches
+        for block in blocks
+        if block.kind == "switches" and block.switches is not None
+    }
+    conflicts = set(names) & (parameter_names | switch_names | reserved)
+    if conflicts:
+        raise ModelIRValidationError(
+            f"binding {sorted(conflicts)[0]!r} conflicts with a handler local"
+        )
+    all_names = set(names)
+    seen: set[str] = set()
+    for binding in bindings:
+        forward = (_expression_identifiers(binding.expression) & all_names) - seen
+        if forward:
+            raise ModelIRValidationError(
+                f"binding {binding.name!r} references later binding {sorted(forward)[0]!r}"
+            )
+        seen.add(binding.name)
+    for block in blocks:
+        if block.kind != "updates":
+            continue
+        for update in block.updates:
+            access = _expression_access(update.target)
+            if access is not None and access[0][0] in all_names:
+                raise ModelIRValidationError(
+                    f"binding {access[0][0]!r} is read-only and cannot be updated"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,6 +535,7 @@ class ModelTransition:
         names = tuple(parameter.name for parameter in self.parameters)
         if len(set(names)) != len(names):
             raise ModelIRValidationError("duplicate transition parameter")
+        _validate_handler_locals(self.blocks, self.parameters)
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +561,7 @@ class ModelAction:
         names = tuple(parameter.name for parameter in self.parameters)
         if len(set(names)) != len(names):
             raise ModelIRValidationError("duplicate action parameter")
+        _validate_handler_locals(self.blocks, self.parameters)
 
 
 @dataclass(frozen=True, slots=True)

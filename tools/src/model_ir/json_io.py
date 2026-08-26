@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v12."""
+"""Strict JSON loading and canonical JSON output for Model IR v13."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from typing import Any, Callable, TextIO, TypeVar
 
 from .model import (
     ModelAction,
+    ModelBinding,
     ModelDeferred,
     ModelEntry,
     ModelExpression,
@@ -197,6 +198,15 @@ def _update(value: object, path: str) -> ModelUpdate:
     )
 
 
+def _binding(value: object, path: str) -> ModelBinding:
+    data = _require_object(value, frozenset({"name", "type", "expression"}), path)
+    return ModelBinding(
+        name=_string(data["name"], f"{path}.name"),
+        type=_type_expression(data["type"], f"{path}.type"),
+        expression=_expression(data["expression"], f"{path}.expression"),
+    )
+
+
 def _deferred(value: object, path: str) -> ModelDeferred:
     data = _require_object(
         value,
@@ -216,7 +226,7 @@ def _deferred(value: object, path: str) -> ModelDeferred:
 def _handler_block(value: object, path: str) -> ModelHandlerBlock:
     data = _require_object(
         value,
-        frozenset({"kind", "expressions", "signals", "deferred", "updates", "switches"}),
+        frozenset({"kind", "expressions", "signals", "deferred", "updates", "switches", "bindings"}),
         path,
     )
     deferred = data["deferred"]
@@ -229,6 +239,7 @@ def _handler_block(value: object, path: str) -> ModelHandlerBlock:
         switches=None
         if data["switches"] is None
         else _string(data["switches"], f"{path}.switches"),
+        bindings=_array(data["bindings"], f"{path}.bindings", _binding),
     )
 
 
@@ -357,7 +368,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v12 JSON document."""
+    """Load and strictly validate one Model IR schema-v13 JSON document."""
 
     try:
         raw = json.load(
@@ -442,6 +453,14 @@ def _block_data(block: ModelHandlerBlock) -> dict[str, Any]:
             for item in block.updates
         ],
         "switches": block.switches,
+        "bindings": [
+            {
+                "name": item.name,
+                "type": _type_expr_data(item.type),
+                "expression": _expr_data(item.expression),
+            }
+            for item in block.bindings
+        ],
     }
 
 

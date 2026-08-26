@@ -127,8 +127,10 @@
         }
       ],
       "status": "unhandled_signal",
+      "tuples": [],
       "units": [
         {
+          "bindings": [],
           "candidate_state": [
             "State",
             "Done"
@@ -137,6 +139,7 @@
           "directives": [],
           "drives": [
             {
+              "bindings": [],
               "candidate_state": [
                 "State",
                 "Done"
@@ -169,6 +172,7 @@
               ],
               "invariants": [],
               "kind": "drive",
+              "relation_effects": [],
               "resumes": [],
               "state_after": [
                 "State",
@@ -183,6 +187,7 @@
               "yields": []
             },
             {
+              "bindings": [],
               "candidate_state": null,
               "depends_on": [],
               "directives": [],
@@ -215,6 +220,7 @@
               "handler": null,
               "invariants": [],
               "kind": "drive",
+              "relation_effects": [],
               "resumes": [],
               "state_after": null,
               "state_before": [
@@ -251,6 +257,7 @@
           ],
           "invariants": [],
           "kind": "root",
+          "relation_effects": [],
           "resumes": [],
           "state_after": null,
           "state_before": [
@@ -264,6 +271,6 @@
       ]
     }
   ],
-  "schema_version": 11,
+  "schema_version": 12,
   "status": "failed"
 }
