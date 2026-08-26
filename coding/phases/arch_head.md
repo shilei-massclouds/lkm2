@@ -52,6 +52,21 @@ trap、两次 `gp`、两阶段 `sp`、trampoline SATP、early SATP 与重定位�
 只在本编码约束展开，不建立寄存器属性对象或额外过程型 Phase。此模型重构不改变现有
 Rust 实现、导出符号、C ABI、checkpoint 调用和 QEMU debug 输出协议。
 
+## Checkpoint 覆盖关系
+
+现有 VM checkpoint 套件只覆盖 `setup_vm` 的 MMU-off 构表语义。Vm 完成 Setup 后的 Ready
+关系、KernelMap/trampoline/early 页表 Ready invariant，以及 early kernel image 和 firmware
+DTB 映射，均已由冻结的 28 个 VM canonical ID 覆盖。
+
+ArchHead 自身不进入该 ID 集合：`CurrentTaskRef`、KernelImage/BSS、BootStack，以及 interrupt、
+虚拟 `gp`、FS/VS、hart id、SATP 激活、trap context 和 SoC early init 等最终事实，继续由
+derive、本文 coding 契约和实现测试验证。ArchHead 的 `establishes` 不生成实现 checkpoint，
+其 scope 外的 `ensures` 也不得并入 VM 映射。
+
+如果后续需要对这些最终硬件状态做运行时观测，应建立独立的 ArchHead checkpoint 套件及
+观测 ABI 和验收入口，不扩展 `tools/checkpoints/vm.json`，也不改变既有 Linux `setup_vm`
+差分协议。
+
 ## 入口与重定位顺序
 
 当前 RISC-V 64 位机器入口按以下顺序建立 MMU-off 执行环境：

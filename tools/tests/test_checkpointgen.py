@@ -49,6 +49,39 @@ class CheckpointGeneratorTests(unittest.TestCase):
             tuple(item.canonical_id for item in self.mapping.checkpoints),
         )
 
+    def test_vm_checkpoint_scope_is_frozen(self) -> None:
+        self.assertEqual(self.mapping.module, ("objects", "vm"))
+        self.assertEqual(self.mapping.root_object, "Vm")
+        self.assertEqual(
+            self.mapping.begins_after,
+            "arch_head_stack_established",
+        )
+
+    def test_vm_ready_and_early_mapping_checkpoint_ids_remain_present(self) -> None:
+        checkpoints = build_checkpoints(self.model, self.mapping)
+        ids = {item.canonical_id for item in checkpoints}
+        self.assertTrue(
+            {
+                "Vm.Setup.Ensures.KernelMap.Ready",
+                "Vm.Setup.Ensures.TrampolinePageTable.Ready",
+                "Vm.Setup.Ensures.EarlyPageTable.Ready",
+                "Vm.Ready.Invariant.KernelMap.Ready",
+                "Vm.Ready.Invariant.TrampolinePageTable.Ready",
+                "Vm.Ready.Invariant.EarlyPageTable.Ready",
+                "EarlyPageTable.Ready.Invariant.early_kernel_image_mapping_established",
+                "EarlyPageTable.Ready.Invariant.early_dtb_four_mib_mapping_established",
+            }.issubset(ids)
+        )
+
+    def test_arch_head_objects_do_not_enter_vm_checkpoint_ids(self) -> None:
+        checkpoints = build_checkpoints(self.model, self.mapping)
+        id_parts = {
+            part
+            for item in checkpoints
+            for part in item.canonical_id.split(".")
+        }
+        self.assertTrue({"ArchHead", "KernelImage", "BootStack"}.isdisjoint(id_parts))
+
     def test_inherited_invariants_are_concrete_object_declarations(self) -> None:
         checkpoints = build_checkpoints(self.model, self.mapping)
         ids = {item.canonical_id: item.hash16 for item in checkpoints}

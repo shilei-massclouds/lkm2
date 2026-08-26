@@ -21,6 +21,22 @@ Rust 声明必须使用 `extern "C"` 和 `u64` 参数，C 声明使用 `uint64_t
 的参数名顺序。观测值必须来自实际 KernelMap、SATP 和页表表项；二进制镜像大小、末叶子
 地址、页表页地址和 root PPN 不属于跨实现协议。
 
+## VM 与 ArchHead 覆盖边界
+
+VM checkpoint 的提取 scope 固定为 `objects.vm / Vm / arch_head_stack_established`，只描述
+`setup_vm` 在 MMU-off 环境构造 KernelMap、trampoline 和 early 页表的语义。现有 28 项已经
+覆盖 Vm 完成 Setup 后的 Ready 关系、三类页表 Ready invariant、early kernel image 映射和
+early DTB 映射；这些事实不得通过追加 ArchHead checkpoint 重复表达。
+
+ArchHead 的 `ensures` 位于上述 scope 之外，`establishes` 按生成规则不产生实现 checkpoint。
+因此 CurrentTask、KernelImage/BSS、BootStack、interrupt mask/pending、虚拟 `gp`、FS/VS、
+hart id、SATP 激活、trap context 和 SoC early init 等事实，只由 model derive、ArchHead coding
+契约和实现测试检查。它们不得进入 VM canonical ID 集合，也不得改变六个里程碑、生成 ABI、
+实现调用点或 Linux sibling 指纹。
+
+若未来需要运行时观测 ArchHead 的最终硬件状态，必须新增独立的 ArchHead checkpoint 套件，
+并单独设计 scope、实现映射、观测 ABI 和验收入口；不得扩展 `tools/checkpoints/vm.json`。
+
 ## 生成边界与 handler
 
 独立的 `checkpointgen` 消费 Model IR 和受版本控制映射，生成 canonical manifest、Rust
