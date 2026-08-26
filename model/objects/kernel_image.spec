@@ -2,8 +2,6 @@
 
 use model::systems::kernel::Kernel;
 
-predicate kernel_image_bss_cleared() -> bool;
-
 type KernelImageType;
 
 object KernelImage: KernelImageType {
@@ -13,9 +11,6 @@ object KernelImage: KernelImageType {
     state State::Loaded {
         transitions {
             on Transition::ClearBss -> State::Ready {
-                establishes {
-                    kernel_image_bss_cleared();
-                }
             }
         }
 
@@ -30,8 +25,5 @@ object KernelImage: KernelImageType {
     }
 
     state State::Ready {
-        invariant {
-            kernel_image_bss_cleared();
-        }
     }
 }

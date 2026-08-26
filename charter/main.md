@@ -10,4 +10,12 @@
 
 除本页的总体定位外，大部分章程内容暂不编写。各占位页中的模型链接仅用于当前阶段的映射和追踪，不表示模型是章程的约束来源。
 
+## 事实边界
+
+生命周期状态足以表达的结果不得再用同一对象 transition 建立零信息增量的同义 predicate，
+再由该对象的目标状态 invariant 自行确认。需要保留 predicate 或 Relation/Map tuple 时，必须
+至少具有一条独立边界：目标 invariant 同时消费其他对象产生的 backing fact，或该输出事实
+由另一个对象明确消费。纯推导器机制 fixture 可以为验证事务回滚保留最小自检模型，但不得
+作为生产模型设计先例。
+
 临时模型映射：[model/main.spec](../model/main.spec)

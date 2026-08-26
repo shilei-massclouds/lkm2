@@ -15,13 +15,16 @@ trap、IRQ/timekeeping 初始化和硬件 Unmask 留给后续实现阶段。
    Console 可以尚未 Online；
 3. 驱动 `DtbBlob.Transition::Enable`，从其 `/chosen/bootargs` 子关系把唯一的
    `earlycon` 值复制到静态存在、初始为空的 `BootCommandLine`；
-4. 驱动 `EarlyConsole.Transition::Enable`，依次查询命令行和静态 earlycon 注册表，
-   建立 backend binding 和 Printk Console 注册事实；
-5. 驱动 `Cpu0Scheduler.Transition::Enable`，使 CPU0 Scheduler 进入 Online；
-6. 最后驱动 `CurrentCPU.InterruptControlRef.Action::Unmask`；
-7. 仅在 Banner、DtbBlob、EarlyConsole、Scheduler 均为 Online，且命令行存在
-   `earlycon` 键后建立 `early_boot_interrupts_enabled()`；EarlyBoot 不约束该键的具体
-   外部输入值。
+4. 驱动 `SbiCapability.Transition::Enable`，对应 `sbi_init()` 提交探测完成状态及实际可用的
+   SBI console capability；
+5. 驱动 `EarlyConsole.Transition::Enable`，依次查询命令行和静态 earlycon 注册表，
+   静态嵌套驱动 `SbiConsole.Transition::Enable`，确认查询所得 backend 已 Online 后原子建立
+   backend 字段、binding 和 Printk Console 注册事实；
+6. 驱动 `Cpu0Scheduler.Transition::Enable`，使 CPU0 Scheduler 进入 Online；
+7. 最后驱动 `CurrentCPU.InterruptControlRef.Action::Unmask`；
+8. 仅在 Banner、DtbBlob、SbiCapability、EarlyConsole、Scheduler 均为 Online，命令行存在
+   `earlycon` 键，且 backend binding 与 Printk 注册事实均已由 EarlyConsole 提交后，建立
+   `early_boot_interrupts_enabled()`；EarlyBoot 不约束该键的具体外部输入值。
 
 Unmask 必须始终是 EarlyBoot 的最后一个 drive；任何后续引入的 architecture、memory、
 trap、IRQ、timer 或 timekeeping 初始化都只能插入它之前，并需要独立冻结 ownership、状态
@@ -33,9 +36,19 @@ trap、IRQ、timer 或 timekeeping 初始化都只能插入它之前，并需要
 失败时，Banner 已经 Online，但后续 EarlyConsole、Scheduler 和 Unmask drive 均不得发生；
 Online 不表示 DTB 内存失效。
 
-当前 M3 在 Kernel Setup 中提前完成 `EarlyConTable.Link`；EarlyBoot 不驱动 Link，也不改变
-既有 Banner → DtbBlob → EarlyConsole → Scheduler → Unmask 顺序。到
-`EarlyConsole.Enable` 查询 registry 时，Kernel Setup 已保证表为 Ready 且包含 SBI 条目。
+已完成的 M3 在 Kernel Setup 中提前完成 `EarlyConTable.Link`；EarlyBoot 不驱动 Link。
+当前 M4 在 DtbBlob 与 EarlyConsole 之间增加 `SbiCapability.Enable`，EarlyBoot 因此具有六个
+直接 drive，并冻结 Banner → DtbBlob → SbiCapability → EarlyConsole → Scheduler → Unmask
+顺序。
+到 `EarlyConsole.Enable` 查询 registry 时，Kernel Setup 已保证表为 Ready 且包含 SBI 条目。
+正式表只含 SBI backend，因此 nested drive 是静态目标；当前编译器的动态 signal target
+范围不包含 relation/map binding，禁止把 `backend` binding 直接用作 signal target。
+
+若 capability 探测完成却没有有效 transport，`SbiConsole.depends_on` 必须失败；若唯一选择或
+上游 backing invariant 失败，或前置 binding 失败，
+`EarlyConsole` 不提交 backend 字段、binding 或 Printk 注册事实，Scheduler、Unmask 与
+BootSetup 均不得继续；已经完成的 Banner、DtbBlob 与 SbiCapability 前序 drive 及其
+availability 事实保留，失败的 `SbiConsole` 子 drive 不提交 Online 或 selection 事实。
 
 BootSetup 入口复查 `early_boot_interrupts_enabled()`、BootTask current/OnCpu 和 Scheduler
 Online，之后只驱动 `KernelInitTask` 的 Preset、Setup、Enable。BootHandoff 仍拥有首次

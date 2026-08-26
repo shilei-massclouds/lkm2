@@ -177,6 +177,10 @@ derive 请求。Transition handler 必须声明 `Transition::Preset`；Model IR 
 type 支持单继承；modelc 按 base type、derived type、object 展开字段、state、
 invariant 和 handler，并检查显式 `override`、抽象 handler、继承环与 continuation
 的唯一 `State::Online` 生命周期。`continuation: true` 只能由 type 声明且不可取消。
+生产模型另由 `test_model_design.py` 执行事实边界 lint：若 transition 建立的事实只被同一
+对象目标 invariant 读取，既没有其他对象产生 backing fact，也没有其他对象消费该输出，
+测试即失败。该规则不属于 Model IR 合法性，因此用于验证引擎事务语义的独立 fixture 不受
+限制。
 continuation 的 `yields` 目标立即深度优先执行；未启动时 `resumes X.Action::Enter`
 从默认入口开始，yield 后从保存断点恢复，完成后再次 resumes 返回
 `no_resumable_continuation`。外部进入 continuation 必须使用 resumes，普通 emits

@@ -2,7 +2,7 @@
 
 ## 核心对象
 
-正式模型当前固定以下六个 console 选择对象：
+正式模型当前固定以下七个 console 选择对象：
 
 - `DtbBlob: DtbBlobType`：Kernel 持有的 DTB 输入，Online 表示 bootargs 已被观察并复制；
 - `ChosenBootArgs: Relation<String, String>`：`DtbBlob` 的子对象，表示
@@ -10,6 +10,7 @@
 - `BootCommandLine: Relation<String, String>`：内核已经观察到的启动命令行键值；
 - `EarlyConTable: Map<String, EarlyConsoleBackendType>`：`KernelImage` 持有的链接期 early
   console backend 注册表；
+- `SbiCapability: SbiCapabilityType`：Kernel 持有的 SBI 探测结果；
 - `SbiConsole: EarlyConsoleBackendType`：SBI early console backend；
 - `EarlyConsole: ConsoleType`：根据命令行和注册表绑定 backend 的前端对象。
 
@@ -28,16 +29,27 @@ ChosenBootArgs["earlycon"]
     -> DtbBlob.Enable
     -> BootCommandLine["earlycon"]
     -> "sbi"
+
+SbiCapability.Enable
+    -> sbi_dbcn_available(SbiCapability)
+
+BootCommandLine["earlycon"]
     -> EarlyConsole.Enable
     -> lookup EarlyConTable["sbi"]
     -> SbiConsole
+    -> SbiConsole.Enable
+    -> consume SbiCapability availability
+    -> sbi_console_uses_dbcn(SbiConsole)
+    -> SbiConsole.state == State::Online
     -> EarlyConsole.state == State::Online
     -> printk_console_registered(Printk, EarlyConsole)
 ```
 
 `BootCommandLine` 对象静态存在且初始为空；`DtbBlob.Enable` 增加的是 tuple 内容，
-不是动态创建命令行对象。`EarlyConsole` 不静态引用 `SbiConsole`；具体 backend 只能来自
-有限关系查询。
+不是动态创建命令行对象。具体 backend 仍只能来自有限关系查询；正式表当前只含 SBI
+backend，因此 `EarlyConsole.Enable` 在 binding 之后静态驱动 `SbiConsole.Enable`，不把
+binding 变量作为动态 signal target。EarlyBoot 的生产者—消费者顺序固定为 Banner →
+DtbBlob → SbiCapability → EarlyConsole（nested SbiConsole）→ Scheduler → Unmask。
 
 ## M1：输入已就绪时完成绑定（已完成）
 
@@ -77,14 +89,15 @@ OpenSBI 只负责固件生命周期与 Kernel handoff，不建立上述三个 re
 `DtbProperties`、`SetupArch` 或 `parse_dtb` 具名阶段。DtbBlob Online 只表示 bootargs
 已被内核观察并复制，不表示 DTB 所在内存已经失效。M2 的当前验收输入是
 `earlycon=sbi`，但 EarlyBoot 只断言键存在；字符串扫描、命令行合并优先级、其他 DT
-属性和 SBI capability 留给后续里程碑。
+属性以及 SBI capability 的原始探测对象在 M2 尚未进入 model；M4 只新增其提交后的有效
+availability 抽象。
 
 M2 完成标准是 Setup 产生 chosen bootargs 与 registry 两个 relation effect；Banner 的唯一
 ensure 与 DtbBlob 的 binding、同值 relation effect 和两项 ensures 全部通过；默认轨迹包含
 五步 EarlyBoot drive，最终保留三个 tuple、backend 字段、registry binding 和 Printk
 Console 注册事实。
 
-## M3：EarlyConTable 链接期注册生命周期（当前）
+## M3：EarlyConTable 链接期注册生命周期（已完成）
 
 - `EarlyConTable` 改为 `KernelImage` 子对象，初始为 Base，且只有唯一
   `Link: Base → Ready`；`KernelImage` 自身的初始 Loaded 与 ArchHead ClearBss 生命周期保持
@@ -109,13 +122,56 @@ Console 注册事实。
 Link 单元产生；默认输出显示 Kernel Setup 驱动 Link；既有成功路径、缺失 DTB bootargs、
 Printk 注册和 `BootCommandLine.has_key("earlycon")` 回归保持通过。
 
-## 后续里程碑
+## M4：收紧 SbiConsole 可用性（当前）
 
-### M4：收紧 SbiConsole 可用性
+- 新增 Kernel-owned `SbiCapabilityType` 与 `SbiCapability`，初始为 Ready，且只有唯一
+  `Enable: Ready → Online`；默认 Enable 建立
+  `sbi_dbcn_available(SbiCapability)`。Online 只表示探测完成，允许没有 transport，也允许
+  DBCN/v0.1 同时可用；
+- 两个上游输入 predicate 是 `sbi_dbcn_available(SbiCapability)` 与
+  `sbi_v01_console_available(SbiCapability)`；后者合并抽象 legacy SBI 和构建配置形成的有效
+  fallback，不新增 Config 对象；
+- 保留 `sbi_console_uses_dbcn(SbiConsole)` 与
+  `sbi_console_uses_v01(SbiConsole)` 两个下游选择事实。`SbiConsole` 初始为 Ready，且只有
+  唯一 `Enable: Ready → Online`；Enable depends_on 要求 SbiCapability Online 且至少一项
+  availability 成立，默认只建立 DBCN selection；
+- SbiConsole Online invariant 要求恰好选择一个 transport、选择必须有对应的上游依据，并且
+  仅在 DBCN 不可用时允许 v0.1 fallback；SbiConsole 不得自行建立 availability；
+- `EarlyConsole.Enable` 保持 BootCommandLine → EarlyConTable 的 binding 顺序，不再要求
+  backend 在入口前 Online。binding 完成后静态驱动 `SbiConsole.Enable`，再确保查询所得
+  backend Online，最后提交 backend 字段、registry binding 与 Printk Console 注册事实；
+- 正式表只含 `sbi → SbiConsole`，因此静态 nested drive 不引入多 backend 分派。当前编译器
+  只允许 Task、CPU、runtime 与 InterruptControl 动态 signal target，不使用 relation/map
+  binding 变量作为动态 target；
+- Kernel Setup 与 EarlyConTable Link 保持不变；EarlyBoot 从五个直接 drive 增为六个，在
+  DtbBlob 与 EarlyConsole 之间插入 SbiCapability，并冻结 Banner → DtbBlob →
+  SbiCapability → EarlyConsole → Scheduler → Unmask。成功交接额外确保 capability Online。
 
-把 `SbiConsole` 的初始 Online 事实细化为实际所需的 SBI console capability，区分
-DBCN 与 SBI v0.1，并补齐缺失、歧义、未注册和 backend 不可用在正式启动链上的失败
-验证。
+Coding 映射固定为 `SbiCapability.Enable ↔ sbi_init()`，由它完成 version/DBCN extension
+probe；`SbiConsole.Enable ↔ early_sbi_setup()`，由它按 DBCN →
+`CONFIG_RISCV_SBI_V01` → `-ENODEV` 选择。固定 sibling 默认
+配置关闭 v0.1，因此默认成功轨迹固定为 DBCN；v0.1 只作为替代配置测试路径。SBI 原始
+版本、extension probe 结果、Config 对象、函数指针、逐消息写入与运行时写错误不进入本轮
+model。Rust `impl/`、推导工具与独立 `tools/tests/fixtures/early_console` relation fixture
+保持不变。
+
+失败验收覆盖：删除 capability availability effect 时，Capability 保持 Online，而
+SbiConsole 以 `depends_on_failed` 停止；同时建立两个 selection 时互斥 invariant 失败；DBCN
+仍可用却强选 v0.1 时 backing/优先级 invariant 失败。为同一 bootargs key 建立两个 value
+仍得到 `relation_key_ambiguous`，选择未注册 key 仍得到 `map_key_missing`。所有 Console
+失败都不提交 `EarlyConsole.backend`、registry binding、Printk 注册或 selection，不启用
+Scheduler、Unmask IRQ 或 BootSetup；已经提交的 capability 状态与 availability 按前序事务
+边界保留。
+
+成功变体覆盖：同时把 availability 与 selection 替换为 v0.1，验证 fallback 注册成功；同时
+建立 DBCN/v0.1 availability 时默认仍选择 DBCN 并成功。缺失 DTB bootargs、M3 Link failure、
+`BootCommandLine.has_key("earlycon")` 与完整启动成功回归继续保留。
+
+完成标准：默认轨迹证明 capability 的 Ready 初态、唯一 Enable 与 DBCN availability effect，
+六个 EarlyBoot 直接 drive，SbiConsole 的上游 depends_on、DBCN selection 和 backing invariant，
+以及最终同时保留 availability、selection、backend 字段和注册事实；上述成功/失败变体均保持
+正确快照与 fail-stop 顺序，
+`make derive`、`make test`、`make difftest` 和 `git diff --check` 全部通过。
 
 每个里程碑独立保持可推导、可回归；后续工作替换上一阶段的抽象来源，不改变
 BootCommandLine、EarlyConTable、SbiConsole、EarlyConsole 及两次 backend 查询的选择

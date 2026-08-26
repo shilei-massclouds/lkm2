@@ -71,6 +71,11 @@ tools/
 
 Model IR 应表达推导和未来代码生成共同需要的语义，而不是保存 Lark parse tree 或照搬源文件表面语法。首期 schema 只需覆盖当前 `model/**/*.spec` 及首版推导器所需信息，并保留版本演进空间。
 
+生产模型在通用编译合法性之外执行仓库级 design lint。当前规则拒绝闭环自证：transition
+建立的事实若被同一对象目标状态 invariant 读取，必须同时具有其他对象产生的 backing，或
+成为另一个对象明确消费的输出。该检查有意不进入通用 modelc 语义，因为独立推导器 fixture
+需要构造最小的 self-validation 来验证 invariant rollback。
+
 ## 4. 公共库接口与数据边界
 
 公共库预期至少提供以下稳定入口：

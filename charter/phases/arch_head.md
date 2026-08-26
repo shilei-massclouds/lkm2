@@ -11,15 +11,19 @@ ArchHead 必须严格按以下顺序驱动，任何一步失败都不得伪造�
 
 1. `CurrentCPU.InterruptControlRef.MaskAll`；
 2. `CurrentCPU.InterruptControlRef.ClearPending`；
-3. `KernelImage.Action::ClearBss`，令 Loaded → Ready 并建立 BSS cleared；
+3. `KernelImage.Action::ClearBss`，令 Loaded → Ready；Ready 状态本身表示 BSS cleared；
 4. `BootTask.Action::ResetCurrent`，首次发布 `CurrentTaskRef == BootTask`；
-5. `BootStack.Preset`，令 Base → Prepared，发布 MMU-off 物理栈；
+5. `BootStack.Preset`，令 Base → Prepared；Prepared 状态本身表示 MMU-off 物理栈就绪；
 6. `Vm.Preset → Vm.Setup`，令 Base → Prepared → Ready；
-7. `BootStack.Setup`，令 Prepared → Ready，发布 early 虚拟 current-task stack。
+7. `BootStack.Setup`，令 Prepared → Ready；Ready 状态本身表示 early 虚拟 current-task
+   stack 就绪。
 
 KernelImage 是 Kernel-owned 对象；BootStack 是 BootTask-owned 对象。ResetCurrent 不清
 Task 数据结构，也不初始化 stack，因此三者不得合并为一个隐式动作。FDT 暂不建立对象，
 其身份和物理地址继续由 OpenSBI handoff 与编码契约保证。
+
+KernelImage 与 BootStack 不另建由自身 transition 建立、再由自身 invariant 复查的同义
+predicate；实现细节由 coding 契约约束，对外模型交接只消费其 lifecycle state。
 
 ## StartKernel 交接
 

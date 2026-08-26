@@ -32,6 +32,10 @@ ArchHead 的 model drive 与实现顺序逐项对应：
 驱动完成后，KernelImage、BootStack 与 Vm 必须分别为 Ready，且
 `CurrentTaskRef == BootTask`。ArchHead 再发布可由 StartKernel 独立检查的交接事实：
 
+KernelImage Ready 已完整代表 BSS cleared，BootStack Prepared/Ready 已分别代表物理栈和
+early 虚拟栈就绪；实现动作不再对应额外的同义 predicate，避免对象建立事实后仅由自己
+复查。
+
 | Model 后置事实 | 实现事实 |
 | --- | --- |
 | `arch_head_interrupts_masked()` | `_start_kernel` 已清零 `sie`；结果快照中的 BootCPU interrupt mode 为 `Masked`。 |

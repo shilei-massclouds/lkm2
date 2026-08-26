@@ -36,6 +36,7 @@ USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
 BOOT_CPU = ("objects", "cpu", "BootCPU")
 EARLY_CONSOLE = ("objects", "early_console", "EarlyConsole")
 DTB_BLOB = ("objects", "early_console", "DtbBlob")
+SBI_CAPABILITY = ("objects", "early_console", "SbiCapability")
 BANNER = ("objects", "printk", "Banner")
 
 
@@ -228,6 +229,7 @@ class BootSchedulerModelTests(unittest.TestCase):
             (
                 (BANNER, ("Transition", "Enable")),
                 (DTB_BLOB, ("Transition", "Enable")),
+                (SBI_CAPABILITY, ("Transition", "Enable")),
                 (EARLY_CONSOLE, ("Transition", "Enable")),
                 (CPU0_SCHEDULER, ("Transition", "Enable")),
                 (
@@ -266,7 +268,10 @@ class BootSchedulerModelTests(unittest.TestCase):
             {
                 "Banner == State::Online",
                 "DtbBlob == State::Online",
+                "SbiCapability == State::Online",
                 "EarlyConsole == State::Online",
+                "early_console_bound_from_registry(EarlyConsole, SbiConsole)",
+                "printk_console_registered(Printk, EarlyConsole)",
                 "Cpu0Scheduler == State::Online",
                 'BootCommandLine.has_key("earlycon")',
             }.issubset({check.expression for check in early_boot.ensures})
@@ -278,6 +283,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(
             tuple(unit.event.signal for unit in early_boot.drives),
             (
+                ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),

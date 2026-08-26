@@ -41,8 +41,29 @@ println! → Printk → registered Console → selected backend
 其他 earlycon backend。表遍历、section 起止地址、`struct earlycon_id` 布局、setup
 函数指针和链接器布局均属于 coding/impl，不进入 model。
 
-`early_sbi_setup` 对 DBCN、SBI v0.1 和 backend 不可用的运行时选择属于 M4；M3 的 Link 只
-表示静态条目已进入 KernelImage。Rust `impl/` 在本轮保持不变。
+## SBI capability 与 Console transport 边界
+
+Linux sibling 的生产者—消费者映射固定为：
+
+1. `SbiCapability.Enable ↔ arch/riscv/kernel/sbi.c::sbi_init()`：先完成 SBI
+   specification version 探测；仅当版本
+   至少为 2.0 且 `sbi_probe_extension(SBI_EXT_DBCN) > 0` 时，才令
+   `sbi_debug_console_available` 成立。Model 以
+   `sbi_dbcn_available(SbiCapability)` 表示该有效输入，以
+   `sbi_v01_console_available(SbiCapability)` 合并表达 legacy SBI 与
+   `CONFIG_RISCV_SBI_V01` 共同形成的有效 fallback 输入；
+2. `SbiConsole.Enable ↔ drivers/tty/serial/earlycon-riscv-sbi.c::early_sbi_setup()`：优先在
+   DBCN 可用时选择
+   `sbi_dbcn_console_write`；否则仅在 `CONFIG_RISCV_SBI_V01` 启用时选择
+   `sbi_0_1_console_write`；两者均不可用时返回 `-ENODEV`，不得注册 Console。
+
+固定 sibling 的默认 `.config` 关闭 `CONFIG_RISCV_SBI_V01`，因此默认成功轨迹只能选择
+DBCN；v0.1 只作为替代构建配置下的测试路径。Model 中的
+`sbi_console_uses_dbcn(SbiConsole)` 与 `sbi_console_uses_v01(SbiConsole)` 只记录上述 setup
+完成后的互斥选择结果；它们不得代替前述 availability 输入。SBI 原始版本、
+`SBI_EXT_DBCN` probe 结果、Config 对象、
+`struct console.write` 函数指针、DBCN 逐次写入循环、v0.1 逐字符写入以及运行时写错误都留在
+coding/impl 层，不进入本轮 model。Rust `impl/` 保持不变。
 
 格式化、ring buffer、记录序号、flush/replay、锁和 SBI 调用属于 coding/impl 机制。
 Checkpoint debugcon 继续作为独立的极早期观测通道，不经过上述 Printk/Console 链，也不

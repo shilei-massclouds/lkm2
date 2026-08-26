@@ -113,10 +113,16 @@ OpenSBI -> Kernel: emits Transition::Enable
       current state: State::Ready
       binds value = 'sbi' (objects::early_console::ChosenBootArgs key 'earlycon')
       commit state: State::Online
+    EarlyBoot -> SbiCapability: drives Transition::Enable
+      current state: State::Ready
+      commit state: State::Online
     EarlyBoot -> EarlyConsole: drives Transition::Enable
       current state: State::Ready
       binds value = 'sbi' (objects::early_console::BootCommandLine key 'earlycon')
       binds backend = objects::early_console::SbiConsole (objects::early_console::EarlyConTable key 'sbi')
+      EarlyConsole -> SbiConsole: drives Transition::Enable
+        current state: State::Ready
+        commit state: State::Online
       commit state: State::Online
     EarlyBoot -> Cpu0Scheduler: drives Transition::Enable
       current state: State::Ready
