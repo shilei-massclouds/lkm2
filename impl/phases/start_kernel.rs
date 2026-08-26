@@ -2,12 +2,19 @@
 
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
 use crate::objects::early_dtb_mapping;
+use crate::objects::printk::EarlyPrintk;
 use crate::systems::sbi::{Ecall, SbiCapability, SbiConsole};
+
+const BANNER: &[u8] = b"LKM2 kernel\n";
 
 // SAFETY: this is the sole definition of the linker-visible `start_kernel`
 // symbol, and its C ABI matches the tail call from the naked ArchHead entry.
 #[unsafe(export_name = "start_kernel")]
 pub(crate) extern "C" fn start_kernel() -> ! {
+    let mut printk = EarlyPrintk::<SbiConsole<Ecall>>::new();
+    if printk.record(BANNER).is_err() {
+        fail_stop();
+    }
     let dtb = match early_dtb_mapping() {
         Some(dtb) => dtb,
         None => fail_stop(),
@@ -25,13 +32,13 @@ pub(crate) extern "C" fn start_kernel() -> ! {
         Ok(capability) => capability,
         Err(_) => fail_stop(),
     };
-    let mut console = match backend {
+    let console = match backend {
         EarlyConsoleBackend::Sbi => match SbiConsole::enable(capability, sbi_call) {
             Ok(console) => console,
             Err(_) => fail_stop(),
         },
     };
-    if console.write(&[]).is_err() {
+    if printk.register_console(console).is_err() {
         fail_stop();
     }
     fail_stop()

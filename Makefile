@@ -12,8 +12,12 @@ endif
 
 all: build
 
-setup test-derive test-smoke:
+setup test-derive:
 	$(TOOLS_MAKE) $@
+
+test-smoke:
+	$(TOOLS_MAKE) $@
+	$(IMPL_MAKE) $@
 
 test:
 	$(TOOLS_MAKE) test

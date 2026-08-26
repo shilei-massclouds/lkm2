@@ -70,3 +70,14 @@ Checkpoint debugcon 继续作为独立的极早期观测通道，不经过上述
 因 Banner 生命周期而改变。model 不新增 `Printk.Action::Emit`、
 `EarlyConsole.Action::Write(message)` 或消息级 predicate；只有未来需要验证缓冲、丢弃、
 replay 或多 Console cursor 时，才引入相应抽象行为。
+
+## M5 固定缓冲与注册提交
+
+M5 的 `EarlyPrintk` 只服务单 boot hart、interrupt-masked 前缀，持有 4096 字节固定 FIFO
+缓冲，不分配、不加锁，也不实现覆盖式 ring。`LKM2 kernel\n` 必须在任何 DTB 解析和 SBI
+调用之前提交；未注册 Console 时记录只追加到缓冲，容量不足整条失败且不部分追加。
+
+Console 注册先用候选 Console 完整回放缓冲，成功后才清空缓冲并提交 registered 状态；
+回放途中 DBCN 已产生的外部字节不可回滚，但内部仍保留原缓冲和未注册状态。成功注册后
+再次注册失败，后续记录直接写 Console。任何 replay 或直接写错误都上送 StartKernel
+fail-stop。该实现不引入正式 model 刻意省略的消息 Action、cursor 或 buffer 对象。

@@ -172,6 +172,15 @@ impl<C: SbiCall> SbiConsole<C> {
     }
 }
 
+#[cfg(not(test))]
+impl<C: SbiCall> crate::objects::printk::ConsoleWrite for SbiConsole<C> {
+    type Error = SbiWriteError;
+
+    fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        SbiConsole::write(self, bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

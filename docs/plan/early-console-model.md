@@ -174,7 +174,7 @@ Scheduler、Unmask IRQ 或 BootSetup；已经提交的 capability 状态与 avai
 正确快照与 fail-stop 顺序，
 `make derive`、`make test`、`make difftest` 和 `git diff --check` 全部通过。
 
-## M5：EarlyConsole DBCN 运行时实现（当前）
+## M5：EarlyConsole DBCN 运行时实现（已完成）
 
 M5 不再修改上述正式模型，而是把已经冻结的生产者—消费者链实现到 Rust：Banner 先进入
 固定 Printk 缓冲，内核从 ArchHead 建立的只读 DTB fixmap 中校验并复制唯一
@@ -185,6 +185,12 @@ M5a 实现 DTB 输入、无外部 crate 的 FDT/bootargs 解析和唯一链接�
 SBI 调用边界、capability 与 DBCN backend；M5c 实现 Printk 缓冲、原子注册语义和 QEMU
 smoke runner。M5 只实现 EarlyBoot 的可运行前缀，不实现 Scheduler、Unmask、BootSetup 或
 SBI v0.1。正式模型保留 v0.1 替代路径，coding 文档明确其 Rust 实现仍未覆盖。
+
+完成实现保持 `setup_vm` ABI、正式 model、relation fixture、28 项 VM checkpoint 与 sibling
+patch 不变。宿主逻辑测试分别覆盖 FDT/命令行/registry、SBI capability/DBCN 参数与错误、
+Printk FIFO/溢出/注册提交；默认 QEMU/OpenSBI smoke 已确认 `LKM2 kernel\n` 只出现一次并
+回收进程。运行前缀在成功回放后仍保持中断屏蔽并停驻，没有越界实现 Scheduler、Unmask 或
+BootSetup。
 
 每个里程碑独立保持可推导、可回归；后续工作替换上一阶段的抽象来源，不改变
 BootCommandLine、EarlyConTable、SbiConsole、EarlyConsole 及两次 backend 查询的选择

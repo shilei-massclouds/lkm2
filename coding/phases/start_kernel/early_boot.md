@@ -71,3 +71,9 @@ backend 必须由链接脚本保留的 `EarlyConTable` 唯一查询产生，不�
 而跳过 registry。后续 capability probe 只接受 SBI >= 2.0 且 DBCN probe 为正；Rust 不实现
 正式模型仍保留的 SBI v0.1 fallback。任何输入、查询、探测、输出或注册失败都保持中断屏蔽
 并 fail-stop，不得继续 Scheduler、Unmask 或 BootSetup。
+
+实际 StartKernel 前缀严格执行：先把固定 banner 交给 Printk，再取得 DTB 映射并建立
+`BootCommandLine`，查询链接期 backend，依次构造 `SbiCapability` 与 `SbiConsole`，最后由
+Printk 注册并回放。DBCN 输出使用 `CONSOLE_WRITE_BYTE`，避免早期虚址到物理地址转换；每次
+SBI error 都立即终止链。默认 QEMU bootargs 是 `earlycon=sbi`，smoke runner 不启用也不
+检查 checkpoint debugcon。

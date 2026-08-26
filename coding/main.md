@@ -8,6 +8,9 @@ impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
                                       -> impl/objects/vm.rs
                                       -> impl/systems/kernel.rs
                                       -> impl/phases/start_kernel.rs
+                                          -> impl/objects/early_console.rs
+                                          -> impl/systems/sbi.rs
+                                          -> impl/objects/printk.rs
 ```
 
 对应的主要编码契约为：

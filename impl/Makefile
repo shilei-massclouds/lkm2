@@ -4,7 +4,7 @@
 include build.mak
 include qemu.mak
 
-.PHONY: all build checkpoints checkpoint-sibling-patch checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-early-console test-sbi test-empty-elision test-checkpoints fmt clippy run clean help FORCE
+.PHONY: all build checkpoints checkpoint-sibling-patch checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints fmt clippy run clean help FORCE
 
 all: build
 
@@ -30,13 +30,19 @@ difftest:
 
 checkpoint-diff-sv57: difftest
 
-test: build fmt clippy test-early-console test-sbi test-empty-elision test-checkpoints
+test: build fmt clippy test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints
 
 test-early-console: $(EARLY_CONSOLE_TEST)
 	$(EARLY_CONSOLE_TEST)
 
 test-sbi: $(SBI_TEST)
 	$(SBI_TEST)
+
+test-printk: $(PRINTK_TEST)
+	$(PRINTK_TEST)
+
+test-smoke: build
+	./tests/early_console_smoke.sh -- $(QEMU) $(QEMU_FLAGS)
 
 test-empty-elision:
 	$(MAKE) --no-print-directory CHECKPOINT_HANDLER=empty build
@@ -89,6 +95,8 @@ help:
 	@echo "  test   Build and run formatting and Clippy checks"
 	@echo "  test-early-console Run host-side FDT and earlycon registry unit tests"
 	@echo "  test-sbi Run host-side SBI capability and DBCN unit tests"
+	@echo "  test-printk Run host-side early Printk buffer and replay unit tests"
+	@echo "  test-smoke Confirm the DBCN banner once and cleanly stop QEMU"
 	@echo "  test-checkpoints Run Sv57/Sv48/Sv39 lkm2 checkpoint self-tests"
 	@echo "  test-empty-elision Verify the optimized empty handler leaves no calls or output"
 	@echo "  fmt    Check Rust source formatting"

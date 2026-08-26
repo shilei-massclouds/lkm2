@@ -20,6 +20,7 @@
 make setup
 make build
 make test
+make test-smoke
 make derive
 make run
 make clean
@@ -27,8 +28,11 @@ make clean
 
 根目录 `make build` 依次构建工具链与 Rust 实现，`make clean` 清理这两个组件的构建
 产物。`make derive` 仍对应 `make -C tools run`；`make run` 对应
-`make -C impl run`，会构建 raw kernel image 并使用 QEMU virt/OpenSBI 启动。入口空壳
-不会产生 LKM2 串口输出，并会一直停驻；在 QEMU 终端中按 `Ctrl-a x` 退出。
+`make -C impl run`，会构建 raw kernel image 并使用 QEMU virt/OpenSBI 启动。当前运行前缀
+默认传入 `earlycon=sbi`，经 DTB、链接期 backend 表和 SBI DBCN probe 注册 EarlyConsole，
+回放一次 `LKM2 kernel` 后在中断屏蔽状态停驻；在 QEMU 终端中按 `Ctrl-a x` 退出。
+`make test-smoke` 同时运行工具 smoke 和实现 smoke；后者带 10 秒超时，精确确认该横幅只
+出现一次，并主动清理 QEMU 进程。
 
 根目录 `make derive` 与组件入口 `make -C tools run` 默认显式使用
 `tools/signals/parked.signals`。推导会完成 BootCPU/CPU0 Scheduler 初始化、首次
@@ -65,3 +69,5 @@ apply/diff 目标会校验冻结的 sibling。生成 patch 不会修改、暂存
 `make -C impl CHECKPOINT_HANDLER=debugcon build` 生成原始 SBI DBCN 记录；
 `make -C impl test-checkpoints` 会分别验证 Sv57、Sv48 和 Sv39。checkpoint ABI、28 项冻结
 清单以及 sibling 审查门见 [`coding/checkpoints.md`](coding/checkpoints.md)。
+checkpoint debugcon 是独立于 `Printk → EarlyConsole → SbiConsole` 的观测通道；启动横幅
+及其 smoke test 不依赖 checkpoint handler。

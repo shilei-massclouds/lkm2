@@ -1,5 +1,6 @@
 pub(crate) mod cpu;
 pub(crate) mod early_console;
+pub(crate) mod printk;
 mod ptrace;
 mod task;
 mod vm;
