@@ -4,7 +4,7 @@
 include build.mak
 include qemu.mak
 
-.PHONY: all build checkpoints checkpoint-sibling-patch checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-empty-elision test-checkpoints fmt clippy run clean help FORCE
+.PHONY: all build checkpoints checkpoint-sibling-patch checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-early-console test-empty-elision test-checkpoints fmt clippy run clean help FORCE
 
 all: build
 
@@ -30,7 +30,10 @@ difftest:
 
 checkpoint-diff-sv57: difftest
 
-test: build fmt clippy test-empty-elision test-checkpoints
+test: build fmt clippy test-early-console test-empty-elision test-checkpoints
+
+test-early-console: $(EARLY_CONSOLE_TEST)
+	$(EARLY_CONSOLE_TEST)
 
 test-empty-elision:
 	$(MAKE) --no-print-directory CHECKPOINT_HANDLER=empty build
@@ -81,6 +84,7 @@ help:
 	@echo "  difftest Build sibling and run the strict Sv57 differential"
 	@echo "  checkpoint-diff-sv57 Compatibility alias for difftest"
 	@echo "  test   Build and run formatting and Clippy checks"
+	@echo "  test-early-console Run host-side FDT and earlycon registry unit tests"
 	@echo "  test-checkpoints Run Sv57/Sv48/Sv39 lkm2 checkpoint self-tests"
 	@echo "  test-empty-elision Verify the optimized empty handler leaves no calls or output"
 	@echo "  fmt    Check Rust source formatting"

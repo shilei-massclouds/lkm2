@@ -29,7 +29,14 @@ SECTIONS
     .rodata : AT(ADDR(.rodata) - LOAD_OFFSET) ALIGN(4K)
     {
         *(.rodata .rodata.*)
+
+        . = ALIGN(8);
+        __earlycon_table_start = .;
+        KEEP(*(.earlycon.table))
+        __earlycon_table_end = .;
     }
+    ASSERT((__earlycon_table_end - __earlycon_table_start) == 24,
+           "exactly one earlycon backend must be linked")
 
     .data : AT(ADDR(.data) - LOAD_OFFSET) ALIGN(4K)
     {

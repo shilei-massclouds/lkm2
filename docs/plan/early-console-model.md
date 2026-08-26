@@ -77,8 +77,9 @@ M1 证明正式启动推导可以消费已经准备好的输入：
   `ChosenBootArgs.unique_value("earlycon")` 得到同一个值，建立
   `BootCommandLine.contains("earlycon", value)`，并在源、目标 relation 都包含该值后
   进入 Online；
-- `EarlyBoot.Action::Enter` 严格依次启用 `Banner`、`DtbBlob`、`EarlyConsole`、
-  `Cpu0Scheduler`，最后执行 local IRQ Unmask；成功交接时四个对象均为 Online，且
+- M2 当时的 `EarlyBoot.Action::Enter` 严格依次启用 `Banner`、`DtbBlob`、`EarlyConsole`、
+  `Cpu0Scheduler`，最后执行 local IRQ Unmask；M4 已在 DtbBlob 与 EarlyConsole 之间加入
+  `SbiCapability`；成功交接时相应对象均为 Online，且
   `BootCommandLine` 存在 `earlycon` 键；具体值属于 DTB 输入，不是 EarlyBoot 契约；
 - 缺失 DTB bootargs 时，Banner 已为 Online，DtbBlob binding 以
   `relation_key_missing` 失败，不建立 `BootCommandLine` tuple，也不继续启用
@@ -94,8 +95,8 @@ availability 抽象。
 
 M2 完成标准是 Setup 产生 chosen bootargs 与 registry 两个 relation effect；Banner 的唯一
 ensure 与 DtbBlob 的 binding、同值 relation effect 和两项 ensures 全部通过；默认轨迹包含
-五步 EarlyBoot drive，最终保留三个 tuple、backend 字段、registry binding 和 Printk
-Console 注册事实。
+当时的五步 EarlyBoot drive，最终保留三个 tuple、backend 字段、registry binding 和 Printk
+Console 注册事实；当前完整模型为六步 drive。
 
 ## M3：EarlyConTable 链接期注册生命周期（已完成）
 
@@ -122,7 +123,7 @@ Console 注册事实。
 Link 单元产生；默认输出显示 Kernel Setup 驱动 Link；既有成功路径、缺失 DTB bootargs、
 Printk 注册和 `BootCommandLine.has_key("earlycon")` 回归保持通过。
 
-## M4：收紧 SbiConsole 可用性（当前）
+## M4：收紧 SbiConsole 可用性（已完成）
 
 - 新增 Kernel-owned `SbiCapabilityType` 与 `SbiCapability`，初始为 Ready，且只有唯一
   `Enable: Ready → Online`；默认 Enable 建立
@@ -172,6 +173,18 @@ Scheduler、Unmask IRQ 或 BootSetup；已经提交的 capability 状态与 avai
 以及最终同时保留 availability、selection、backend 字段和注册事实；上述成功/失败变体均保持
 正确快照与 fail-stop 顺序，
 `make derive`、`make test`、`make difftest` 和 `git diff --check` 全部通过。
+
+## M5：EarlyConsole DBCN 运行时实现（当前）
+
+M5 不再修改上述正式模型，而是把已经冻结的生产者—消费者链实现到 Rust：Banner 先进入
+固定 Printk 缓冲，内核从 ArchHead 建立的只读 DTB fixmap 中校验并复制唯一
+`/chosen/bootargs`，通过链接期 `EarlyConTable` 选择 `sbi` backend，探测 SBI v2.0 与 DBCN，
+启用并注册 Console 后 FIFO 回放 `LKM2 kernel\n`，最后在中断仍屏蔽的状态停驻。
+
+M5a 实现 DTB 输入、无外部 crate 的 FDT/bootargs 解析和唯一链接表查询；M5b 实现可注入的
+SBI 调用边界、capability 与 DBCN backend；M5c 实现 Printk 缓冲、原子注册语义和 QEMU
+smoke runner。M5 只实现 EarlyBoot 的可运行前缀，不实现 Scheduler、Unmask、BootSetup 或
+SBI v0.1。正式模型保留 v0.1 替代路径，coding 文档明确其 Rust 实现仍未覆盖。
 
 每个里程碑独立保持可推导、可回归；后续工作替换上一阶段的抽象来源，不改变
 BootCommandLine、EarlyConTable、SbiConsole、EarlyConsole 及两次 backend 查询的选择

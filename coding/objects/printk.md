@@ -2,7 +2,7 @@
 
 本页对应 [`model/objects/printk.spec`](../../model/objects/printk.spec) 和
 [`model/objects/early_console.spec`](../../model/objects/early_console.spec)。本轮只冻结编码
-关系，不修改 Rust 实现。
+关系；M5 在不扩展冻结模型的前提下实现这些消息级机制。
 
 ## Banner 提交
 
@@ -63,7 +63,7 @@ DBCN；v0.1 只作为替代构建配置下的测试路径。Model 中的
 完成后的互斥选择结果；它们不得代替前述 availability 输入。SBI 原始版本、
 `SBI_EXT_DBCN` probe 结果、Config 对象、
 `struct console.write` 函数指针、DBCN 逐次写入循环、v0.1 逐字符写入以及运行时写错误都留在
-coding/impl 层，不进入本轮 model。Rust `impl/` 保持不变。
+coding/impl 层，不进入本轮 model。M5 Rust 前缀只实现 DBCN，不实现 v0.1 fallback。
 
 格式化、ring buffer、记录序号、flush/replay、锁和 SBI 调用属于 coding/impl 机制。
 Checkpoint debugcon 继续作为独立的极早期观测通道，不经过上述 Printk/Console 链，也不

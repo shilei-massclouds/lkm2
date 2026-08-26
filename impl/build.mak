@@ -18,8 +18,12 @@ CHECKPOINTGEN := ../tools/bin/checkpointgen
 MODEL_IR := ../tools/build/modelc/model.ir.json
 MODEL_SOURCES := $(shell find ../model -type f -name '*.spec')
 CHECKPOINT_HANDLER ?= empty
-RUST_SOURCES := main.rs systems.rs systems/kernel.rs systems/kernel/config.rs objects.rs objects/cpu.rs objects/ptrace.rs objects/task.rs objects/vm.rs phases.rs phases/arch_head.rs phases/asm_macros.rs phases/csr.rs phases/start_kernel.rs
+RUST_SOURCES := main.rs systems.rs systems/kernel.rs systems/kernel/config.rs objects.rs objects/cpu.rs objects/early_console.rs objects/ptrace.rs objects/task.rs objects/vm.rs phases.rs phases/arch_head.rs phases/asm_macros.rs phases/csr.rs phases/start_kernel.rs
 LINKER_SCRIPT := systems/kernel/linker.ld
+EARLY_CONSOLE_TEST := $(BUILD_DIR)/early_console_test
+
+$(EARLY_CONSOLE_TEST): objects/early_console.rs | $(BUILD_STAMP)
+	$(RUSTC) --edition=2024 --test -o $@ $<
 
 ifeq ($(filter $(CHECKPOINT_HANDLER),empty debugcon),)
 $(error unknown CHECKPOINT_HANDLER '$(CHECKPOINT_HANDLER)'; expected empty or debugcon)

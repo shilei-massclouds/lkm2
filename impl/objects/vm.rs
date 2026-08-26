@@ -48,6 +48,24 @@ const SATP_PPN_MASK: u64 = (1_u64 << 44) - 1;
 
 const ADDRESS_SPACE_LAST_PAGE: usize = usize::MAX - (PAGE_SIZE - 1);
 
+/// Read-only view of the part of the two-PMD fixmap beginning at the DTB.
+#[derive(Clone, Copy)]
+pub(crate) struct EarlyDtbMapping {
+    virtual_address: usize,
+    len: usize,
+}
+
+impl EarlyDtbMapping {
+    /// Returns the mapped bytes. The mapping remains owned by the static early
+    /// page table and is never rewritten after `setup_vm` publishes it.
+    pub(crate) fn as_bytes(self) -> &'static [u8] {
+        // SAFETY: `VmType::early_dtb_mapping` constructs this view only after
+        // both consecutive DTB PMDs have been installed. `len` is capped at
+        // the remainder of those mappings and the early tables are static.
+        unsafe { core::slice::from_raw_parts(self.virtual_address as *const u8, self.len) }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum PagingMode {
@@ -644,6 +662,20 @@ impl VmType {
         Ok((root_ppn << PAGE_SHIFT) as usize)
     }
 
+    fn early_dtb_mapping(&self) -> Option<EarlyDtbMapping> {
+        let virtual_address = self.early_dtb_va.load(Ordering::Acquire) as usize;
+        let physical_address = self.early_dtb_pa.load(Ordering::Acquire) as usize;
+        if virtual_address == 0 || physical_address == 0 {
+            return None;
+        }
+        let offset = physical_address & (PMD_SIZE - 1);
+        let len = (2 * PMD_SIZE).checked_sub(offset)?;
+        Some(EarlyDtbMapping {
+            virtual_address,
+            len,
+        })
+    }
+
     fn probe_paging_mode(&self) -> VmResult<PagingMode> {
         for mode in [PagingMode::Sv57, PagingMode::Sv48, PagingMode::Sv39] {
             if probe_candidate(&self.early, mode)? {
@@ -935,6 +967,11 @@ fn linker_end_address() -> usize {
 }
 
 static VM: VmType = VmType::new();
+
+/// Returns the DTB's already-established read-only early mapping.
+pub(crate) fn early_dtb_mapping() -> Option<EarlyDtbMapping> {
+    VM.early_dtb_mapping()
+}
 
 // SAFETY: this is the sole definition of the linker-visible `setup_vm` symbol,
 // and its C ABI matches the MMU-off call site in the naked boot entry.

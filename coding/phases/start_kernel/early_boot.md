@@ -2,8 +2,9 @@
 
 本页对应
 [`model/phases/start_kernel/early_boot.spec`](../../../model/phases/start_kernel/early_boot.spec)。
-当前 [`impl/phases/start_kernel.rs`](../../../impl/phases/start_kernel.rs) 保持不变；真实 runtime
-trap、IRQ/timekeeping 初始化和硬件 Unmask 留给后续实现阶段。
+M5 将 [`impl/phases/start_kernel.rs`](../../../impl/phases/start_kernel.rs) 实现到 EarlyConsole
+注册并回放 banner 后的 interrupt-masked 停驻；Scheduler、真实 runtime trap、IRQ/timekeeping
+初始化和硬件 Unmask 留给后续实现阶段。
 
 ## 固定控制边界
 
@@ -37,7 +38,7 @@ trap、IRQ、timer 或 timekeeping 初始化都只能插入它之前，并需要
 Online 不表示 DTB 内存失效。
 
 已完成的 M3 在 Kernel Setup 中提前完成 `EarlyConTable.Link`；EarlyBoot 不驱动 Link。
-当前 M4 在 DtbBlob 与 EarlyConsole 之间增加 `SbiCapability.Enable`，EarlyBoot 因此具有六个
+已完成的 M4 在 DtbBlob 与 EarlyConsole 之间增加 `SbiCapability.Enable`，EarlyBoot 因此具有六个
 直接 drive，并冻结 Banner → DtbBlob → SbiCapability → EarlyConsole → Scheduler → Unmask
 顺序。
 到 `EarlyConsole.Enable` 查询 registry 时，Kernel Setup 已保证表为 Ready 且包含 SBI 条目。
@@ -58,3 +59,15 @@ Scheduler Schedule 和第一次上下文切换。
 StartKernel-safe early fail-stop trap 提升为 runtime dispatch。Linux 的
 architecture/memory → trap/core memory → scheduler → IRQ/timer/timekeeping →
 `local_irq_enable` 仅作粗粒度审阅锚点，不是本轮模型冻结的逐调用顺序。
+
+## M5 运行时前缀
+
+M5 保持 `setup_vm(dtb_pa) -> usize` 的链接 ABI；VM 另行发布 DTB 映射虚址及两段 PMD 中从
+DTB 起算的剩余只读窗口。FDT parser 必须完整校验 header、各 block 范围、reservation map、
+structure token 和字符串引用，只复制唯一 `/chosen/bootargs`。命令行固定最多 4096 字节，
+要求 NUL 结尾、无内嵌 NUL 且为 UTF-8，并且恰好包含一个独立 `earlycon=sbi` token。
+
+backend 必须由链接脚本保留的 `EarlyConTable` 唯一查询产生，不能因当前只有 SBI backend
+而跳过 registry。后续 capability probe 只接受 SBI >= 2.0 且 DBCN probe 为正；Rust 不实现
+正式模型仍保留的 SBI v0.1 fallback。任何输入、查询、探测、输出或注册失败都保持中断屏蔽
+并 fail-stop，不得继续 Scheduler、Unmask 或 BootSetup。
