@@ -28,10 +28,14 @@ trap、IRQ、timer 或 timekeeping 初始化都只能插入它之前，并需要
 与失败语义。Unmask 失败时不得发布成功事实或进入 BootSetup，且必须维持 interrupts
 关闭的 fail-stop 路径。
 
-M2 直接用 `DtbBlob.Enable` 表达“内核观察并复制 bootargs”的生命周期边界，不增加
+已完成的 M2 直接用 `DtbBlob.Enable` 表达“内核观察并复制 bootargs”的生命周期边界，不增加
 `SetupArch` 或 `parse_dtb` 具名阶段，也不把字符串扫描算法纳入 model。DtbBlob binding
 失败时，Banner 已经 Online，但后续 EarlyConsole、Scheduler 和 Unmask drive 均不得发生；
 Online 不表示 DTB 内存失效。
+
+当前 M3 在 Kernel Setup 中提前完成 `EarlyConTable.Link`；EarlyBoot 不驱动 Link，也不改变
+既有 Banner → DtbBlob → EarlyConsole → Scheduler → Unmask 顺序。到
+`EarlyConsole.Enable` 查询 registry 时，Kernel Setup 已保证表为 Ready 且包含 SBI 条目。
 
 BootSetup 入口复查 `early_boot_interrupts_enabled()`、BootTask current/OnCpu 和 Scheduler
 Online，之后只驱动 `KernelInitTask` 的 Preset、Setup、Enable。BootHandoff 仍拥有首次

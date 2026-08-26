@@ -1,6 +1,7 @@
 /* Early console selection from the boot command line and backend registry. */
 
 use model::systems::kernel::Kernel;
+use model::objects::kernel_image::KernelImage;
 use model::objects::printk::Printk;
 use model::objects::printk::PrintkType;
 
@@ -101,10 +102,23 @@ object ChosenBootArgs: Relation<String, String> {
 }
 
 object EarlyConTable: Map<String, EarlyConsoleBackendType> {
-    parent: Kernel;
-    initial_state: State::Ready;
+    parent: KernelImage;
+    initial_state: State::Base;
+
+    state State::Base {
+        transitions {
+            on Transition::Link -> State::Ready {
+                establishes {
+                    EarlyConTable.contains("sbi", SbiConsole);
+                }
+            }
+        }
+    }
 
     state State::Ready {
+        invariant {
+            EarlyConTable.contains("sbi", SbiConsole);
+        }
     }
 }
 

@@ -24,6 +24,26 @@ println! → Printk → registered Console → selected backend
 `BootCommandLine` 与 `EarlyConTable` 查询并保存的 backend。Console 进入 Online 时必须已
 同时建立 backend binding 和 `printk_console_registered(Printk, EarlyConsole)`。
 
+## EarlyConTable 链接边界
+
+`EarlyConTable.Link` 冻结为 Linux sibling 的链接期注册机制：
+
+- `drivers/tty/serial/earlycon-riscv-sbi.c` 中
+  `EARLYCON_DECLARE(sbi, early_sbi_setup)` 生成 name 为 `sbi`、setup 为
+  `early_sbi_setup` 的 `struct earlycon_id` 条目；
+- `include/linux/serial_core.h` 把该条目放入 `__earlycon_table` input section；
+- `include/asm-generic/vmlinux.lds.h` 的 `EARLYCON_TABLE()` 把该 section 及其边界符号纳入
+  最终 KernelImage。
+
+正式模型当前只保留由此产生的
+`EarlyConTable.contains("sbi", SbiConsole)`，并固定假设构建时启用
+`CONFIG_SERIAL_EARLYCON_RISCV_SBI`。本轮不为该假设新增 Config 对象，也不展开 Linux 的
+其他 earlycon backend。表遍历、section 起止地址、`struct earlycon_id` 布局、setup
+函数指针和链接器布局均属于 coding/impl，不进入 model。
+
+`early_sbi_setup` 对 DBCN、SBI v0.1 和 backend 不可用的运行时选择属于 M4；M3 的 Link 只
+表示静态条目已进入 KernelImage。Rust `impl/` 在本轮保持不变。
+
 格式化、ring buffer、记录序号、flush/replay、锁和 SBI 调用属于 coding/impl 机制。
 Checkpoint debugcon 继续作为独立的极早期观测通道，不经过上述 Printk/Console 链，也不
 因 Banner 生命周期而改变。model 不新增 `Printk.Action::Emit`、

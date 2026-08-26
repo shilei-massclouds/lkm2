@@ -12,6 +12,13 @@ Action 或独立 buffer 对象。该状态只表示静态日志入口能够接�
 
 ## Console 注册边界
 
+`EarlyConTable` 是 `KernelImage` 持有的静态 backend 注册表，初始为 Base，且只有一次
+`Link: Base → Ready`。Link 必须建立
+`EarlyConTable.contains("sbi", SbiConsole)`；Ready invariant 必须持续保持该注册事实。
+这个生命周期表示固定构建配置下链接表已经形成，不表示运行时执行了动态注册、表扫描或
+backend setup。`KernelImage` 自身的 Loaded 初态和随后由 ArchHead 驱动的 ClearBss 生命周期
+不因子对象 Link 而改变。
+
 `EarlyConsole` 是通用 `ConsoleType` 的当前实例。其 Enable 先从 `BootCommandLine` 和
 `EarlyConTable` 选择并保存 backend，再同时建立 backend binding 与
 `printk_console_registered(Printk, EarlyConsole)`。Online invariant 必须持续保持这两个

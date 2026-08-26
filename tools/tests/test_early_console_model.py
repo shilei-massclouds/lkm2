@@ -108,6 +108,41 @@ class EarlyConsoleModelTests(unittest.TestCase):
         self.assertEqual(objects["DtbBlob"].parent.value, "Kernel")
         self.assertEqual(objects["ChosenBootArgs"].parent.value, "DtbBlob")
 
+        earlycon_table = objects["EarlyConTable"]
+        self.assertEqual(earlycon_table.parent.value, "KernelImage")
+        self.assertEqual(earlycon_table.initial_state, ("State", "Base"))
+        link_handlers = tuple(
+            transition
+            for state in earlycon_table.states
+            for transition in state.transitions
+        )
+        self.assertEqual(
+            tuple(
+                (handler.signal, handler.target_state) for handler in link_handlers
+            ),
+            ((("Transition", "Link"), ("State", "Ready")),),
+        )
+        self.assertEqual(
+            tuple(block.kind for block in link_handlers[0].blocks),
+            ("establishes",),
+        )
+        link_registration = link_handlers[0].blocks[0].expressions[0]
+        self.assertEqual(link_registration.children[0].value, "contains")
+        self.assertEqual(link_registration.children[1].value, "sbi")
+        self.assertEqual(link_registration.children[2].value, "SbiConsole")
+
+        table_ready = next(
+            state
+            for state in earlycon_table.states
+            if state.name == ("State", "Ready")
+        )
+        self.assertEqual(len(table_ready.invariants), 1)
+        self.assertEqual(len(table_ready.invariants[0]), 1)
+        ready_registration = table_ready.invariants[0][0]
+        self.assertEqual(ready_registration.children[0].value, "contains")
+        self.assertEqual(ready_registration.children[1].value, "sbi")
+        self.assertEqual(ready_registration.children[2].value, "SbiConsole")
+
         with (REPOSITORY / "tools/signals/parked.signals").open(
             encoding="utf-8"
         ) as stream:
@@ -143,7 +178,6 @@ class EarlyConsoleModelTests(unittest.TestCase):
                 "OpenSBI": (),
                 "Kernel": (
                     ("ChosenBootArgs", "earlycon", "sbi", "established"),
-                    ("EarlyConTable", "sbi", "SbiConsole", "established"),
                 ),
             },
         )
@@ -155,6 +189,45 @@ class EarlyConsoleModelTests(unittest.TestCase):
                 and unit.event.target[-1] in {"OpenSBI", "Kernel"}
                 for effect in unit.relation_effects
             )
+        )
+
+        kernel_setup = next(
+            unit
+            for unit in units
+            if unit.event.target[-1] == "Kernel"
+            and unit.handler == ("Transition", "Setup")
+        )
+        self.assertEqual(
+            tuple(
+                (unit.event.target[-1], unit.handler)
+                for unit in kernel_setup.drives
+            ),
+            (("EarlyConTable", ("Transition", "Link")),),
+        )
+        self.assertEqual(
+            tuple((check.expression, check.status) for check in kernel_setup.ensures),
+            (
+                ("EarlyConTable == State::Ready", "passed"),
+                ('EarlyConTable.contains("sbi", SbiConsole)', "passed"),
+            ),
+        )
+
+        link = kernel_setup.drives[0]
+        self.assertEqual(
+            tuple(
+                (
+                    effect.owner[-1],
+                    effect.key.value,
+                    effect.value.value[-1],
+                    effect.status,
+                )
+                for effect in link.relation_effects
+            ),
+            (("EarlyConTable", "sbi", "SbiConsole", "established"),),
+        )
+        self.assertEqual(
+            tuple((check.expression, check.status) for check in link.invariants),
+            (('EarlyConTable.contains("sbi", SbiConsole)', "passed"),),
         )
 
         self.assertFalse(
@@ -365,6 +438,73 @@ class EarlyConsoleModelTests(unittest.TestCase):
             any(
                 fact.predicate[-1] == "early_boot_interrupts_enabled"
                 for fact in path.facts
+            )
+        )
+
+    def test_missing_link_registration_stops_kernel_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            model_root = Path(directory) / "model"
+            shutil.copytree(REPOSITORY / "model", model_root)
+            early_console_path = model_root / "objects" / "early_console.spec"
+            source = early_console_path.read_text(encoding="utf-8")
+            declaration = (
+                '                    EarlyConTable.contains("sbi", SbiConsole);\n'
+            )
+            self.assertIn(declaration, source)
+            early_console_path.write_text(
+                source.replace(declaration, "", 1), encoding="utf-8"
+            )
+            model = compile_spec(model_root / "main.spec")
+
+        with (REPOSITORY / "tools/signals/parked.signals").open(
+            encoding="utf-8"
+        ) as stream:
+            signals = load_user_runtime_signals(stream)
+        path = derive(
+            model,
+            default_derivation_sequence(model),
+            user_runtime_signals=signals,
+        ).paths[0]
+        units = tuple(_all_units(path.units))
+        kernel_setup = next(
+            unit
+            for unit in units
+            if unit.event.target[-1] == "Kernel"
+            and unit.handler == ("Transition", "Setup")
+        )
+        link = next(
+            unit
+            for unit in units
+            if unit.event.target[-1] == "EarlyConTable"
+            and unit.handler == ("Transition", "Link")
+        )
+
+        self.assertEqual(path.status, "invariant_failed")
+        self.assertEqual(kernel_setup.status, "stopped")
+        self.assertEqual(link.status, "invariant_failed")
+        self.assertEqual(link.relation_effects, ())
+        self.assertEqual(
+            tuple((check.expression, check.status) for check in link.invariants),
+            (('EarlyConTable.contains("sbi", SbiConsole)', "failed"),),
+        )
+        states = {item.object[-1]: item.state for item in path.final_state}
+        self.assertEqual(states["Kernel"], ("State", "Prepared"))
+        self.assertEqual(states["EarlyConTable"], ("State", "Base"))
+        self.assertFalse(
+            any(item.owner[-1] == "ChosenBootArgs" for item in path.tuples)
+        )
+        self.assertFalse(
+            any(
+                unit.event.target[-1] == "Kernel"
+                and unit.handler == ("Transition", "Enable")
+                for unit in units
+            )
+        )
+        self.assertFalse(
+            any(
+                unit.event.target[-1] == "EarlyBoot"
+                and unit.handler == ("Action", "Enter")
+                for unit in units
             )
         )
 

@@ -24,6 +24,9 @@ Human -> Computer: drives Transition::Setup
     commit state: State::Ready
   Computer -> Kernel: drives Transition::Setup
     current state: State::Prepared
+    Kernel -> EarlyConTable: drives Transition::Link
+      current state: State::Base
+      commit state: State::Ready
     commit state: State::Ready
   Computer -> RootFs: drives Transition::Setup
     current state: State::Prepared

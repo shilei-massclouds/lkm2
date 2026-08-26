@@ -20,8 +20,14 @@ object Kernel: KernelType {
     state State::Prepared {
         transitions {
             on Transition::Setup -> State::Ready {
+                drives EarlyConTable.Transition::Link;
+
                 establishes {
                     ChosenBootArgs.contains("earlycon", "sbi");
+                }
+
+                ensures {
+                    EarlyConTable.state == State::Ready;
                     EarlyConTable.contains("sbi", SbiConsole);
                 }
             }
