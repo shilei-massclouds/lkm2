@@ -113,6 +113,9 @@ OpenSBI -> Kernel: emits Transition::Enable
       current state: State::Ready
       binds value = 'sbi' (objects::dtb_blob::ChosenBootArgs key 'earlycon')
       commit state: State::Online
+    EarlyBoot -> MemBlockMemory: drives Transition::Enable
+      current state: State::Ready
+      commit state: State::Online
     EarlyBoot -> SbiCapability: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online
@@ -124,10 +127,22 @@ OpenSBI -> Kernel: emits Transition::Enable
         current state: State::Ready
         commit state: State::Online
       commit state: State::Online
-    EarlyBoot -> Cpu0Scheduler: drives Transition::Enable
+    commit state: unchanged
+  StartKernel -> PagingInit: resumes Action::Enter
+    current state: State::Online
+    PagingInit -> MemBlockReserved: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online
-    EarlyBoot -> InterruptControl: drives Action::Unmask
+    PagingInit -> MemBlock: drives Transition::Enable
+      current state: State::Ready
+      commit state: State::Online
+    PagingInit -> FinalPageTable: drives Transition::Enable
+      current state: State::Ready
+      commit state: State::Online
+    PagingInit -> Cpu0Scheduler: drives Transition::Enable
+      current state: State::Ready
+      commit state: State::Online
+    PagingInit -> InterruptControl: drives Action::Unmask
       current state: State::Online
       commit state: unchanged
     commit state: unchanged

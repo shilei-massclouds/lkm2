@@ -2,8 +2,10 @@
 
 use super::opensbi::OpenSBI;
 use model::objects::dtb_blob::DtbBlob;
+use model::objects::dtb_blob::dtb_blob_describes_nonempty_valid_physical_memory;
 use model::objects::dtb_blob::dtb_blob_physical_range_size_at_least;
 use model::objects::dtb_blob::dtb_blob_physical_range_valid;
+use model::objects::dtb_blob::dtb_blob_reserve_map_and_reserved_memory_valid;
 
 type QemuVirtPlatformType;
 
@@ -30,6 +32,8 @@ object QemuVirtPlatform: QemuVirtPlatformType {
                 establishes {
                     dtb_blob_physical_range_size_at_least(DtbBlob, 1);
                     dtb_blob_physical_range_valid(DtbBlob);
+                    dtb_blob_describes_nonempty_valid_physical_memory(DtbBlob);
+                    dtb_blob_reserve_map_and_reserved_memory_valid(DtbBlob);
                 }
 
                 emits {
@@ -43,6 +47,8 @@ object QemuVirtPlatform: QemuVirtPlatformType {
         invariant {
             dtb_blob_physical_range_size_at_least(DtbBlob, 1);
             dtb_blob_physical_range_valid(DtbBlob);
+            dtb_blob_describes_nonempty_valid_physical_memory(DtbBlob);
+            dtb_blob_reserve_map_and_reserved_memory_valid(DtbBlob);
         }
     }
 }

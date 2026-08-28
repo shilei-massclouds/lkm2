@@ -7,6 +7,7 @@ spec task;
 spec boot_stack;
 spec printk;
 spec dtb_blob;
+spec memblock;
 spec early_console;
 spec user_app_runtime;
 spec vm;

@@ -32,6 +32,7 @@ current，也禁止多个 CPU 共享一个 Scheduler runtime。
 ## 当前映射
 
 - [DtbBlob 章程](objects/dtb_blob.md)
+- [MemBlock 章程](objects/memblock.md)
 - [Printk、Console 与 Banner 章程](objects/printk.md)
 - [Scheduler 章程](objects/scheduler.md)
 - [CPU 与 EventFlow 章程](objects/cpu.md)

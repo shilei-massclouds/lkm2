@@ -425,6 +425,14 @@ class EarlyConsoleModelTests(unittest.TestCase):
                     "established",
                 ),
                 ("dtb_blob_physical_range_valid(DtbBlob)", "established"),
+                (
+                    "dtb_blob_describes_nonempty_valid_physical_memory(DtbBlob)",
+                    "established",
+                ),
+                (
+                    "dtb_blob_reserve_map_and_reserved_memory_valid(DtbBlob)",
+                    "established",
+                ),
             ),
         )
 
@@ -513,10 +521,9 @@ class EarlyConsoleModelTests(unittest.TestCase):
             (
                 "Banner",
                 "DtbBlob",
+                "MemBlockMemory",
                 "SbiCapability",
                 "EarlyConsole",
-                "Cpu0Scheduler",
-                "InterruptControl",
             ),
         )
 
@@ -1054,6 +1061,16 @@ class EarlyConsoleModelTests(unittest.TestCase):
                 self.assertEqual(states["QemuVirtPlatform"], ("State", "Online"))
                 self.assertEqual(states["Banner"], ("State", "Online"))
                 self.assertEqual(states["DtbBlob"], ("State", "Ready"))
+                self.assertEqual(states["MemBlockMemory"], ("State", "Ready"))
+                self.assertEqual(states["MemBlockReserved"], ("State", "Ready"))
+                self.assertEqual(states["MemBlock"], ("State", "Ready"))
+                self.assertFalse(
+                    any(
+                        unit.event.target[-1] == "MemBlockMemory"
+                        and unit.handler == ("Transition", "Enable")
+                        for unit in units
+                    )
+                )
                 self.assert_console_failure_is_atomic(
                     path, capability_state="Ready", availability=()
                 )

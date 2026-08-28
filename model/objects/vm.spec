@@ -1,5 +1,7 @@
 /* Early virtual-memory setup objects. */
 
+use model::objects::memblock::MemBlock;
+
 predicate kernel_map_established() -> bool;
 predicate kernel_map_records_supported_paging_mode() -> bool;
 predicate paging_mode_probe_completed_with_satp_bare() -> bool;
@@ -128,6 +130,20 @@ type PageTableType {
     }
 }
 
+type FinalPageTableType {
+    initial_state: State::Ready;
+
+    state State::Ready {
+        transitions {
+            on Transition::Enable -> State::Online {
+            }
+        }
+    }
+
+    state State::Online {
+    }
+}
+
 object Vm: VmType {
 }
 
@@ -174,5 +190,22 @@ object EarlyPageTable: PageTableType {
             early_kernel_image_mapping_established();
             early_dtb_four_mib_mapping_established();
         }
+    }
+}
+
+object FinalPageTable: FinalPageTableType {
+    parent: Vm;
+
+    state State::Ready {
+        transitions {
+            override on Transition::Enable -> State::Online {
+                depends_on {
+                    MemBlock.state == State::Online;
+                }
+            }
+        }
+    }
+
+    state State::Online {
     }
 }

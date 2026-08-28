@@ -18,14 +18,18 @@ CHECKPOINTGEN := ../tools/bin/checkpointgen
 MODEL_IR := ../tools/build/modelc/model.ir.json
 MODEL_SOURCES := $(shell find ../model -type f -name '*.spec')
 CHECKPOINT_HANDLER ?= empty
-RUST_SOURCES := main.rs systems.rs systems/kernel.rs systems/kernel/config.rs systems/sbi.rs objects.rs objects/cpu.rs objects/dtb_blob.rs objects/early_console.rs objects/printk.rs objects/ptrace.rs objects/task.rs objects/vm.rs phases.rs phases/arch_head.rs phases/asm_macros.rs phases/csr.rs phases/start_kernel.rs
+RUST_SOURCES := main.rs systems.rs systems/kernel.rs systems/kernel/config.rs systems/sbi.rs objects.rs objects/cpu.rs objects/dtb_blob.rs objects/early_console.rs objects/memblock.rs objects/printk.rs objects/ptrace.rs objects/task.rs objects/vm.rs phases.rs phases/arch_head.rs phases/asm_macros.rs phases/csr.rs phases/start_kernel.rs phases/start_kernel/paging_init.rs
 LINKER_SCRIPT := systems/kernel/linker.ld
 DTB_BLOB_TEST := $(BUILD_DIR)/dtb_blob_test
+MEMBLOCK_TEST := $(BUILD_DIR)/memblock_test
 EARLY_CONSOLE_TEST := $(BUILD_DIR)/early_console_test
 SBI_TEST := $(BUILD_DIR)/sbi_test
 PRINTK_TEST := $(BUILD_DIR)/printk_test
 
 $(DTB_BLOB_TEST): objects/dtb_blob.rs | $(BUILD_STAMP)
+	$(RUSTC) --edition=2024 --test -o $@ $<
+
+$(MEMBLOCK_TEST): tests/memblock_host.rs objects/dtb_blob.rs objects/memblock.rs | $(BUILD_STAMP)
 	$(RUSTC) --edition=2024 --test -o $@ $<
 
 $(EARLY_CONSOLE_TEST): objects/early_console.rs | $(BUILD_STAMP)

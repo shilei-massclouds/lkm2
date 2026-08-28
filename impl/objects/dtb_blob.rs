@@ -11,16 +11,22 @@ const FDT_END: u32 = 9;
 /// Read-only view of the part of the two-PMD fixmap beginning at the DTB.
 #[derive(Clone, Copy)]
 pub(crate) struct EarlyDtbMapping {
+    physical_address: usize,
     virtual_address: usize,
     len: usize,
 }
 
 impl EarlyDtbMapping {
-    pub(crate) const fn new(virtual_address: usize, len: usize) -> Self {
+    pub(crate) const fn new(physical_address: usize, virtual_address: usize, len: usize) -> Self {
         Self {
+            physical_address,
             virtual_address,
             len,
         }
+    }
+
+    pub(crate) const fn physical_address(self) -> usize {
+        self.physical_address
     }
 
     /// Returns the mapped bytes. The mapping remains owned by the static early
@@ -45,6 +51,7 @@ pub(crate) enum DtbBlobError {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct DtbBlob<'a> {
     blob: &'a [u8],
+    reserve_map: &'a [u8],
     structure: &'a [u8],
     strings: &'a [u8],
 }
@@ -103,9 +110,26 @@ impl<'a> DtbBlob<'a> {
 
         Ok(Self {
             blob: &window[..total_size],
+            reserve_map: &window[reserve_offset..reserve_cursor],
             structure: &window[structure_range],
             strings: &window[strings_range],
         })
+    }
+
+    pub(crate) const fn total_size(&self) -> usize {
+        self.blob.len()
+    }
+
+    pub(crate) const fn reserve_map(&self) -> &'a [u8] {
+        self.reserve_map
+    }
+
+    pub(crate) const fn structure_block(&self) -> &'a [u8] {
+        self.structure
+    }
+
+    pub(crate) const fn strings_block(&self) -> &'a [u8] {
+        self.strings
     }
 
     pub(crate) fn chosen_bootargs(&self) -> Result<&'a [u8], DtbBlobError> {
@@ -308,15 +332,21 @@ mod tests {
     #[test]
     fn mapping_exposes_its_static_window() {
         static BYTES: &[u8] = b"dtb";
-        let mapping = EarlyDtbMapping::new(BYTES.as_ptr() as usize, BYTES.len());
+        let mapping = EarlyDtbMapping::new(0x1000, BYTES.as_ptr() as usize, BYTES.len());
+        assert_eq!(mapping.physical_address(), 0x1000);
         assert_eq!(mapping.as_bytes(), BYTES);
     }
 
     #[test]
     fn extracts_unique_chosen_bootargs() {
         let blob = make_fdt(&[b"root=/dev/vda earlycon=sbi quiet\0"]);
+        let dtb = DtbBlob::from_bytes(&blob).unwrap();
+        assert_eq!(dtb.total_size(), blob.len());
+        assert_eq!(dtb.reserve_map(), &[0; 16]);
+        assert!(!dtb.structure_block().is_empty());
+        assert_eq!(dtb.strings_block(), b"bootargs\0");
         assert_eq!(
-            DtbBlob::from_bytes(&blob).unwrap().chosen_bootargs(),
+            dtb.chosen_bootargs(),
             Ok(b"root=/dev/vda earlycon=sbi quiet\0".as_slice())
         );
     }

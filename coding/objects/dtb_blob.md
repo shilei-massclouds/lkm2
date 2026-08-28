@@ -21,12 +21,14 @@
 与 size、reservation map 终止项、structure token、节点嵌套和 strings table 引用。只接受
 唯一根节点下唯一 `/chosen/bootargs` 属性；缺失、重复或畸形输入整体失败。
 
-成功解析的 `DtbBlob` 只向下游发布原始 bootargs 属性切片。`BootCommandLine` 独立负责
+成功解析的 `DtbBlob` 向下游发布原始 bootargs 属性切片以及经过 header 边界校验的 total size、
+reserve map、structure block 与 strings block 只读视图。`BootCommandLine` 独立负责
 4096 字节上限、NUL/UTF-8 和唯一 `earlycon=sbi` token 校验并复制内容。该边界保持
 `DtbBlob → BootCommandLine → EarlyConTable` 的单向生产者—消费者关系。
 
 ## 失败与范围
 
-任何 DTB 或 bootargs 失败均在 SBI probe 前进入 interrupt-masked fail-stop，不提交 Console
-注册。当前实现不解析 CPU、memory、interrupt controller 或其他设备节点，也不以 DtbBlob
-Online 暗示 DTB 映射生命周期结束。
+任何 DTB、bootargs 或 `/memory` 失败均在 SBI probe 前进入 interrupt-masked fail-stop，不提交
+Console 注册。`DtbBlob` 自身不解释 memory 或 reservation 语义；`MemBlockMemory` 与
+`setup_bootmem` 是这些只读 block 的独立消费者。当前实现不解析 CPU、interrupt controller 或
+其他设备节点，也不以 DtbBlob Online 暗示 DTB 映射生命周期结束。

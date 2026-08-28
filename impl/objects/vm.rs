@@ -653,7 +653,7 @@ impl VmType {
         }
         let offset = physical_address & (PMD_SIZE - 1);
         let len = (2 * PMD_SIZE).checked_sub(offset)?;
-        Some(EarlyDtbMapping::new(virtual_address, len))
+        Some(EarlyDtbMapping::new(physical_address, virtual_address, len))
     }
 
     fn probe_paging_mode(&self) -> VmResult<PagingMode> {
@@ -951,6 +951,13 @@ static VM: VmType = VmType::new();
 /// Returns the DTB's already-established read-only early mapping.
 pub(crate) fn early_dtb_mapping() -> Option<EarlyDtbMapping> {
     VM.early_dtb_mapping()
+}
+
+/// Returns the physical kernel-image range committed by `KernelMapType::preset`.
+pub(crate) fn kernel_image_physical_range() -> Option<(u64, u64)> {
+    let base = VM.kernel_map.physical_address.load(Ordering::Acquire);
+    let size = VM.kernel_map.image_size.load(Ordering::Acquire);
+    (base != 0 && size != 0 && base.checked_add(size).is_some()).then_some((base, size))
 }
 
 // SAFETY: this is the sole definition of the linker-visible `setup_vm` symbol,

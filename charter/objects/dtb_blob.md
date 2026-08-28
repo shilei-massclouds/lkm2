@@ -12,10 +12,20 @@ Kernel-owned `BootCommandLine`。Enable 还必须消费 QemuVirtPlatform 已建�
 建立部分 `BootCommandLine` 内容。
 
 Online 只表示所需 bootargs 已经完成校验、观察和复制，不表示 DTB 映射被撤销、固件内存
-失效或其他设备树属性已经建立生命周期。物理范围的存在性与有效性由 QemuVirtPlatform
-生产，DtbBlob 只消费，不得自行建立并自检。当前切片只消费 `/chosen/bootargs`；未来增加
-CPU、memory 或 device 节点消费者时，应扩展 DtbBlob 的明确输出边界，而不是把解析副作用
-隐含在 EarlyConsole 中。
+失效，也不表示 `/memory` 或 reservation 描述已经被 DtbBlob 自身解析并提交。物理范围的
+存在性与有效性由 QemuVirtPlatform 生产，DtbBlob 只消费，不得自行建立并自检。
+
+必须区分三类范围语义：DTB 文件自身占用的物理存储范围由
+`dtb_blob_physical_range_*` 事实描述；DTB `/memory` 节点描述的是系统 RAM 输入；
+MemBlock Reserved 表示内核镜像、DTB 文件自身、FDT reserve map 和 `/reserved-memory` 所要求的
+强制保留。后两类不是 DtbBlob 对象的存储范围。QemuVirtPlatform 可以建立关于 DTB 内容有效性的
+平台输入事实，但 `MemBlockMemory` 仍必须在 DtbBlob Online 后建立明确的
+`memblock_memory_derived_from_dtb` 来源，不能把平台事实当作 MemBlock 已完成。
+
+当前 DtbBlob 生命周期只向 `BootCommandLine` 发布 `/chosen/bootargs`；MemBlock 作为独立消费者
+读取 `/memory` 与 reservation 相关的有效性事实。未来增加 CPU 或 device 节点消费者时，应继续
+扩展明确的单向输出边界，而不是把解析副作用隐含在 EarlyConsole 或 DtbBlob Online 中。
 
 模型映射：
 [`model/objects/dtb_blob.spec`](../../model/objects/dtb_blob.spec)。
+MemBlock 的来源与完成边界见 [MemBlock 章程](memblock.md)。

@@ -1,12 +1,14 @@
 /* StartKernel - starting kernel main phase. */
 
 spec early_boot;
+spec paging_init;
 spec boot_setup;
 spec boot_handoff;
 spec boot_idle;
 
 use model::phases::phase::PhaseType;
 use self::early_boot::EarlyBoot;
+use self::paging_init::PagingInit;
 use self::boot_setup::BootSetup;
 use self::boot_handoff::BootHandoff;
 use self::boot_idle::BootIdle;
@@ -54,6 +56,7 @@ object StartKernel: PhaseType {
                 }
 
                 resumes EarlyBoot.Action::Enter;
+                resumes PagingInit.Action::Enter;
                 resumes BootSetup.Action::Enter;
                 resumes BootHandoff.Action::Enter;
                 resumes BootIdle.Action::Enter;

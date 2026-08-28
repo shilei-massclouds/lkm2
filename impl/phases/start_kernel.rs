@@ -1,10 +1,16 @@
 //! Starting-kernel phase.
 
+mod paging_init;
+
+use core::arch::asm;
+
 use crate::objects::dtb_blob::DtbBlob;
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
-use crate::objects::early_dtb_mapping;
+use crate::objects::memblock::MemBlockMemory;
 use crate::objects::printk::EarlyPrintk;
+use crate::objects::{early_dtb_mapping, kernel_image_physical_range};
 use crate::systems::sbi::{Ecall, SbiCapability, SbiConsole};
+use paging_init::setup_bootmem;
 
 const BANNER: &[u8] = b"LKM2 kernel\n";
 
@@ -32,13 +38,17 @@ pub(crate) extern "C" fn start_kernel() -> ! {
         Ok(command_line) => command_line,
         Err(_) => fail_stop(),
     };
-    let backend = match lookup_linked_backend(&command_line) {
-        Ok(backend) => backend,
+    let memory = match MemBlockMemory::derive_from_dtb(&dtb_blob) {
+        Ok(memory) => memory,
         Err(_) => fail_stop(),
     };
     let mut sbi_call = Ecall;
     let capability = match SbiCapability::probe(&mut sbi_call) {
         Ok(capability) => capability,
+        Err(_) => fail_stop(),
+    };
+    let backend = match lookup_linked_backend(&command_line) {
+        Ok(backend) => backend,
         Err(_) => fail_stop(),
     };
     let console = match backend {
@@ -50,11 +60,37 @@ pub(crate) extern "C" fn start_kernel() -> ! {
     if printk.register_console(console).is_err() {
         fail_stop();
     }
-    fail_stop()
+    let kernel_image = match kernel_image_physical_range() {
+        Some(range) => range,
+        None => fail_stop(),
+    };
+    let memblock = match setup_bootmem(
+        memory,
+        &dtb_blob,
+        dtb.physical_address() as u64,
+        kernel_image,
+    ) {
+        Ok(memblock) => memblock,
+        Err(_) => fail_stop(),
+    };
+    if memblock.memory_region_count() == 0 || memblock.reserved_region_count() == 0 {
+        fail_stop();
+    }
+    // The current executable prefix stops after setup_bootmem. setup_vm_final,
+    // Scheduler enable, and interrupt unmask remain later implementation work.
+    park()
 }
 
 fn fail_stop() -> ! {
     loop {
         core::hint::spin_loop();
+    }
+}
+
+fn park() -> ! {
+    loop {
+        // SAFETY: the boot hart deliberately parks here with interrupts still
+        // masked. WFI may resume spuriously, so the instruction remains looped.
+        unsafe { asm!("wfi", options(nomem, nostack)) };
     }
 }

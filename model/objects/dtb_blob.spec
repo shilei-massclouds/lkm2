@@ -8,6 +8,12 @@ predicate dtb_blob_physical_range_size_at_least(
     minimum_size: Size,
 ) -> bool;
 predicate dtb_blob_physical_range_valid(blob: DtbBlobType) -> bool;
+predicate dtb_blob_describes_nonempty_valid_physical_memory(
+    blob: DtbBlobType,
+) -> bool;
+predicate dtb_blob_reserve_map_and_reserved_memory_valid(
+    blob: DtbBlobType,
+) -> bool;
 
 type DtbBlobType {
     initial_state: State::Ready;

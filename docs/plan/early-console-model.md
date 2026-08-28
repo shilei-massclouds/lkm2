@@ -48,8 +48,10 @@ BootCommandLine["earlycon"]
 `BootCommandLine` 对象静态存在且初始为空；`DtbBlob.Enable` 增加的是 tuple 内容，
 不是动态创建命令行对象。具体 backend 仍只能来自有限关系查询；正式表当前只含 SBI
 backend，因此 `EarlyConsole.Enable` 在 binding 之后静态驱动 `SbiConsole.Enable`，不把
-binding 变量作为动态 signal target。EarlyBoot 的生产者—消费者顺序固定为 Banner →
-DtbBlob → SbiCapability → EarlyConsole（nested SbiConsole）→ Scheduler → Unmask。
+binding 变量作为动态 signal target。当前 EarlyBoot 的生产者—消费者顺序固定为 Banner →
+DtbBlob → MemBlockMemory → SbiCapability → EarlyConsole（nested SbiConsole）；随后 PagingInit
+执行 MemBlockReserved → MemBlock → FinalPageTable → Scheduler → Unmask。MemBlock 的独立设计边界见
+[`memblock-model.md`](memblock-model.md)。
 
 ## M1：输入已就绪时完成绑定（已完成）
 
@@ -79,7 +81,9 @@ M1 证明正式启动推导可以消费已经准备好的输入：
   DTB 物理范围大小至少为 1 且范围有效的事实，缺少任一事实都不能进入 Online；
 - M2 当时的 `EarlyBoot.Action::Enter` 严格依次启用 `Banner`、`DtbBlob`、`EarlyConsole`、
   `Cpu0Scheduler`，最后执行 local IRQ Unmask；M4 已在 DtbBlob 与 EarlyConsole 之间加入
-  `SbiCapability`；成功交接时相应对象均为 Online，且
+  `SbiCapability`，后续 MemBlock 里程碑又在 DtbBlob 与 SbiCapability 之间加入
+  `MemBlockMemory`，并把 Reserved/父 MemBlock 移到 PagingInit；成功交接时相应对象均为
+  Online，且
   `BootCommandLine` 存在 `earlycon` 键；具体值属于 DTB 输入，不是 EarlyBoot 契约；
 - 缺失 DTB bootargs 时，Banner 已为 Online，DtbBlob binding 以
   `relation_key_missing` 失败，不建立 `BootCommandLine` tuple，也不继续启用
@@ -96,7 +100,8 @@ availability 抽象。
 M2 完成标准是 Setup 产生 chosen bootargs 与 registry 两个 relation effect；Banner 的唯一
 ensure 与 DtbBlob 的范围前置条件、binding 和同值 relation effect 全部通过；默认轨迹包含
 当时的五步 EarlyBoot drive，最终保留三个 tuple、backend 字段、registry binding 和 Printk
-Console 注册事实；当前完整模型为六步 drive。
+Console 注册事实；当前 EarlyBoot 仍是五个直接 drive，但第三步已经明确为 MemBlockMemory，
+Scheduler 与 Unmask 属于 PagingInit。
 
 ## M3：EarlyConTable 链接期注册生命周期（已完成）
 
@@ -144,9 +149,11 @@ Printk 注册和 `BootCommandLine.has_key("earlycon")` 回归保持通过。
 - 正式表只含 `sbi → SbiConsole`，因此静态 nested drive 不引入多 backend 分派。当前编译器
   只允许 Task、CPU、runtime 与 InterruptControl 动态 signal target，不使用 relation/map
   binding 变量作为动态 target；
-- Kernel Setup 与 EarlyConTable Link 保持不变；EarlyBoot 从五个直接 drive 增为六个，在
+- Kernel Setup 与 EarlyConTable Link 保持不变；M4 将 EarlyBoot 从五个直接 drive 增为六个，在
   DtbBlob 与 EarlyConsole 之间插入 SbiCapability，并冻结 Banner → DtbBlob →
-  SbiCapability → EarlyConsole → Scheduler → Unmask。成功交接额外确保 capability Online。
+  SbiCapability → EarlyConsole → Scheduler → Unmask。后续 MemBlock 里程碑在 DtbBlob 与
+  SbiCapability 之间插入 MemBlockMemory，并把父 MemBlock、Scheduler 与 Unmask 收敛到
+  PagingInit；成功路径最终确保 MemBlock 和 capability Online。
 
 Coding 映射固定为 `SbiCapability.Enable ↔ sbi_init()`，由它完成 version/DBCN extension
 probe；`SbiConsole.Enable ↔ early_sbi_setup()`，由它按 DBCN →
@@ -169,7 +176,9 @@ Scheduler、Unmask IRQ 或 BootSetup；已经提交的 capability 状态与 avai
 `BootCommandLine.has_key("earlycon")` 与完整启动成功回归继续保留。
 
 完成标准：默认轨迹证明 capability 的 Ready 初态、唯一 Enable 与 DBCN availability effect，
-六个 EarlyBoot 直接 drive，SbiConsole 的上游 depends_on、DBCN selection 和 backing invariant，
+M4 当时的六个 EarlyBoot 直接 drive；当前阶段拆分后 EarlyBoot 为五个直接 drive，
+PagingInit 另有五个 drive。SbiConsole 的上游
+depends_on、DBCN selection 和 backing invariant，
 以及最终同时保留 availability、selection、backend 字段和注册事实；上述成功/失败变体均保持
 正确快照与 fail-stop 顺序，
 `make derive`、`make test`、`make difftest` 和 `git diff --check` 全部通过。
@@ -191,14 +200,14 @@ M5 不再改变上述正式模型的语义，而是把已经冻结的生产者�
 
 M5a 实现 DTB 输入、无外部 crate 的 FDT/bootargs 解析和唯一链接表查询；M5b 实现可注入的
 SBI 调用边界、capability 与 DBCN backend；M5c 实现 Printk 缓冲、原子注册语义和 QEMU
-smoke runner。M5 只实现 EarlyBoot 的可运行前缀，不实现 Scheduler、Unmask、BootSetup 或
+smoke runner。M5 只实现当时 EarlyBoot 的可运行前缀，不实现 Scheduler、Unmask、BootSetup 或
 SBI v0.1。正式模型保留 v0.1 替代路径，coding 文档明确其 Rust 实现仍未覆盖。
 
 完成实现保持 `setup_vm` ABI、正式 model、relation fixture、28 项 VM checkpoint 与 sibling
 patch 不变。宿主逻辑测试分别覆盖 FDT/命令行/registry、SBI capability/DBCN 参数与错误、
 Printk FIFO/溢出/注册提交；默认 QEMU/OpenSBI smoke 已确认 `LKM2 kernel\n` 只出现一次并
-回收进程。运行前缀在成功回放后仍保持中断屏蔽并停驻，没有越界实现 Scheduler、Unmask 或
-BootSetup。
+回收进程。后续 MemBlock 实现里程碑已把运行前缀延伸到回放后的 `setup_bootmem`；它仍保持
+中断屏蔽并停驻，没有越界实现 `setup_vm_final`、Scheduler、Unmask 或 BootSetup。
 
 每个里程碑独立保持可推导、可回归；后续工作替换上一阶段的抽象来源，不改变
 BootCommandLine、EarlyConTable、SbiConsole、EarlyConsole 及两次 backend 查询的选择

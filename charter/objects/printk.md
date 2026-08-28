@@ -42,8 +42,8 @@ fallback。Online 只表示探测已经完成，不要求任何 transport 可用
 若命令行或注册表 binding 失败、SBI transport 缺失、同时选择两种 transport，或选择结果
 没有上游依据，`EarlyConsole` 必须保持 Ready，且不得提交 backend 字段、backend binding 或
 Printk Console
-注册事实；后续 Scheduler Enable、interrupt Unmask 与 BootSetup 均不得执行。已经成功的
-Banner、DtbBlob 或 `SbiCapability` 前序 drive 及其事实不回滚。只有未来出现多个共享特殊
+注册事实；后续 PagingInit、Scheduler Enable、interrupt Unmask 与 BootSetup 均不得执行。已经成功的
+Banner、DtbBlob、MemBlockMemory 或 `SbiCapability` 前序 drive 及其事实不回滚。只有未来出现多个共享特殊
 early-console 协议的实例时，才引入派生的 early-console 类型。
 
 Model 只描述 Printk 可用、Console 注册和 backend 绑定，不建模逐消息写入。格式化、ring
