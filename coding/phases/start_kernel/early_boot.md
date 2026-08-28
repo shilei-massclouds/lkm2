@@ -15,7 +15,8 @@ M5 将 [`impl/phases/start_kernel.rs`](../../../impl/phases/start_kernel.rs) 实
 2. 驱动 `Banner.Transition::Enable`，通过初始 Online 的 Printk 提交内核 banner；此时
    Console 可以尚未 Online；
 3. 驱动 `DtbBlob.Transition::Enable`，从其 `/chosen/bootargs` 子关系把唯一的
-   `earlycon` 值复制到静态存在、初始为空的 `BootCommandLine`；
+   `earlycon` 值复制到静态存在、初始为空的 `BootCommandLine`；该 transition 先消费
+   QemuVirtPlatform 生产的“物理范围大小至少为 1”与“范围有效”事实；
 4. 驱动 `SbiCapability.Transition::Enable`，对应 `sbi_init()` 提交探测完成状态及实际可用的
    SBI console capability；
 5. 驱动 `EarlyConsole.Transition::Enable`，依次查询命令行和静态 earlycon 注册表，
@@ -33,9 +34,10 @@ trap、IRQ、timer 或 timekeeping 初始化都只能插入它之前，并需要
 关闭的 fail-stop 路径。
 
 已完成的 M2 直接用 `DtbBlob.Enable` 表达“内核观察并复制 bootargs”的生命周期边界，不增加
-`SetupArch` 或 `parse_dtb` 具名阶段，也不把字符串扫描算法纳入 model。DtbBlob binding
-失败时，Banner 已经 Online，但后续 EarlyConsole、Scheduler 和 Unmask drive 均不得发生；
-Online 不表示 DTB 内存失效。
+`SetupArch` 或 `parse_dtb` 具名阶段，也不把字符串扫描算法纳入 model。DtbBlob 的物理范围
+检查或 binding 失败时，Banner 已经 Online，但后续 EarlyConsole、Scheduler 和 Unmask
+drive 均不得发生；Online 不表示 DTB 内存失效。物理范围事实只允许由 QemuVirtPlatform
+建立，DtbBlob 不得自行建立。
 
 已完成的 M3 在 Kernel Setup 中提前完成 `EarlyConTable.Link`；EarlyBoot 不驱动 Link。
 已完成的 M4 在 DtbBlob 与 EarlyConsole 之间增加 `SbiCapability.Enable`，EarlyBoot 因此具有六个

@@ -23,9 +23,9 @@ current 且 OnCpu，Banner、DtbBlob、`SbiCapability`、EarlyConsole 和 `Cpu0S
 `printk_console_registered(Printk, EarlyConsole)`。`BootCommandLine` 必须存在 `earlycon`
 键，但 EarlyBoot 不断言其具体外部输入值；
 EarlyBoot 返回后仍由 BootTask 执行，第一次上下文切换继续归 BootHandoff。Banner 成功后
-若 DtbBlob binding 或后续任一 drive 失败，Banner 保持 Online，但不得执行剩余 drive 或
-建立交接事实；路径保持 interrupt 关闭并 fail-stop，BootSetup 不得越过缺失的交接事实
-继续执行。
+若 DtbBlob 的 QEMU 物理范围前置检查、bootargs binding 或后续任一 drive 失败，Banner
+保持 Online，但不得执行剩余 drive 或建立交接事实；路径保持 interrupt 关闭并 fail-stop，
+BootSetup 不得越过缺失的交接事实继续执行。
 
 若 `SbiCapability` 探测完成但没有 transport availability，失败必须发生在后续
 `SbiConsole.Enable` 的 depends_on；`SbiCapability` 保持 Online，Scheduler、Unmask 与

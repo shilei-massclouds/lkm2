@@ -10,6 +10,11 @@
 `EarlyDtbMapping` 只发布从原始 DTB 地址开始的虚址和剩余有效窗口；`DtbBlob` 借用该静态
 窗口进行校验，不取得映射或固件内存所有权。
 
+正式模型中的物理范围存在性与有效性事实由 QemuVirtPlatform 生产。实现侧对应边界由 VM
+构造映射时对两段 PMD 终点和地址加法做溢出检查，并由 `EarlyDtbMapping` 只在物理地址与
+映射虚址都已发布后给出非空剩余窗口；FDT header 进一步要求可读窗口至少覆盖 40 字节。
+因此运行时条件强于模型要求的范围大小至少为 1。
+
 ## FDT 校验与输出
 
 `DtbBlob::from_bytes` 必须在发布任何输出前校验 magic、版本、total size、各 block 的 offset

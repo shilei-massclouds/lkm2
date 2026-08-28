@@ -340,6 +340,24 @@ class EarlyConsoleModelTests(unittest.TestCase):
         self.assertEqual(dtb_type.initial_state, ("State", "Ready"))
         self.assertEqual(dtb_objects["DtbBlob"].parent.value, "Kernel")
         self.assertEqual(dtb_objects["ChosenBootArgs"].parent.value, "DtbBlob")
+        dtb_enable_model = next(
+            transition
+            for state in dtb_objects["DtbBlob"].states
+            for transition in state.transitions
+        )
+        self.assertEqual(
+            tuple(block.kind for block in dtb_enable_model.blocks),
+            ("depends_on", "binds", "establishes"),
+        )
+        dtb_depends = dtb_enable_model.blocks[0].expressions
+        self.assertEqual(
+            tuple(expression.children[0].value for expression in dtb_depends[2:]),
+            (
+                "dtb_blob_physical_range_size_at_least",
+                "dtb_blob_physical_range_valid",
+            ),
+        )
+        self.assertEqual(dtb_depends[2].children[2].value, 1)
 
         console_objects = {item.name[-1]: item for item in console_module.objects}
         earlycon_table = console_objects["EarlyConTable"]
@@ -389,6 +407,26 @@ class EarlyConsoleModelTests(unittest.TestCase):
         self.assertEqual(result.status, "yielded")
         path = result.paths[0]
         units = tuple(_all_units(path.units))
+
+        qemu_enable = next(
+            unit
+            for unit in units
+            if unit.event.target[-1] == "QemuVirtPlatform"
+            and unit.handler == ("Transition", "Enable")
+        )
+        self.assertEqual(
+            tuple(
+                (effect.expression, effect.status)
+                for effect in qemu_enable.establishes
+            ),
+            (
+                (
+                    "dtb_blob_physical_range_size_at_least(DtbBlob, 1)",
+                    "established",
+                ),
+                ("dtb_blob_physical_range_valid(DtbBlob)", "established"),
+            ),
+        )
 
         setup_effects = {
             unit.event.target[-1]: tuple(
@@ -500,6 +538,18 @@ class EarlyConsoleModelTests(unittest.TestCase):
             and unit.handler == ("Transition", "Enable")
         )
         self.assertEqual(
+            tuple((check.expression, check.status) for check in dtb_enable.depends_on),
+            (
+                ("ChosenBootArgs == State::Ready", "passed"),
+                ("BootCommandLine == State::Ready", "passed"),
+                (
+                    "dtb_blob_physical_range_size_at_least(DtbBlob, 1)",
+                    "passed",
+                ),
+                ("dtb_blob_physical_range_valid(DtbBlob)", "passed"),
+            ),
+        )
+        self.assertEqual(
             tuple(
                 (
                     binding.name,
@@ -524,13 +574,7 @@ class EarlyConsoleModelTests(unittest.TestCase):
             ),
             (("BootCommandLine", "earlycon", "sbi", "established"),),
         )
-        self.assertEqual(
-            tuple((check.expression, check.status) for check in dtb_enable.ensures),
-            (
-                ('ChosenBootArgs.contains("earlycon", "sbi")', "passed"),
-                ('BootCommandLine.contains("earlycon", "sbi")', "passed"),
-            ),
-        )
+        self.assertEqual(dtb_enable.ensures, ())
 
         capability_enable = next(
             unit
@@ -952,6 +996,67 @@ class EarlyConsoleModelTests(unittest.TestCase):
             path,
             availability=("sbi_dbcn_available", "sbi_v01_console_available"),
         )
+
+    def test_dtb_rejects_small_or_invalid_qemu_physical_range(self) -> None:
+        cases = (
+            (
+                "smaller than one",
+                "dtb_blob_physical_range_size_at_least(DtbBlob, 1);",
+                "dtb_blob_physical_range_size_at_least(DtbBlob, 0);",
+            ),
+            (
+                "invalid",
+                "dtb_blob_physical_range_valid(DtbBlob);",
+                None,
+            ),
+        )
+
+        for name, requirement, qemu_replacement in cases:
+            with self.subTest(name=name):
+                edits = tuple(
+                    (
+                        "systems/qemu_virt_platform.spec",
+                        f"{indent}{requirement}\n",
+                        "" if qemu_replacement is None
+                        else f"{indent}{qemu_replacement}\n",
+                    )
+                    for indent in ("                    ", "            ")
+                )
+                path = _derive_variant(edits)
+                units = tuple(_all_units(path.units))
+                dtb_enable = next(
+                    unit
+                    for unit in units
+                    if unit.event.target[-1] == "DtbBlob"
+                    and unit.handler == ("Transition", "Enable")
+                )
+
+                self.assertEqual(path.status, "depends_on_failed")
+                self.assertEqual(dtb_enable.status, "depends_on_failed")
+                self.assertEqual(
+                    (
+                        dtb_enable.depends_on[-1].expression,
+                        dtb_enable.depends_on[-1].status,
+                    ),
+                    (requirement.removesuffix(";"), "failed"),
+                )
+                self.assertEqual(dtb_enable.bindings, ())
+                self.assertEqual(dtb_enable.relation_effects, ())
+                self.assertFalse(
+                    any(
+                        item.owner[-1] == "BootCommandLine"
+                        for item in path.tuples
+                    )
+                )
+                states = {
+                    item.object[-1]: item.state for item in path.final_state
+                }
+                self.assertEqual(states["QemuVirtPlatform"], ("State", "Online"))
+                self.assertEqual(states["Banner"], ("State", "Online"))
+                self.assertEqual(states["DtbBlob"], ("State", "Ready"))
+                self.assert_console_failure_is_atomic(
+                    path, capability_state="Ready", availability=()
+                )
 
     def test_ambiguous_bootargs_stops_before_backend_enable(self) -> None:
         chosen_effect = (

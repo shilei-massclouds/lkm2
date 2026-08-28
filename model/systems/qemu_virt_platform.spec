@@ -1,6 +1,9 @@
 /* Qemu Virt Platform - default platform for lkm2 */
 
 use super::opensbi::OpenSBI;
+use model::objects::dtb_blob::DtbBlob;
+use model::objects::dtb_blob::dtb_blob_physical_range_size_at_least;
+use model::objects::dtb_blob::dtb_blob_physical_range_valid;
 
 type QemuVirtPlatformType;
 
@@ -24,6 +27,11 @@ object QemuVirtPlatform: QemuVirtPlatformType {
     state State::Ready {
         transitions {
             on Transition::Enable -> State::Online {
+                establishes {
+                    dtb_blob_physical_range_size_at_least(DtbBlob, 1);
+                    dtb_blob_physical_range_valid(DtbBlob);
+                }
+
                 emits {
                     OpenSBI.Transition::Enable;
                 }
@@ -32,6 +40,10 @@ object QemuVirtPlatform: QemuVirtPlatformType {
     }
 
     state State::Online {
+        invariant {
+            dtb_blob_physical_range_size_at_least(DtbBlob, 1);
+            dtb_blob_physical_range_valid(DtbBlob);
+        }
     }
 }
 

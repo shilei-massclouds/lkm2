@@ -75,8 +75,8 @@ M1 证明正式启动推导可以消费已经准备好的输入：
 - `DtbBlob` 属于 Kernel、初始为 Ready，`ChosenBootArgs` 是其子对象；
 - `DtbBlob.Transition::Enable` 通过
   `ChosenBootArgs.unique_value("earlycon")` 得到同一个值，建立
-  `BootCommandLine.contains("earlycon", value)`，并在源、目标 relation 都包含该值后
-  进入 Online；
+  `BootCommandLine.contains("earlycon", value)`；Enable 还消费 QemuVirtPlatform 建立的
+  DTB 物理范围大小至少为 1 且范围有效的事实，缺少任一事实都不能进入 Online；
 - M2 当时的 `EarlyBoot.Action::Enter` 严格依次启用 `Banner`、`DtbBlob`、`EarlyConsole`、
   `Cpu0Scheduler`，最后执行 local IRQ Unmask；M4 已在 DtbBlob 与 EarlyConsole 之间加入
   `SbiCapability`；成功交接时相应对象均为 Online，且
@@ -94,7 +94,7 @@ OpenSBI 只负责固件生命周期与 Kernel handoff，不建立上述三个 re
 availability 抽象。
 
 M2 完成标准是 Setup 产生 chosen bootargs 与 registry 两个 relation effect；Banner 的唯一
-ensure 与 DtbBlob 的 binding、同值 relation effect 和两项 ensures 全部通过；默认轨迹包含
+ensure 与 DtbBlob 的范围前置条件、binding 和同值 relation effect 全部通过；默认轨迹包含
 当时的五步 EarlyBoot drive，最终保留三个 tuple、backend 字段、registry binding 和 Printk
 Console 注册事实；当前完整模型为六步 drive。
 
