@@ -4,7 +4,7 @@
 include build.mak
 include qemu.mak
 
-.PHONY: all build checkpoints checkpoint-sibling-patch checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints fmt clippy run clean help FORCE
+.PHONY: all build checkpoints checkpoint-sibling-patch checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-dtb-blob test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints fmt clippy run clean help FORCE
 
 all: build
 
@@ -30,7 +30,10 @@ difftest:
 
 checkpoint-diff-sv57: difftest
 
-test: build fmt clippy test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints
+test: build fmt clippy test-dtb-blob test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints
+
+test-dtb-blob: $(DTB_BLOB_TEST)
+	$(DTB_BLOB_TEST)
 
 test-early-console: $(EARLY_CONSOLE_TEST)
 	$(EARLY_CONSOLE_TEST)
@@ -93,7 +96,8 @@ help:
 	@echo "  difftest Build sibling and run the strict Sv57 differential"
 	@echo "  checkpoint-diff-sv57 Compatibility alias for difftest"
 	@echo "  test   Build and run formatting and Clippy checks"
-	@echo "  test-early-console Run host-side FDT and earlycon registry unit tests"
+	@echo "  test-dtb-blob Run host-side DTB mapping and FDT parser unit tests"
+	@echo "  test-early-console Run host-side boot command line and registry unit tests"
 	@echo "  test-sbi Run host-side SBI capability and DBCN unit tests"
 	@echo "  test-printk Run host-side early Printk buffer and replay unit tests"
 	@echo "  test-smoke Confirm the DBCN banner once and cleanly stop QEMU"

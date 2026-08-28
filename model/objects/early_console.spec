@@ -61,58 +61,8 @@ type ConsoleType {
     }
 }
 
-type DtbBlobType {
-    initial_state: State::Ready;
-
-    state State::Ready {
-        transitions {
-            on Transition::Enable -> State::Online {
-            }
-        }
-    }
-
-    state State::Online {
-    }
-}
-
 object BootCommandLine: Relation<String, String> {
     parent: Kernel;
-    initial_state: State::Ready;
-
-    state State::Ready {
-    }
-}
-
-object DtbBlob: DtbBlobType {
-    parent: Kernel;
-
-    state State::Ready {
-        transitions {
-            override on Transition::Enable -> State::Online {
-                depends_on {
-                    ChosenBootArgs.state == State::Ready;
-                    BootCommandLine.state == State::Ready;
-                }
-
-                binds {
-                    value := ChosenBootArgs.unique_value("earlycon");
-                }
-
-                establishes {
-                    BootCommandLine.contains("earlycon", value);
-                }
-
-                ensures {
-                    ChosenBootArgs.contains("earlycon", value);
-                    BootCommandLine.contains("earlycon", value);
-                }
-            }
-        }
-    }
-}
-
-object ChosenBootArgs: Relation<String, String> {
-    parent: DtbBlob;
     initial_state: State::Ready;
 
     state State::Ready {

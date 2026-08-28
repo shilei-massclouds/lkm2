@@ -176,7 +176,15 @@ Scheduler、Unmask IRQ 或 BootSetup；已经提交的 capability 状态与 avai
 
 ## M5：EarlyConsole DBCN 运行时实现（已完成）
 
-M5 不再修改上述正式模型，而是把已经冻结的生产者—消费者链实现到 Rust：Banner 先进入
+`DtbBlob` 按四层对应关系独立拆分，不再作为 EarlyConsole 的内部定义：model
+[`model/objects/dtb_blob.spec`](../../model/objects/dtb_blob.spec)、charter
+[`charter/objects/dtb_blob.md`](../../charter/objects/dtb_blob.md)、coding
+[`coding/objects/dtb_blob.md`](../../coding/objects/dtb_blob.md) 和 implementation
+[`impl/objects/dtb_blob.rs`](../../impl/objects/dtb_blob.rs)。EarlyConsole 层只消费 `DtbBlob`
+产出的 `/chosen/bootargs`，并负责将其收窄为 `BootCommandLine` 以及查询链接期 backend
+registry。
+
+M5 不再改变上述正式模型的语义，而是把已经冻结的生产者—消费者链实现到 Rust：Banner 先进入
 固定 Printk 缓冲，内核从 ArchHead 建立的只读 DTB fixmap 中校验并复制唯一
 `/chosen/bootargs`，通过链接期 `EarlyConTable` 选择 `sbi` backend，探测 SBI v2.0 与 DBCN，
 启用并注册 Console 后 FIFO 回放 `LKM2 kernel\n`，最后在中断仍屏蔽的状态停驻。

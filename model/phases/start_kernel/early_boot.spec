@@ -2,8 +2,8 @@
 
 use model::objects::scheduler::Cpu0Scheduler;
 use model::objects::task::BootTask;
+use model::objects::dtb_blob::DtbBlob;
 use model::objects::early_console::BootCommandLine;
-use model::objects::early_console::DtbBlob;
 use model::objects::early_console::EarlyConsole;
 use model::objects::early_console::SbiCapability;
 use model::objects::early_console::SbiConsole;

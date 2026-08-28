@@ -1,7 +1,7 @@
 /* Kernel - core of lkm2 */
 
 use model::objects::task::BootTask;
-use model::objects::early_console::ChosenBootArgs;
+use model::objects::dtb_blob::ChosenBootArgs;
 use model::objects::early_console::EarlyConTable;
 use model::objects::early_console::SbiConsole;
 

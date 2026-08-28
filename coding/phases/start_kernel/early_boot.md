@@ -67,6 +67,9 @@ DTB 起算的剩余只读窗口。FDT parser 必须完整校验 header、各 blo
 structure token 和字符串引用，只复制唯一 `/chosen/bootargs`。命令行固定最多 4096 字节，
 要求 NUL 结尾、无内嵌 NUL 且为 UTF-8，并且恰好包含一个独立 `earlycon=sbi` token。
 
+上述 DTB 输入与 BootCommandLine 的生产边界独立映射在
+[`coding/objects/dtb_blob.md`](../../objects/dtb_blob.md)。
+
 backend 必须由链接脚本保留的 `EarlyConTable` 唯一查询产生，不能因当前只有 SBI backend
 而跳过 registry。后续 capability probe 只接受 SBI >= 2.0 且 DBCN probe 为正；Rust 不实现
 正式模型仍保留的 SBI v0.1 fallback。任何输入、查询、探测、输出或注册失败都保持中断屏蔽

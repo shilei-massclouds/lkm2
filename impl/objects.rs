@@ -1,4 +1,5 @@
 pub(crate) mod cpu;
+pub(crate) mod dtb_blob;
 pub(crate) mod early_console;
 pub(crate) mod printk;
 mod ptrace;

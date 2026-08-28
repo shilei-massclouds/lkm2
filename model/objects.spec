@@ -6,6 +6,7 @@ spec scheduler;
 spec task;
 spec boot_stack;
 spec printk;
+spec dtb_blob;
 spec early_console;
 spec user_app_runtime;
 spec vm;

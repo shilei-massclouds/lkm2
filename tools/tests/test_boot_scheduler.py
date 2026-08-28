@@ -35,7 +35,7 @@ BOOT_SETUP = ("phases", "start_kernel", "boot_setup", "BootSetup")
 USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
 BOOT_CPU = ("objects", "cpu", "BootCPU")
 EARLY_CONSOLE = ("objects", "early_console", "EarlyConsole")
-DTB_BLOB = ("objects", "early_console", "DtbBlob")
+DTB_BLOB = ("objects", "dtb_blob", "DtbBlob")
 SBI_CAPABILITY = ("objects", "early_console", "SbiCapability")
 BANNER = ("objects", "printk", "Banner")
 

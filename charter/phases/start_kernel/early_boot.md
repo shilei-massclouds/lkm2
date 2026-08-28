@@ -34,6 +34,9 @@ BootSetup 均不得执行。
 DtbBlob Online 表示内核已经观察并复制其 bootargs，不表示 DTB 内存失效。本里程碑直接
 使用该 lifecycle transition，不物化 `SetupArch`、`parse_dtb` 或 DT 属性包装阶段。
 
+对象自身的输入所有权、失败和 Online 语义见
+[`DtbBlob` 章程](../../objects/dtb_blob.md)。
+
 全局 S-mode interrupt enable 只打开 CPU 的全局投递边界，不等于所有设备 interrupt source
 均已配置或启用。runtime trap dispatch、IRQ controller、timer 与 timekeeping 的实现就绪
 条件仍待后续阶段逐项建模。

@@ -312,15 +312,13 @@ class EarlyConsoleModelTests(unittest.TestCase):
 
     def test_default_boot_binds_sbi_early_console_from_committed_tuples(self) -> None:
         model = compile_spec(REPOSITORY / "model/main.spec")
-        module = next(
+        console_module = next(
             item for item in model.modules if item.name == ("objects", "early_console")
         )
         self.assertEqual(
-            {item.name[-1] for item in module.objects},
+            {item.name[-1] for item in console_module.objects},
             {
                 "BootCommandLine",
-                "ChosenBootArgs",
-                "DtbBlob",
                 "EarlyConTable",
                 "EarlyConsole",
                 "SbiCapability",
@@ -328,13 +326,23 @@ class EarlyConsoleModelTests(unittest.TestCase):
             },
         )
 
-        objects = {item.name[-1]: item for item in module.objects}
-        dtb_type = next(item for item in module.types if item.name[-1] == "DtbBlobType")
+        dtb_module = next(
+            item for item in model.modules if item.name == ("objects", "dtb_blob")
+        )
+        self.assertEqual(
+            {item.name[-1] for item in dtb_module.objects},
+            {"ChosenBootArgs", "DtbBlob"},
+        )
+        dtb_objects = {item.name[-1]: item for item in dtb_module.objects}
+        dtb_type = next(
+            item for item in dtb_module.types if item.name[-1] == "DtbBlobType"
+        )
         self.assertEqual(dtb_type.initial_state, ("State", "Ready"))
-        self.assertEqual(objects["DtbBlob"].parent.value, "Kernel")
-        self.assertEqual(objects["ChosenBootArgs"].parent.value, "DtbBlob")
+        self.assertEqual(dtb_objects["DtbBlob"].parent.value, "Kernel")
+        self.assertEqual(dtb_objects["ChosenBootArgs"].parent.value, "DtbBlob")
 
-        earlycon_table = objects["EarlyConTable"]
+        console_objects = {item.name[-1]: item for item in console_module.objects}
+        earlycon_table = console_objects["EarlyConTable"]
         self.assertEqual(earlycon_table.parent.value, "KernelImage")
         self.assertEqual(earlycon_table.initial_state, ("State", "Base"))
         link_handlers = tuple(
@@ -630,7 +638,7 @@ class EarlyConsoleModelTests(unittest.TestCase):
         )
         self.assertEqual(backend.values[0][-1], "SbiConsole")
 
-        self.assertEqual(
+        self.assertCountEqual(
             tuple(
                 (item.owner[-1], item.key.value, item.value.value[-1]
                  if item.value.kind == "object" else item.value.value)

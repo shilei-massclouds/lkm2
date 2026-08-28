@@ -1,5 +1,6 @@
 //! Starting-kernel phase.
 
+use crate::objects::dtb_blob::DtbBlob;
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
 use crate::objects::early_dtb_mapping;
 use crate::objects::printk::EarlyPrintk;
@@ -19,7 +20,15 @@ pub(crate) extern "C" fn start_kernel() -> ! {
         Some(dtb) => dtb,
         None => fail_stop(),
     };
-    let command_line = match BootCommandLine::from_dtb(dtb.as_bytes()) {
+    let dtb_blob = match DtbBlob::from_bytes(dtb.as_bytes()) {
+        Ok(dtb_blob) => dtb_blob,
+        Err(_) => fail_stop(),
+    };
+    let bootargs = match dtb_blob.chosen_bootargs() {
+        Ok(bootargs) => bootargs,
+        Err(_) => fail_stop(),
+    };
+    let command_line = match BootCommandLine::from_chosen_bootargs(bootargs) {
         Ok(command_line) => command_line,
         Err(_) => fail_stop(),
     };
