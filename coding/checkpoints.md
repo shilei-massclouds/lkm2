@@ -100,6 +100,22 @@ LKMCP1 id=<canonical-id> hash=<16hex> key=0x<16位小写十六进制>...
 DBCN 错误不改变启动控制流。页表观测只能通过安全的 `AtomicU64` 读取和安全逐级 walk，
 不得为 checkpoint 新增裸指针写入或无说明的 `unsafe`。
 
+### PhaseTest
+
+PhaseTest 是 lkm2 单侧的启动阶段对象测试，不属于 Linux differential 或普通 checkpoint
+套件。构建期 `PHASE_TEST` 为空时不编译测试路径；当前唯一受支持的值为
+`memblock-basic`，未知值必须在构建开始时失败。公开入口为
+`make phase-test PHASE_TEST=memblock-basic`，默认 `make test` 也运行该测试。
+
+测试在 `MemBlock.Online` 观测完成后接收唯一的 `&mut MemBlock`，完成实际物理范围分配、
+释放和状态恢复，然后通过 SBI SRST 关闭虚拟机，不继续执行 `setup_vm_final()`。终端只允许
+一条固定记录：
+
+```text
+LKMPT1 test=memblock-basic checkpoint=MemBlock.Online result=pass
+LKMPT1 test=memblock-basic checkpoint=MemBlock.Online result=fail case=<stable-case-id>
+```
+
 ## Sibling patch 与执行
 
 sibling 固定为相邻 `linux-6.12` 的 `dev` 分支。VM 套件仍使用

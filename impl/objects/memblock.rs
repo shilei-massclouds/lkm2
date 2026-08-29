@@ -110,6 +110,53 @@ impl<const CAPACITY: usize> RegionSet<CAPACITY> {
             .copied()
             .find(|item| item.base < range.end && range.base < item.end)
     }
+
+    /// Remove an arbitrary half-open interval. Build the complete result in a
+    /// temporary backing array first so a capacity error cannot partially
+    /// mutate the reservation set.
+    #[allow(dead_code)]
+    fn remove(&mut self, range: PhysRange) -> Result<(), MemBlockError> {
+        let mut result = [PhysRange { base: 0, end: 0 }; CAPACITY];
+        let mut result_len = 0;
+        let mut changed = false;
+        for item in self.regions[..self.len].iter().copied() {
+            if item.end <= range.base || range.end <= item.base {
+                if result_len == CAPACITY {
+                    return Err(MemBlockError::RegionCapacityExceeded);
+                }
+                result[result_len] = item;
+                result_len += 1;
+                continue;
+            }
+
+            changed = true;
+            if item.base < range.base {
+                if result_len == CAPACITY {
+                    return Err(MemBlockError::RegionCapacityExceeded);
+                }
+                result[result_len] = PhysRange {
+                    base: item.base,
+                    end: range.base,
+                };
+                result_len += 1;
+            }
+            if range.end < item.end {
+                if result_len == CAPACITY {
+                    return Err(MemBlockError::RegionCapacityExceeded);
+                }
+                result[result_len] = PhysRange {
+                    base: range.end,
+                    end: item.end,
+                };
+                result_len += 1;
+            }
+        }
+        if changed {
+            self.regions = result;
+            self.len = result_len;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,10 +452,55 @@ impl MemBlock {
         }
     }
 
-    /// Allocate one physically contiguous page from the highest suitable
-    /// address, avoiding and recording every reservation.  This is an
-    /// intentionally narrow interface for early page-table pages; it is not a
-    /// general-purpose allocator.
+    /// Allocate a physically contiguous range from the highest suitable
+    /// address, avoiding and recording every reservation.
+    pub(crate) fn allocate_phys(
+        &mut self,
+        size: u64,
+        alignment: u64,
+    ) -> Result<u64, MemBlockError> {
+        if size == 0 || alignment == 0 || !alignment.is_power_of_two() {
+            return Err(MemBlockError::InvalidAllocationAlignment);
+        }
+
+        for memory_index in (0..self.memory.regions.len()).rev() {
+            let Some(memory) = self.memory.regions.get(memory_index) else {
+                continue;
+            };
+            let Some(last_start) = memory.end.checked_sub(size) else {
+                continue;
+            };
+            let mut candidate = last_start & !(alignment - 1);
+            loop {
+                if candidate < memory.base {
+                    break;
+                }
+                let Some(end) = candidate.checked_add(size) else {
+                    break;
+                };
+                let candidate_range = PhysRange {
+                    base: candidate,
+                    end,
+                };
+                let Some(conflict) = self.reserved.regions.overlaps(candidate_range) else {
+                    self.reserved.regions.add(candidate_range)?;
+                    return Ok(candidate);
+                };
+                let Some(before) = conflict.base.checked_sub(size) else {
+                    break;
+                };
+                let next = before & !(alignment - 1);
+                if next >= candidate {
+                    break;
+                }
+                candidate = next;
+            }
+        }
+        Err(MemBlockError::AllocationExhausted)
+    }
+
+    /// Allocate one page-table page while retaining the historical alignment
+    /// contract used by the VM builder.
     pub(crate) fn allocate_page_table_page(
         &mut self,
         alignment: u64,
@@ -421,38 +513,16 @@ impl MemBlock {
         {
             return Err(MemBlockError::InvalidAllocationAlignment);
         }
+        self.allocate_phys(page_size, alignment)
+    }
 
-        for memory_index in (0..self.memory.regions.len()).rev() {
-            let Some(memory) = self.memory.regions.get(memory_index) else {
-                continue;
-            };
-            let Some(last_start) = memory.end.checked_sub(page_size) else {
-                continue;
-            };
-            let mut candidate = last_start & !(alignment - 1);
-            while candidate >= memory.base {
-                let Some(end) = candidate.checked_add(page_size) else {
-                    break;
-                };
-                let candidate_range = PhysRange {
-                    base: candidate,
-                    end,
-                };
-                let Some(conflict) = self.reserved.regions.overlaps(candidate_range) else {
-                    self.reserved.regions.add(candidate_range)?;
-                    return Ok(candidate);
-                };
-                let Some(before) = conflict.base.checked_sub(page_size) else {
-                    break;
-                };
-                let next = before & !(alignment - 1);
-                if next >= candidate {
-                    break;
-                }
-                candidate = next;
-            }
-        }
-        Err(MemBlockError::AllocationExhausted)
+    /// Release a physical interval from Reserved using Linux's
+    /// `memblock_phys_free()` half-open interval semantics. A range with no
+    /// intersection is a successful no-op.
+    #[allow(dead_code)]
+    pub(crate) fn free_phys(&mut self, base: u64, size: u64) -> Result<(), MemBlockError> {
+        let range = PhysRange::from_base_size(base, size)?;
+        self.reserved.regions.remove(range)
     }
 }
 
@@ -1081,5 +1151,94 @@ mod tests {
             memblock.allocate_page_table_page(0x1000, 0x1000),
             Err(MemBlockError::AllocationExhausted)
         ));
+    }
+
+    fn synthetic_memblock(ranges: &[(u64, u64)]) -> MemBlock {
+        let mut memory_regions = RegionSet::<MAX_MEMORY_REGIONS>::new();
+        memory_regions
+            .add(PhysRange::from_base_size(0, 0x10_000).unwrap())
+            .unwrap();
+        let mut reserved_regions = RegionSet::<MAX_RESERVED_REGIONS>::new();
+        for &(base, size) in ranges {
+            reserved_regions
+                .add(PhysRange::from_base_size(base, size).unwrap())
+                .unwrap();
+        }
+        MemBlock {
+            memory: MemBlockMemory {
+                regions: memory_regions,
+            },
+            reserved: MemBlockReserved {
+                regions: reserved_regions,
+            },
+            kernel_image: PhysRange { base: 0, end: 0 },
+        }
+    }
+
+    #[test]
+    fn physical_free_supports_trim_split_and_cross_reservation() {
+        let mut memblock = synthetic_memblock(&[(0x1000, 0x1000), (0x3000, 0x1000)]);
+        memblock.free_phys(0x1000, 0x4000).unwrap();
+        assert!(memblock.reserved_ranges().next().is_none());
+
+        let mut memblock = synthetic_memblock(&[(0x1000, 0x1000)]);
+        memblock.free_phys(0x1000, 0x400).unwrap();
+        assert_eq!(
+            memblock.reserved_ranges().collect::<Vec<_>>(),
+            vec![(0x1400, 0x2000)]
+        );
+        memblock.free_phys(0x1c00, 0x400).unwrap();
+        assert_eq!(
+            memblock.reserved_ranges().collect::<Vec<_>>(),
+            vec![(0x1400, 0x1c00)]
+        );
+
+        let mut memblock = synthetic_memblock(&[(0x1000, 0x1000)]);
+        memblock.free_phys(0x1400, 0x400).unwrap();
+        assert_eq!(
+            memblock.reserved_ranges().collect::<Vec<_>>(),
+            vec![(0x1000, 0x1400), (0x1800, 0x2000)]
+        );
+    }
+
+    #[test]
+    fn physical_free_invalid_interval_is_atomic_and_no_intersection_is_noop() {
+        let mut memblock = synthetic_memblock(&[(0x1000, 0x1000)]);
+        let before = memblock.reserved_ranges().collect::<Vec<_>>();
+        assert_eq!(
+            memblock.free_phys(0x2000, 0),
+            Err(MemBlockError::AddressOverflow)
+        );
+        assert_eq!(
+            memblock.free_phys(u64::MAX, 2),
+            Err(MemBlockError::AddressOverflow)
+        );
+        assert_eq!(memblock.reserved_ranges().collect::<Vec<_>>(), before);
+        memblock.free_phys(0x8000, 0x100).unwrap();
+        assert_eq!(memblock.reserved_ranges().collect::<Vec<_>>(), before);
+    }
+
+    #[test]
+    fn physical_allocation_accepts_non_page_sizes_and_is_high_first() {
+        let mut memblock = synthetic_memblock(&[(0x8000, 0x1000)]);
+        assert_eq!(memblock.allocate_phys(0x1800, 0x1000), Ok(0xe000));
+        assert!(memblock.free_phys(0xe000, 0x1800).is_ok());
+    }
+
+    #[test]
+    fn physical_free_capacity_failure_is_atomic() {
+        let mut regions = RegionSet::<4>::new();
+        for base in [0x100_u64, 0x300, 0x500, 0x700] {
+            regions
+                .add(PhysRange::from_base_size(base, 0x40).unwrap())
+                .unwrap();
+        }
+        let before = regions;
+        assert_eq!(
+            regions.remove(PhysRange::from_base_size(0x110, 0x10).unwrap()),
+            Err(MemBlockError::RegionCapacityExceeded)
+        );
+        assert_eq!(regions.len, before.len);
+        assert_eq!(regions.regions, before.regions);
     }
 }

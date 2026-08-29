@@ -41,7 +41,9 @@ DTB 文件自身的物理存储范围、DTB `/memory` 描述的系统 RAM，以�
 `MemBlockReserved` 表示的强制保留范围是三个不同概念，不得互相替代。
 
 当前 Rust 前缀实现 DTB `/memory` 扫描和 `setup_bootmem` 的强制保留提交；具体容器、容量、
-排序与合并仍属于 coding/impl，不能反向成为 model 状态。NUMA、hotplug、NOMAP、memory
-limit、动态 `/reserved-memory` 分配、区间裁剪/对齐以及实际分配 API 与策略留给后续里程碑。
+排序与合并仍属于 coding/impl，不能反向成为 model 状态。实现级
+`allocate_phys`/`free_phys` 能力用于早期物理页和 PhaseTest，但不改变模型字段、生命周期
+或差分 checkpoint ABI。NUMA、hotplug、NOMAP、memory limit、动态 `/reserved-memory` 分配
+以及更高层的分配策略仍留给后续里程碑。
 
 模型映射：[model/objects/memblock.spec](../../model/objects/memblock.spec)。

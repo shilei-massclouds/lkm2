@@ -6,9 +6,10 @@ use crate::objects::dtb_blob::DtbBlob;
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
 use crate::objects::memblock::{MemBlock, MemBlockMemory, RangeCheckpointObservation};
 use crate::objects::printk::EarlyPrintk;
+#[cfg(not(phase_test_memblock_basic))]
+use crate::objects::setup_vm_final;
 use crate::objects::{
     configure_page_table_diagnostics, early_dtb_mapping, kernel_image_physical_range,
-    setup_vm_final,
 };
 use crate::systems::sbi::{Ecall, SbiCapability, SbiConsole};
 
@@ -79,17 +80,18 @@ pub(crate) extern "C" fn start_kernel() -> ! {
     }
     let snapshot = memblock.checkpoint_snapshot();
     for (index, (base, end)) in memblock.memory_ranges().enumerate() {
-        crate::memblock_checkpoints::memory_range(index as u64, base, end);
+        crate::checkpoint::memblock::memory_range(index as u64, base, end);
     }
     for (index, (base, end)) in memblock.checkpoint_reserved_ranges().enumerate() {
-        crate::memblock_checkpoints::reserved_range(index as u64, base, end);
+        crate::checkpoint::memblock::reserved_range(index as u64, base, end);
     }
     let memory_observation = checkpoint_observation(snapshot.memory());
     let reserved_observation = checkpoint_observation(snapshot.reserved());
-    crate::memblock_checkpoints::memblock_ready(memory_observation);
-    crate::memblock_checkpoints::memblock_memory_online(memory_observation);
-    crate::memblock_checkpoints::memblock_reserved_online(reserved_observation);
-    crate::memblock_checkpoints::memblock_online(memory_observation, reserved_observation);
+    crate::checkpoint::memblock::memblock_ready(memory_observation);
+    crate::checkpoint::memblock::memblock_memory_online(memory_observation);
+    crate::checkpoint::memblock::memblock_reserved_online(reserved_observation);
+    crate::checkpoint::memblock_online(&mut memblock, memory_observation, reserved_observation);
+    #[cfg(not(phase_test_memblock_basic))]
     if setup_vm_final(&mut memblock).is_err() {
         fail_stop();
     }
@@ -100,8 +102,8 @@ pub(crate) extern "C" fn start_kernel() -> ! {
 
 fn checkpoint_observation(
     observation: RangeCheckpointObservation,
-) -> crate::memblock_checkpoints::MemBlockRangeObservation {
-    crate::memblock_checkpoints::MemBlockRangeObservation {
+) -> crate::checkpoint::memblock::MemBlockRangeObservation {
+    crate::checkpoint::memblock::MemBlockRangeObservation {
         count: observation.count(),
         digest: observation.digest(),
     }

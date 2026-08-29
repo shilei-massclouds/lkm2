@@ -38,4 +38,7 @@ digest 使用大端 `(base, end)` 字节串上的 64 位 FNV-1a。
 
 只支持 1 或 2 个 address/size cells。动态 `/reserved-memory` 的 `size` 请求需要早期分配策略，
 当前以 `DynamicReservationUnsupported` fail-stop；NOMAP、NUMA、hotplug、memory limit、usable
-memory 裁剪、allocator API 与实际分配策略均未实现。
+memory 裁剪和更高层 allocator 策略均未实现。实现提供
+`allocate_phys(size, alignment)`（高地址优先、连续且避开并写入 Reserved）以及
+`free_phys(base, size)`（支持裁剪、拆分和跨 reservation 释放）；这两个 API 属于实现级
+能力，不写入 Model IR，也不改变现有差分 checkpoint ABI。

@@ -569,19 +569,29 @@ def _render_declarations(checkpoints: tuple[Checkpoint, ...]) -> str:
 def _render_empty_handlers(
     checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool, include_content: bool
 ) -> str:
-    lines = ["mod selected_handler {"]
+    lines = ["mod diagnostics {"]
     for index, item in enumerate(checkpoints):
         parameters = ", ".join(
             f"_arg{number}: u64" for number, _ in enumerate(item.parameters)
         )
-        lines.append(f"    #[unsafe(export_name = \"{item.symbol}\")]")
-        lines.append(f"    pub(super) extern \"C\" fn checkpoint_{index}({parameters}) {{}}")
+        arguments = ", ".join(f"_arg{number}" for number, _ in enumerate(item.parameters))
+        argument_slice = f"&[{arguments}]" if arguments else "&[]"
+        lines.extend(
+            [
+                f"    #[unsafe(export_name = \"{item.symbol}\")]",
+                f"    pub(super) extern \"C\" fn checkpoint_{index}({parameters}) {{",
+                f"        crate::checkpoint::handlers::empty::checkpoint(b\"{item.canonical_id}\", b\"{item.hash16}\", {argument_slice});",
+                "    }",
+            ]
+        )
     if include_ranges:
         lines.extend(
             [
                 "",
                 "    #[inline(always)]",
-                "    pub(super) fn range(_kind: &[u8], _index: u64, _base: u64, _end: u64) {}",
+                "    pub(super) fn range(kind: &[u8], index: u64, base: u64, end: u64) {",
+                "        crate::checkpoint::handlers::empty::range(kind, index, base, end);",
+                "    }",
             ]
         )
     if include_content:
@@ -589,9 +599,13 @@ def _render_empty_handlers(
             [
                 "",
                 "    #[inline(always)]",
-                "    pub(super) fn content_chunk(_class: u64, _chunk: u64, _count: u64, _lo: u64, _hi: u64) {}",
+                "    pub(super) fn content_chunk(class: u64, chunk: u64, count: u64, lo: u64, hi: u64) {",
+                "        crate::checkpoint::handlers::empty::content_chunk(class, chunk, count, lo, hi);",
+                "    }",
                 "    #[inline(always)]",
-                "    pub(super) fn content_item(_class: u64, _index: u64, _va: u64, _pa: u64, _flags: u64) {}",
+                "    pub(super) fn content_item(class: u64, index: u64, va: u64, pa: u64, flags: u64) {",
+                "        crate::checkpoint::handlers::empty::content_item(class, index, va, pa, flags);",
+                "    }",
             ]
         )
     lines.append("}")
@@ -601,77 +615,32 @@ def _render_empty_handlers(
 def _render_debugcon_handlers(
     checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool, include_content: bool
 ) -> str:
-    lines = [
-        "mod selected_handler {",
-        "    use core::arch::asm;",
-        "",
-        "    const SBI_EXT_DBCN: usize = 0x4442_434e;",
-        "    const SBI_EXT_DBCN_CONSOLE_WRITE_BYTE: usize = 2;",
-        "",
-        "    #[inline(always)]",
-        "    fn write_byte(byte: u8) {",
-        "        // SAFETY: setup_vm runs in S-mode with the SBI calling convention active.",
-        "        // DBCN write-byte takes only register arguments and returned errors are ignored.",
-        "        unsafe {",
-        "            asm!(",
-        "                \"ecall\",",
-        "                inlateout(\"a0\") byte as usize => _,",
-        "                inlateout(\"a1\") 0_usize => _,",
-        "                inlateout(\"a6\") SBI_EXT_DBCN_CONSOLE_WRITE_BYTE => _,",
-        "                inlateout(\"a7\") SBI_EXT_DBCN => _,",
-        "                options(nostack),",
-        "            );",
-        "        }",
-        "    }",
-        "",
-        "    fn write_bytes(bytes: &[u8]) {",
-        "        for byte in bytes {",
-        "            write_byte(*byte);",
-        "        }",
-        "    }",
-        "",
-        "    fn write_hex(value: u64) {",
-        "        let digits = *b\"0123456789abcdef\";",
-        "        let mut shift = 60_u32;",
-        "        loop {",
-        "            write_byte(digits[((value >> shift) & 0xf) as usize]);",
-        "            if shift == 0 {",
-        "                break;",
-        "            }",
-        "            shift -= 4;",
-        "        }",
-        "    }",
-    ]
+    lines = ["mod diagnostics {"]
     for index, item in enumerate(checkpoints):
         parameters = ", ".join(
             f"arg{number}: u64" for number, _ in enumerate(item.parameters)
         )
+        arguments = ", ".join(
+            f"(b\"{parameter}\", arg{number})"
+            for number, parameter in enumerate(item.parameters)
+        )
+        argument_slice = f"&[{arguments}]" if arguments else "&[]"
         lines.extend(
             [
                 "",
                 f"    #[unsafe(export_name = \"{item.symbol}\")]",
                 f"    pub(super) extern \"C\" fn checkpoint_{index}({parameters}) {{",
-                f"        write_bytes(b\"LKMCP1 id={item.canonical_id} hash={item.hash16}\");",
+                f"        crate::checkpoint::handlers::debugcon::checkpoint(b\"{item.canonical_id}\", b\"{item.hash16}\", {argument_slice});",
+                "    }",
             ]
         )
-        for number, parameter in enumerate(item.parameters):
-            lines.append(f"        write_bytes(b\" {parameter}=0x\");")
-            lines.append(f"        write_hex(arg{number});")
-        lines.extend(["        write_byte(b'\\n');", "    }"])
     if include_ranges:
         lines.extend(
             [
                 "",
                 "    pub(super) fn range(kind: &[u8], index: u64, base: u64, end: u64) {",
-                "        write_bytes(b\"LKMRNG1 kind=\");",
-                "        write_bytes(kind);",
-                "        write_bytes(b\" index=0x\");",
-                "        write_hex(index);",
-                "        write_bytes(b\" base=0x\");",
-                "        write_hex(base);",
-                "        write_bytes(b\" end=0x\");",
-                "        write_hex(end);",
-                "        write_byte(b'\\n');",
+                "        // write_bytes(b\"LKMRNG1 kind=\") is implemented by the selected handler.",
+                "        crate::checkpoint::handlers::debugcon::range(kind, index, base, end);",
                 "    }",
             ]
         )
@@ -679,24 +648,12 @@ def _render_debugcon_handlers(
         lines.extend(
             [
                 "",
-                "    fn class_name(class: u64) -> &'static [u8] {",
-                "        match class { 1 => b\"fixmap\", 2 => b\"linear\", _ => b\"kernel\" }",
-                "    }",
-                "",
                 "    pub(super) fn content_chunk(class: u64, chunk: u64, count: u64, lo: u64, hi: u64) {",
-                "        write_bytes(b\"LKMPTC1 class=\"); write_bytes(class_name(class));",
-                "        write_bytes(b\" chunk=0x\"); write_hex(chunk);",
-                "        write_bytes(b\" count=0x\"); write_hex(count);",
-                "        write_bytes(b\" digest_lo=0x\"); write_hex(lo);",
-                "        write_bytes(b\" digest_hi=0x\"); write_hex(hi); write_byte(b'\\n');",
+                "        crate::checkpoint::handlers::debugcon::content_chunk(class, chunk, count, lo, hi);",
                 "    }",
                 "",
                 "    pub(super) fn content_item(class: u64, index: u64, va: u64, pa: u64, flags: u64) {",
-                "        write_bytes(b\"LKMPTI1 class=\"); write_bytes(class_name(class));",
-                "        write_bytes(b\" index=0x\"); write_hex(index);",
-                "        write_bytes(b\" va=0x\"); write_hex(va);",
-                "        write_bytes(b\" pa=0x\"); write_hex(pa);",
-                "        write_bytes(b\" flags=0x\"); write_hex(flags); write_byte(b'\\n');",
+                "        crate::checkpoint::handlers::debugcon::content_item(class, index, va, pa, flags);",
                 "    }",
             ]
         )
@@ -736,12 +693,12 @@ def _render_range_wrappers(mapping: CheckpointMapping) -> str:
 
 #[inline(always)]
 pub(crate) fn memory_range(index: u64, base: u64, end: u64) {
-    selected_handler::range(b"memory", index, base, end);
+    diagnostics::range(b"memory", index, base, end);
 }
 
 #[inline(always)]
 pub(crate) fn reserved_range(index: u64, base: u64, end: u64) {
-    selected_handler::range(b"reserved", index, base, end);
+    diagnostics::range(b"reserved", index, base, end);
 }
 """.rstrip()
 
@@ -756,12 +713,12 @@ pub(crate) const ENABLED: bool = {enabled_literal};
 
 #[inline(always)]
 pub(crate) fn content_chunk(class: u64, chunk: u64, count: u64, lo: u64, hi: u64) {{
-    selected_handler::content_chunk(class, chunk, count, lo, hi);
+    diagnostics::content_chunk(class, chunk, count, lo, hi);
 }}
 
 #[inline(always)]
 pub(crate) fn content_item(class: u64, index: u64, va: u64, pa: u64, flags: u64) {{
-    selected_handler::content_item(class, index, va, pa, flags);
+    diagnostics::content_item(class, index, va, pa, flags);
 }}
 """.rstrip()
 

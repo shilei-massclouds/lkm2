@@ -29,6 +29,7 @@ RECORD_PREFIX = "LKMCP1 "
 RANGE_RECORD_PREFIX = "LKMRNG1 "
 CONTENT_CHUNK_PREFIX = "LKMPTC1 "
 CONTENT_ITEM_PREFIX = "LKMPTI1 "
+PHASE_TEST_PREFIX = "LKMPT1 "
 FIELD = re.compile(r"([a-zA-Z0-9_.-]+)=([^ ]+)")
 CHECKPOINT_SUITES = (
     ("vm.json", "checkpoints.manifest.json"),
@@ -53,6 +54,24 @@ class CollectedOutput:
     checkpoints: tuple[str, ...]
     ranges: tuple[str, ...]
     diagnostics: tuple[str, ...] = ()
+
+
+def parse_phase_test_record(line: str) -> tuple[str, str, str, str | None]:
+    """Parse the fixed, one-line lkm2 PhaseTest terminal protocol."""
+    line = line.strip()
+    match = re.fullmatch(
+        r"LKMPT1 test=([a-z0-9-]+) checkpoint=([A-Za-z0-9_.]+) "
+        r"result=(pass|fail)(?: case=([a-z0-9-]+))?",
+        line,
+    )
+    if match is None:
+        raise CheckpointRunError(f"malformed PhaseTest record: {line}")
+    test, checkpoint, result, case = match.groups()
+    if result == "pass" and case is not None:
+        raise CheckpointRunError("passing PhaseTest record must not contain case")
+    if result == "fail" and case is None:
+        raise CheckpointRunError("failing PhaseTest record must contain case")
+    return test, checkpoint, result, case
 
 
 def parse_record(line: str) -> tuple[str, str, tuple[tuple[str, int], ...]]:
@@ -241,6 +260,126 @@ def _collect_qemu(
             process.kill()
             process.wait(timeout=2)
     return CollectedOutput(tuple(records), tuple(ranges), tuple(diagnostics))
+
+
+def _collect_phase_test_qemu(command: list[str], timeout: float) -> tuple[list[str], int]:
+    """Collect a PhaseTest until QEMU exits by the guest's SRST shutdown."""
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=0,
+    )
+    assert process.stdout is not None
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + timeout
+    pending = b""
+    lines: list[str] = []
+    try:
+        while True:
+            if process.poll() is not None:
+                chunk = process.stdout.read()
+                if chunk:
+                    pending += chunk
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise CheckpointRunError(
+                    f"PhaseTest QEMU timed out after {timeout:g}s"
+                )
+            events = selector.select(remaining)
+            if not events:
+                continue
+            chunk = process.stdout.read(4096)
+            if chunk:
+                pending += chunk
+            elif process.poll() is not None:
+                break
+            while b"\n" in pending:
+                raw, pending = pending.split(b"\n", 1)
+                lines.append(raw.decode("utf-8", errors="replace").rstrip("\r"))
+        if pending:
+            while b"\n" in pending:
+                raw, pending = pending.split(b"\n", 1)
+                lines.append(raw.decode("utf-8", errors="replace").rstrip("\r"))
+            if pending:
+                lines.append(pending.decode("utf-8", errors="replace").rstrip("\r"))
+        return lines, int(process.returncode or 0)
+    finally:
+        selector.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+
+def run_phase_test(repository: Path, test_name: str, timeout: float) -> None:
+    if test_name != "memblock-basic":
+        raise CheckpointRunError(
+            f"unknown PHASE_TEST {test_name!r}; expected memblock-basic"
+        )
+    implementation = repository / "impl"
+    build = subprocess.run(
+        [
+            "make",
+            "--no-print-directory",
+            "-B",
+            "CHECKPOINT_HANDLER=empty",
+            f"PHASE_TEST={test_name}",
+            "build",
+        ],
+        cwd=implementation,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    if build.returncode != 0:
+        raise CheckpointRunError(f"PhaseTest build failed:\n{build.stdout}")
+    command = [
+        "qemu-system-riscv64",
+        "-machine",
+        "virt",
+        "-bios",
+        "default",
+        "-m",
+        "128M",
+        "-smp",
+        "1",
+        "-nographic",
+        "-append",
+        "earlycon=sbi",
+        "-kernel",
+        str(implementation / "build" / "lkm2.bin"),
+    ]
+    lines, returncode = _collect_phase_test_qemu(command, timeout)
+    records = [line for line in lines if line.startswith(PHASE_TEST_PREFIX)]
+    if len(records) != 1:
+        raise CheckpointRunError(
+            f"PhaseTest emitted {len(records)} terminal records; expected exactly one\n"
+            + "\n".join(lines[-20:])
+        )
+    test, checkpoint, result, case = parse_phase_test_record(records[0])
+    if test != test_name or checkpoint != "MemBlock.Online" or result != "pass" or case is not None:
+        raise CheckpointRunError(f"unexpected PhaseTest result: {records[0]}")
+    if any(
+        line.startswith(prefix)
+        for line in lines
+        for prefix in (
+            RECORD_PREFIX,
+            RANGE_RECORD_PREFIX,
+            CONTENT_CHUNK_PREFIX,
+            CONTENT_ITEM_PREFIX,
+        )
+    ):
+        raise CheckpointRunError("PhaseTest image emitted ordinary checkpoint records")
+    if returncode != 0:
+        raise CheckpointRunError(
+            f"PhaseTest QEMU exited with error status {returncode}; guest did not shut down cleanly"
+        )
 
 
 def validate_records(
@@ -528,7 +667,13 @@ def _diagnose_content_mismatch(
 def run_self(repository: Path, mode_name: str, timeout: float) -> None:
     implementation = repository / "impl"
     build = subprocess.run(
-        ["make", "--no-print-directory", "CHECKPOINT_HANDLER=debugcon", "build"],
+        [
+            "make",
+            "--no-print-directory",
+            "CHECKPOINT_HANDLER=debugcon",
+            "PHASE_TEST=",
+            "build",
+        ],
         cwd=implementation,
         text=True,
         stdout=subprocess.PIPE,
@@ -640,7 +785,13 @@ def run_diff(
 
     implementation = repository / "impl"
     lkm_build = subprocess.run(
-        ["make", "--no-print-directory", "CHECKPOINT_HANDLER=debugcon", "build"],
+        [
+            "make",
+            "--no-print-directory",
+            "CHECKPOINT_HANDLER=debugcon",
+            "PHASE_TEST=",
+            "build",
+        ],
         cwd=implementation,
         text=True,
         stdout=subprocess.PIPE,
@@ -755,6 +906,7 @@ def _parser() -> argparse.ArgumentParser:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--self", dest="self_mode", choices=("sv57", "sv48", "sv39", "all"))
     group.add_argument("--diff-sv57", action="store_true")
+    group.add_argument("--phase-test", choices=("memblock-basic",))
     parser.add_argument("--sibling", type=Path)
     parser.add_argument("--build-sibling", action="store_true")
     parser.add_argument("--timeout", type=float, default=15.0)
@@ -765,7 +917,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
         repository = arguments.repository.resolve()
-        if arguments.diff_sv57:
+        if arguments.phase_test is not None:
+            run_phase_test(repository, arguments.phase_test, arguments.timeout)
+            print(f"checkpoint-runner: PhaseTest {arguments.phase_test} passed")
+        elif arguments.diff_sv57:
             if arguments.sibling is None:
                 raise CheckpointRunError("--diff-sv57 requires --sibling")
             sibling_state = run_diff(

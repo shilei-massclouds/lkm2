@@ -3,18 +3,7 @@
 #![no_std]
 #![no_main]
 
-#[rustfmt::skip]
-#[path = "build/checkpoints.rs"]
-mod checkpoints;
-#[path = "build/memblock_checkpoints.rs"]
-#[rustfmt::skip]
-mod memblock_checkpoints;
-#[path = "build/swapper_checkpoints.rs"]
-#[rustfmt::skip]
-mod swapper_checkpoints;
-#[path = "build/swapper_content_checkpoints.rs"]
-#[rustfmt::skip]
-mod swapper_content_checkpoints;
+mod checkpoint;
 #[path = "systems/kernel/config.rs"]
 mod config;
 mod objects;

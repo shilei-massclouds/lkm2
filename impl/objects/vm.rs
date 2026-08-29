@@ -4,8 +4,13 @@ use core::arch::asm;
 use core::mem::{align_of, size_of};
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use crate::checkpoints::{
-    self, EarlyDtbObservation, EarlyKernelObservation, KernelMapObservation, TrampolineObservation,
+use crate::checkpoint::swapper as swapper_checkpoints;
+use crate::checkpoint::swapper::SwapperObservation;
+use crate::checkpoint::swapper_content as swapper_content_checkpoints;
+use crate::checkpoint::swapper_content::SwapperContentObservation;
+use crate::checkpoint::vm as checkpoints;
+use crate::checkpoint::vm::{
+    EarlyDtbObservation, EarlyKernelObservation, KernelMapObservation, TrampolineObservation,
 };
 use crate::config::{
     FIX_FDT_VA_SV39, FIX_FDT_VA_SV48, FIX_FDT_VA_SV57, KERNEL_LINK_ADDR, PAGE_OFFSET_SV39,
@@ -13,8 +18,6 @@ use crate::config::{
 };
 use crate::objects::dtb_blob::EarlyDtbMapping;
 use crate::objects::memblock::{MemBlock, MemBlockError};
-use crate::swapper_checkpoints::{self, SwapperObservation};
-use crate::swapper_content_checkpoints::{self, SwapperContentObservation};
 
 const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
 const PAGE_TABLE_ENTRIES: usize = PAGE_SIZE / size_of::<u64>();

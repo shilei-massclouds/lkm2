@@ -5,6 +5,16 @@ const SBI_EXT_BASE_GET_SPEC_VERSION: usize = 0;
 const SBI_EXT_BASE_PROBE_EXT: usize = 3;
 const SBI_EXT_DBCN: usize = 0x4442_434e;
 const SBI_EXT_DBCN_CONSOLE_WRITE_BYTE: usize = 2;
+#[allow(dead_code)]
+pub(crate) const SBI_EXT_SRST: usize = 0x5352_5354;
+#[allow(dead_code)]
+pub(crate) const SBI_EXT_SRST_SYSTEM_RESET: usize = 0;
+#[allow(dead_code)]
+pub(crate) const SBI_SRST_RESET_TYPE_SHUTDOWN: usize = 0;
+#[allow(dead_code)]
+pub(crate) const SBI_SRST_REASON_NO_REASON: usize = 0;
+#[allow(dead_code)]
+pub(crate) const SBI_SRST_REASON_SYSTEM_FAILURE: usize = 1;
 const SBI_SPEC_VERSION_2_0: usize = 2 << 24;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +182,27 @@ impl<C: SbiCall> SbiConsole<C> {
     }
 }
 
+/// Construct the standard SBI system-reset call used by PhaseTests.
+#[allow(dead_code)]
+pub(crate) const fn system_reset_args(reason: usize) -> SbiCallArgs {
+    SbiCallArgs::new(
+        SBI_EXT_SRST,
+        SBI_EXT_SRST_SYSTEM_RESET,
+        [SBI_SRST_RESET_TYPE_SHUTDOWN, reason, 0, 0, 0, 0],
+    )
+}
+
+/// Ask firmware to shut the machine down. Firmware is required not to return
+/// from a successful reset; an error or an unexpected return is therefore a
+/// permanent local stop as well.
+#[allow(dead_code)]
+pub(crate) fn system_reset<C: SbiCall + ?Sized>(call: &mut C, reason: usize) -> ! {
+    let _ = call.call(system_reset_args(reason));
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 #[cfg(not(test))]
 impl<C: SbiCall> crate::objects::printk::ConsoleWrite for SbiConsole<C> {
     type Error = SbiWriteError;
@@ -321,5 +352,28 @@ mod tests {
         assert_eq!(console.call.calls.len(), 2);
         assert_eq!(console.call.calls[0].arguments[0], usize::from(b'a'));
         assert_eq!(console.call.calls[1].arguments[0], usize::from(b'b'));
+    }
+
+    #[test]
+    fn system_reset_arguments_use_shutdown_and_supplied_reason() {
+        assert_eq!(
+            system_reset_args(SBI_SRST_REASON_NO_REASON),
+            SbiCallArgs::new(
+                SBI_EXT_SRST,
+                SBI_EXT_SRST_SYSTEM_RESET,
+                [
+                    SBI_SRST_RESET_TYPE_SHUTDOWN,
+                    SBI_SRST_REASON_NO_REASON,
+                    0,
+                    0,
+                    0,
+                    0
+                ]
+            )
+        );
+        assert_eq!(
+            system_reset_args(SBI_SRST_REASON_SYSTEM_FAILURE).arguments[1],
+            SBI_SRST_REASON_SYSTEM_FAILURE
+        );
     }
 }

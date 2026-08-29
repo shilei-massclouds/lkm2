@@ -8,7 +8,7 @@ ifeq ($(VERBOSE),1)
 RUN_QUIET :=
 endif
 
-.PHONY: all setup build derive run test test-derive test-smoke test-checkpoints checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-patch-swapper-content checkpoint-sibling-apply difftest checkpoint-diff-sv57 clean help
+.PHONY: all setup build derive run test phase-test test-derive test-smoke test-checkpoints checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-patch-swapper-content checkpoint-sibling-apply difftest checkpoint-diff-sv57 clean help
 
 all: build
 
@@ -22,6 +22,10 @@ test-smoke:
 test:
 	$(TOOLS_MAKE) test
 	$(IMPL_MAKE) test
+
+phase-test:
+	@test "$(PHASE_TEST)" = "memblock-basic" || { echo "error: PHASE_TEST must be explicitly set to memblock-basic" >&2; exit 1; }
+	$(IMPL_MAKE) phase-test PHASE_TEST=$(PHASE_TEST)
 
 test-checkpoints checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-patch-swapper-content checkpoint-sibling-apply difftest checkpoint-diff-sv57:
 	$(IMPL_MAKE) $@
@@ -48,6 +52,7 @@ help:
 	@echo "  derive  Run the current project derivation"
 	@echo "  run    Build and run the kernel implementation on QEMU"
 	@echo "  test   Test all components"
+	@echo "  phase-test Run one lkm2-only PhaseTest (PHASE_TEST=memblock-basic)"
 	@echo "  test-derive  Test derive units and golden cases"
 	@echo "  test-smoke   Test only derive golden cases"
 	@echo "  test-checkpoints Test lkm2 Sv57/Sv48/Sv39 checkpoint output"
