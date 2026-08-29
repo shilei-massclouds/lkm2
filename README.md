@@ -75,6 +75,7 @@ patch 不会修改、暂存或提交 sibling。Rust
 checkpoint debugcon 是独立于 `Printk → EarlyConsole → SbiConsole` 的观测通道；启动横幅
 及其 smoke test 不依赖 checkpoint handler。
 
-MemBlock 的单侧 PhaseTest 可用 `make phase-test PHASE_TEST=memblock-basic` 运行；该测试
-在 `MemBlock.Online` 后验证物理范围分配/释放并由 SBI 主动关闭 QEMU。普通构建、checkpoint
+`make phase-test` 默认依次运行所有单侧 PhaseTest，也可用
+`make phase-test PHASE_TEST=memblock-basic` 只运行指定项。`memblock-basic` 在
+`MemBlock.Online` 后验证物理范围分配/释放并由 SBI 主动关闭 QEMU。普通构建、checkpoint
 self-test 和 difftest 不启用 PhaseTest。

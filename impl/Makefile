@@ -51,11 +51,13 @@ checkpoint-diff-sv57: difftest
 test: build fmt clippy test-dtb-blob test-memblock test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints test-phase-test
 
 phase-test:
-	@test "$(PHASE_TEST)" = "memblock-basic" || { echo "error: PHASE_TEST must be explicitly set to memblock-basic" >&2; exit 1; }
-	../tools/bin/checkpoint-runner --repository .. --phase-test $(PHASE_TEST)
+	@set -e; for test in $(if $(strip $(PHASE_TEST)),$(PHASE_TEST),$(PHASE_TESTS)); do \
+		echo "phase-test: running $$test"; \
+		../tools/bin/checkpoint-runner --repository .. --phase-test "$$test"; \
+	done
 
 test-phase-test:
-	$(MAKE) --no-print-directory phase-test PHASE_TEST=memblock-basic
+	$(MAKE) --no-print-directory phase-test PHASE_TEST=
 
 test-dtb-blob: $(DTB_BLOB_TEST)
 	$(DTB_BLOB_TEST)
@@ -134,7 +136,7 @@ help:
 	@echo "  all    Build the kernel ELF and raw image (default)"
 	@echo "  build  Build build/lkm2.elf and build/lkm2.bin"
 	@echo "  checkpoints Generate the Model IR checkpoint manifest and Rust code"
-	@echo "  phase-test Run one lkm2-only PhaseTest (PHASE_TEST=memblock-basic)"
+	@echo "  phase-test Run all lkm2-only PhaseTests, or one selected by PHASE_TEST"
 	@echo "  checkpoint-sibling-patch Generate and check (but do not apply) the frozen Linux patch"
 	@echo "  checkpoint-sibling-patch-swapper Generate and check the incremental M1 Linux patch"
 	@echo "  checkpoint-sibling-patch-memblock Generate and check the incremental MemBlock Linux patch"
@@ -150,14 +152,14 @@ help:
 	@echo "  test-printk Run host-side early Printk buffer and replay unit tests"
 	@echo "  test-smoke Confirm the DBCN banner once and cleanly stop QEMU"
 	@echo "  test-checkpoints Run Sv57/Sv48/Sv39 lkm2 checkpoint self-tests"
-	@echo "  test-phase-test Run the default memblock-basic PhaseTest"
+	@echo "  test-phase-test Run all PhaseTests"
 	@echo "  test-empty-elision Verify the optimized empty handler leaves no calls or output"
 	@echo "  fmt    Check Rust source formatting"
 	@echo "  clippy Check Rust source lints"
 	@echo "  run    Run the raw image on QEMU virt/OpenSBI (exit with Ctrl-a x)"
 	@echo "  clean  Remove impl/build"
 	@echo "  CHECKPOINT_HANDLER=empty|debugcon (default: empty)"
-	@echo "  PHASE_TEST=memblock-basic (only for phase-test; default unset)"
+	@echo "  PHASE_TEST=memblock-basic (optional phase-test selector; omitted runs all)"
 	@echo "  help   Show this help"
 
 FORCE:
