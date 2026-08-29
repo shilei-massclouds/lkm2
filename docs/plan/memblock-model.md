@@ -14,7 +14,7 @@ Kernel
     ├── MemBlockMemory
     └── MemBlockReserved
 
-EarlyBoot / parse_dtb and SetupBootmem
+EarlyBoot / Enter (parse_dtb and bootmem)
   -> MemBlockMemory.Enable
   -> MemBlockReserved.Enable
   -> MemBlock.Enable
@@ -42,13 +42,13 @@ provenance/completion。来源严格单向为 `DtbBlob → MemBlock`。
 ```text
 EarlyBoot:
   Banner → DtbBlob → MemBlockMemory → SbiCapability → EarlyConsole
-EarlyBoot actions:
+EarlyBoot Enter 后续 drive:
   MemBlockReserved → MemBlock → SwapperPageTable → Scheduler → Unmask
 ```
 
-Memory 输入缺失时三个 MemBlock 对象都保持 Ready，EarlyBoot 不继续 capability 或 Console。
+Memory 输入缺失时三个 MemBlock 对象都保持 Ready，EarlyBoot Enter 不继续 capability 或 Console。
 Reserved 输入缺失时，已经完成的 Memory、capability 与 Console 保持 Online，Reserved 与父
-MemBlock 保持 Ready；EarlyBoot 不继续 SwapperPageTable、Scheduler、Unmask 或 BootSetup。
+MemBlock 保持 Ready；EarlyBoot Enter 不继续 SwapperPageTable、Scheduler、Unmask 或 BootSetup。
 
 MemBlock Online 本身就是早期物理内存分配的状态前提，不增加同义
 `ready_for_allocation` predicate。

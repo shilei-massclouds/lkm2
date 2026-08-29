@@ -12,7 +12,7 @@
   `printk_console_registered(Printk, EarlyConsole)`；Online invariant 保持注册与 binding
   两个事实。
 
-EarlyBoot 的固定顺序为：
+EarlyBoot `Enter` 的固定展开顺序为：
 
 ```text
 EarlyBoot:
@@ -21,16 +21,15 @@ EarlyBoot:
     -> MemBlockMemory.Enable
     -> SbiCapability.Enable
     -> EarlyConsole.Enable
-EarlyBoot 后续动作:
-  MemBlockReserved.Enable
+    -> MemBlockReserved.Enable
     -> MemBlock.Enable
     -> SwapperPageTable.Enable
     -> Cpu0Scheduler.Enable
     -> local IRQ Unmask
 ```
 
-成功路径确保 Banner、DtbBlob、MemBlockMemory、SbiCapability、EarlyConsole、MemBlock、
-SwapperPageTable 和 Scheduler Online，
+成功路径确保 Banner、DtbBlob、MemBlockMemory、SbiCapability、EarlyConsole、MemBlockReserved、
+MemBlock、SwapperPageTable 和 Scheduler Online，
 并只检查 `BootCommandLine` 存在 `earlycon` 键，
 不把当前验收输入 `sbi` 提升为 EarlyBoot 契约。缺失 DTB bootargs 时，Banner 已 Online，
 DtbBlob binding 失败，Console、Scheduler 和 Unmask 不执行。

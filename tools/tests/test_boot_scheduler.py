@@ -223,10 +223,10 @@ class BootSchedulerModelTests(unittest.TestCase):
         early_boot = next(item for item in self.model.objects if item.name == EARLY_BOOT)
         self.assertEqual(
             {action.signal[-1] for action in early_boot.states[0].actions},
-            {"Enter", "SetupBootmem", "SetupVmFinal", "Complete"},
+            {"Enter"},
         )
 
-    def test_early_boot_actions_own_m0_m1_scheduler_and_unmask_order(self) -> None:
+    def test_early_boot_enter_owns_m0_m1_scheduler_and_unmask_order(self) -> None:
         early_boot = next(
             item for item in self.model.objects if item.name == EARLY_BOOT
         )
@@ -237,9 +237,6 @@ class BootSchedulerModelTests(unittest.TestCase):
             action.signal: action for action in early_boot.states[0].actions
         }
         early_action = actions[("Action", "Enter")]
-        bootmem_action = actions[("Action", "SetupBootmem")]
-        vm_final_action = actions[("Action", "SetupVmFinal")]
-        complete_action = actions[("Action", "Complete")]
         setup_action = boot_setup.states[0].actions[0]
         early_drives = next(
             block.signals for block in early_action.blocks if block.kind == "drives"
@@ -247,46 +244,18 @@ class BootSchedulerModelTests(unittest.TestCase):
         setup_drives = next(
             block.signals for block in setup_action.blocks if block.kind == "drives"
         )
-        bootmem_drives = next(
-            block.signals for block in bootmem_action.blocks if block.kind == "drives"
-        )
-        vm_final_drives = next(
-            block.signals for block in vm_final_action.blocks if block.kind == "drives"
-        )
-        complete_drives = next(
-            block.signals for block in complete_action.blocks if block.kind == "drives"
-        )
 
         self.assertEqual(
-            tuple(
-                (_target_name(signal.target), signal.signal)
-                for signal in early_drives
-            ),
+            tuple((_target_name(signal.target), signal.signal) for signal in early_drives),
             (
                 (BANNER, ("Transition", "Enable")),
                 (DTB_BLOB, ("Transition", "Enable")),
                 (MEMBLOCK_MEMORY, ("Transition", "Enable")),
                 (SBI_CAPABILITY, ("Transition", "Enable")),
                 (EARLY_CONSOLE, ("Transition", "Enable")),
-            ),
-        )
-        self.assertEqual(
-            tuple(
-                (_target_name(signal.target), signal.signal)
-                for signal in bootmem_drives
-            ),
-            (
                 (MEMBLOCK_RESERVED, ("Transition", "Enable")),
                 (MEMBLOCK, ("Transition", "Enable")),
-            ),
-        )
-        self.assertEqual(
-            tuple((_target_name(signal.target), signal.signal) for signal in vm_final_drives),
-            ((SWAPPER_PAGE_TABLE, ("Transition", "Enable")),),
-        )
-        self.assertEqual(
-            tuple((_target_name(signal.target), signal.signal) for signal in complete_drives),
-            (
+                (SWAPPER_PAGE_TABLE, ("Transition", "Enable")),
                 (CPU0_SCHEDULER, ("Transition", "Enable")),
                 (
                     ("CurrentCPU", "InterruptControlRef"),
@@ -317,18 +286,6 @@ class BootSchedulerModelTests(unittest.TestCase):
             unit for unit in units
             if unit.event.target == EARLY_BOOT and unit.handler == ("Action", "Enter")
         )
-        setup_bootmem = next(
-            unit for unit in units
-            if unit.event.target == EARLY_BOOT and unit.handler == ("Action", "SetupBootmem")
-        )
-        setup_vm_final = next(
-            unit for unit in units
-            if unit.event.target == EARLY_BOOT and unit.handler == ("Action", "SetupVmFinal")
-        )
-        complete = next(
-            unit for unit in units
-            if unit.event.target == EARLY_BOOT and unit.handler == ("Action", "Complete")
-        )
         boot_setup = next(unit for unit in units if unit.event.target == BOOT_SETUP)
 
         self.assertTrue(
@@ -342,9 +299,20 @@ class BootSchedulerModelTests(unittest.TestCase):
                 "MemBlockMemory == State::Online",
                 "SbiCapability == State::Online",
                 "EarlyConsole == State::Online",
+                "MemBlockReserved == State::Online",
+                "MemBlock == State::Online",
+                "SwapperPageTable == State::Online",
+                "Cpu0Scheduler == State::Online",
                 "early_console_bound_from_registry(EarlyConsole, SbiConsole)",
                 "printk_console_registered(Printk, EarlyConsole)",
                 'BootCommandLine.has_key("earlycon")',
+                "swapper_fixmap_established()",
+                "swapper_linear_map_established()",
+                "swapper_kernel_map_established()",
+                "swapper_fixmap_cleared()",
+                "swapper_satp_switched()",
+                "swapper_tlb_flush_completed()",
+                "swapper_late_paging_mode_selected()",
             }.issubset({check.expression for check in early_boot.ensures})
         )
         self.assertNotIn(
@@ -359,38 +327,16 @@ class BootSchedulerModelTests(unittest.TestCase):
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
-            ),
-        )
-        self.assertTrue(all(check.status == "passed" for check in setup_bootmem.ensures))
-        self.assertTrue(
-            {
-                "MemBlockMemory == State::Online",
-                "MemBlockReserved == State::Online",
-                "MemBlock == State::Online",
-            }.issubset({check.expression for check in setup_bootmem.ensures})
-        )
-        self.assertEqual(
-            tuple(unit.event.signal for unit in setup_bootmem.drives),
-            (
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
+                ("Transition", "Enable"),
+                ("Transition", "Enable"),
+                ("Action", "Unmask"),
             ),
         )
+        self.assertTrue(all(check.status == "passed" for check in early_boot.ensures))
         self.assertEqual(
-            tuple(check.expression for check in setup_vm_final.ensures),
-            ("SwapperPageTable == State::Online",),
-        )
-        self.assertEqual(
-            tuple(unit.event.signal for unit in setup_vm_final.drives),
-            (("Transition", "Enable"),),
-        )
-        self.assertEqual(
-            tuple(unit.event.signal for unit in complete.drives),
-            (("Transition", "Enable"), ("Action", "Unmask")),
-        )
-        self.assertEqual(early_boot.establishes, ())
-        self.assertEqual(
-            tuple(check.expression for check in complete.establishes),
+            tuple(check.expression for check in early_boot.establishes),
             ("early_boot_interrupts_enabled()",),
         )
         self.assertTrue(
@@ -401,13 +347,13 @@ class BootSchedulerModelTests(unittest.TestCase):
     def test_failed_unmask_does_not_publish_handoff_or_run_boot_setup(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
         early_boot = next(item for item in model.objects if item.name == EARLY_BOOT)
-        complete = next(
+        enter = next(
             action for action in early_boot.states[0].actions
-            if action.signal == ("Action", "Complete")
+            if action.signal == ("Action", "Enter")
         )
         drives = next(
             block
-            for block in complete.blocks
+            for block in enter.blocks
             if block.kind == "drives"
         )
         unmask = drives.signals[-1]
@@ -442,7 +388,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         early_boot = next(item for item in model.objects if item.name == EARLY_BOOT)
         action = next(
             action for action in early_boot.states[0].actions
-            if action.signal == ("Action", "Complete")
+            if action.signal == ("Action", "Enter")
         )
         object.__setattr__(
             action,

@@ -54,9 +54,6 @@ object StartKernel: PhaseType {
                 }
 
                 resumes EarlyBoot.Action::Enter;
-                resumes EarlyBoot.Action::SetupBootmem;
-                resumes EarlyBoot.Action::SetupVmFinal;
-                resumes EarlyBoot.Action::Complete;
                 resumes BootSetup.Action::Enter;
                 resumes BootHandoff.Action::Enter;
                 resumes BootIdle.Action::Enter;

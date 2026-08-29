@@ -1,9 +1,9 @@
 # EarlyBoot 章程
 
 EarlyBoot 覆盖 `start_kernel` 入口到早期虚拟内存完成。完整外层顺序为
-`StartKernel → EarlyBoot → BootSetup → BootHandoff`；EarlyBoot 内部按 `Enter → SetupBootmem →
-SetupVmFinal → Complete` 顺序推进。它负责 DTB 的启动输入、`parse_dtb` 对应的 Memory 建立、
-保留区提交和最终页表切换。
+`StartKernel → EarlyBoot → BootSetup → BootHandoff`；EarlyBoot 只有一个 `Enter` 动作，按固定
+顺序展开 DTB 输入、Memory/Reserved/MemBlock、最终页表、Scheduler 和中断交接。它负责 DTB 的
+启动输入、`parse_dtb` 对应的 Memory 建立、保留区提交和最终页表切换。
 
 ## 入口与交接
 
@@ -17,13 +17,16 @@ EarlyBoot 入口必须复查 `CurrentTaskRef == BootTask`、BootTask 仍为 OnCp
 5. `EarlyConsole.Enable` 完成 registry binding，并嵌套驱动 `SbiConsole.Enable`。
 
 因此固定直接 drive 顺序为
-`Banner → DtbBlob → MemBlockMemory → SbiCapability → EarlyConsole`。
+`Banner → DtbBlob → MemBlockMemory → SbiCapability → EarlyConsole → MemBlockReserved → MemBlock →
+SwapperPageTable → Cpu0Scheduler → Unmask`。
 
 交接时 BootTask 必须仍为 current 且 OnCpu，Banner、DtbBlob、MemBlockMemory、
-`SbiCapability` 与 EarlyConsole 必须为 Online，并保留
+`SbiCapability`、EarlyConsole、MemBlockReserved、MemBlock、SwapperPageTable 与 Cpu0Scheduler
+必须为 Online，并保留
 `early_console_bound_from_registry(EarlyConsole, SbiConsole)`、
-`printk_console_registered(Printk, EarlyConsole)` 以及 `BootCommandLine` 的 `earlycon` 键。
-EarlyBoot 不断言该键的具体外部输入值，也不建立 interrupt-enabled 交接事实。
+`printk_console_registered(Printk, EarlyConsole)` 以及 `BootCommandLine` 的 `earlycon` 键。成功
+完成全部 drive 后建立 `early_boot_interrupts_enabled()`，供 BootSetup 消费；EarlyBoot 不断言该
+键的具体外部输入值。
 
 若 DTB 物理范围、bootargs、Memory 输入或后续任一 drive 失败，已经提交的前序对象保持其状态，
 但不得执行剩余 drive；BootSetup 不得执行。若 DTB 缺少非空且有效的 memory
@@ -37,14 +40,13 @@ EarlyBoot 不断言该键的具体外部输入值，也不建立 interrupt-enabl
 
 DtbBlob Online 表示内核已经观察并复制 bootargs，不表示 DTB 内存失效，也不表示 DTB
 `/memory` 描述等同于 DTB 文件自身范围。MemBlockMemory 从 `/memory` 建立系统 RAM 来源；
-MemBlockReserved 则由 EarlyBoot 的 `SetupBootmem` 表示 KernelImage、DTB 文件自身、FDT
+MemBlockReserved 则由 EarlyBoot 的 `Enter` 后半段表示 KernelImage、DTB 文件自身、FDT
 reserve map 和 `/reserved-memory` 要求的强制保留完整。本模型不额外物化 `SetupArch`、
 `parse_dtb` 或 DT 属性包装阶段。
 
 对象输入所有权见 [`DtbBlob` 章程](../../objects/dtb_blob.md) 与
-[`MemBlock` 章程](../../objects/memblock.md)。后续 reservation、页表、Scheduler 与 interrupt
-`SetupVmFinal` 完成 `SwapperPageTable` 后，`Complete` 仍只保留 Scheduler Enable 与 Unmask
-的正式模型定义；本里程碑的 Rust 入口在 M1 成功后停驻且中断保持屏蔽。
+[`MemBlock` 章程](../../objects/memblock.md)。模型在 `SwapperPageTable` 后继续展开 Scheduler
+与 interrupt Unmask；本里程碑的 Rust 入口仍在 M1 成功后停驻且中断保持屏蔽。
 
 模型映射：
 [`model/phases/start_kernel/early_boot.spec`](../../../model/phases/start_kernel/early_boot.spec)。

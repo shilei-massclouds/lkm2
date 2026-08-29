@@ -25,6 +25,7 @@ from modelc import compile_spec  # noqa: E402
 BOOT_CPU = ("objects", "cpu", "BootCPU")
 KERNEL_INIT_TASK = ("objects", "task", "KernelInitTask")
 CPU0_SCHEDULER = ("objects", "scheduler", "Cpu0Scheduler")
+EARLY_BOOT = ("phases", "start_kernel", "early_boot", "EarlyBoot")
 
 
 def _all_units(units):
@@ -223,6 +224,15 @@ object RuntimeSignalControl: RuntimeSignalControlType {{}}
         self.assertEqual(interrupt.event_flows[0].outcome, "returned")
         self.assertEqual(interrupt.interrupt_controls[0].mode, "Unmasked")
         self.assertEqual(interrupt.interrupt_controls[0].pending, ())
+        early_boot = tuple(
+            unit
+            for unit in _all_units(interrupt.units)
+            if unit.event.target == EARLY_BOOT
+        )
+        self.assertEqual(
+            tuple(unit.handler for unit in early_boot),
+            (("Action", "Enter"),),
+        )
 
         exception = self._derive("exception.page_fault <local>\n").paths[0]
         self.assertEqual(exception.status, "yielded")

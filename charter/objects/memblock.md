@@ -7,10 +7,10 @@
 
 ## 生命周期与来源
 
-两个子对象由各自所属的启动阶段驱动，而不是由父对象嵌套驱动：`parse_dtb` 对应的
-EarlyBoot 边界驱动 `MemBlockMemory.Enable`，其 `SetupBootmem` 动作边界驱动
-`MemBlockReserved.Enable`。随后 `MemBlock.Enable` 只检查两个子对象都已 Online，才提交父对象
-Online。这一拆分保留 Memory 与 Reserved 的独立失败和提交语义。
+两个子对象由 EarlyBoot `Enter` 动作按顺序驱动，而不是由父对象嵌套驱动：`parse_dtb` 对应的
+前段先驱动 `MemBlockMemory.Enable`，后段再驱动 `MemBlockReserved.Enable`。随后
+`MemBlock.Enable` 只检查两个子对象都已 Online，才提交父对象 Online。这一拆分保留 Memory 与
+Reserved 的独立失败和提交语义。
 
 `MemBlock` Online 直接表示早期物理内存分配所需的内存发现和强制保留前提已经满足，不得再建立
 `ready_for_allocation` 或其他同义事实。

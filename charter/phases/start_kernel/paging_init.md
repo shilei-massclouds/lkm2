@@ -1,22 +1,20 @@
-# SetupVmFinal / Complete 章程
+# EarlyBoot 页表与调度章程
 
-仓库不建立显式 `PagingInit` phase。`StartKernel` 在 `EarlyBoot` 下顺序恢复四个动作：
-`Enter`、`SetupBootmem`、`SetupVmFinal`、`Complete`。它们在 EarlyBoot 已经完成 DTB Memory、
-SBI capability 与 EarlyConsole 后运行，固定顺序为：
+仓库不建立显式 `PagingInit` phase，也不把后半段拆成独立 EarlyBoot actions。`StartKernel` 只
+resume `EarlyBoot.Action::Enter`；该动作在完成 DTB Memory、SBI capability 与 EarlyConsole 后
+继续按以下固定顺序展开：
 
 ```text
-setup_bootmem:
   MemBlockReserved.Enable
   MemBlock.Enable
-setup_vm_final:
   SwapperPageTable.Enable
-Cpu0Scheduler.Enable
-InterruptControl.Unmask
+  Cpu0Scheduler.Enable
+  InterruptControl.Unmask
 ```
 
-`MemBlockReserved.Enable` 在 `setup_bootmem` 内纳入 KernelImage、DTB 文件自身、FDT reserve map
+`MemBlockReserved.Enable` 在 EarlyBoot Enter 内纳入 KernelImage、DTB 文件自身、FDT reserve map
 和静态 `/reserved-memory`；完成后父 `MemBlock.Enable` 只检查 Memory 与 Reserved 均 Online。
-因此“加入 KernelImage 与 DTB 自身保留”是 `setup_bootmem` 的职责，不是 `DtbBlob.Enable` 或
+因此“加入 KernelImage 与 DTB 自身保留”是 Enter 后半段的职责，不是 `DtbBlob.Enable` 或
 `parse_dtb` 的副作用。
 
 只有 MemBlock Online 后才能启用 `SwapperPageTable`，表达 `setup_vm_final` 的内存前提。随后才启用

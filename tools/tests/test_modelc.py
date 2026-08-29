@@ -1101,6 +1101,46 @@ object Probe: T {}
         self.assertTrue(concrete_enter.override)
         self.assertFalse(concrete_enter.abstract)
 
+    def test_early_boot_uses_phase_type_and_single_flat_enter(self) -> None:
+        model = compile_spec(REPOSITORY / "model" / "main.spec")
+        early_boot = next(
+            item for item in model.objects if item.name == early_boot_path
+        )
+        start_kernel = next(
+            item for item in model.objects if item.name == start_kernel_path
+        )
+
+        self.assertEqual(early_boot.base_type.name, ("PhaseType",))
+        self.assertEqual(
+            tuple(action.signal for action in early_boot.states[0].actions),
+            (("Action", "Enter"),),
+        )
+        enter = early_boot.states[0].actions[0]
+        self.assertEqual(
+            tuple(block.kind for block in enter.blocks),
+            ("depends_on", "drives", "ensures", "establishes"),
+        )
+        drives = next(block for block in enter.blocks if block.kind == "drives")
+        self.assertEqual(len(drives.signals), 10)
+        self.assertFalse(
+            any(
+                item.name[-1] == "EarlyBootType"
+                for module in model.modules
+                for item in module.types
+            )
+        )
+
+        resumes = tuple(
+            _target_name(signal.target)[-1]
+            for block in start_kernel.states[0].actions[0].blocks
+            if block.kind == "resumes"
+            for signal in block.signals
+        )
+        self.assertEqual(
+            resumes,
+            ("EarlyBoot", "BootSetup", "BootHandoff", "BootIdle"),
+        )
+
     def test_comments_whitespace_and_long_origin(self) -> None:
         document = parse_spec(
             """

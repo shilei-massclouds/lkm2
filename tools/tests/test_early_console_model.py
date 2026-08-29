@@ -524,6 +524,11 @@ class EarlyConsoleModelTests(unittest.TestCase):
                 "MemBlockMemory",
                 "SbiCapability",
                 "EarlyConsole",
+                "MemBlockReserved",
+                "MemBlock",
+                "SwapperPageTable",
+                "Cpu0Scheduler",
+                "InterruptControl",
             ),
         )
 

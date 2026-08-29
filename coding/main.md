@@ -27,7 +27,7 @@ impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
   生产边界；
 - [`objects/memblock.md`](objects/memblock.md)：DTB Memory 扫描、固定容量区间集和强制保留；
 - [`phases/start_kernel/paging_init.md`](phases/start_kernel/paging_init.md)：
-  EarlyBoot 的 `SetupBootmem`、`SetupVmFinal` 和 M1 停驻边界；
+  EarlyBoot Enter 的 MemBlock、SwapperPageTable 和 M1 停驻边界；
 - [`objects/printk.md`](objects/printk.md)：Printk 静态可用性、Console 注册与 Banner
   提交边界；
 - [`checkpoints.md`](checkpoints.md)：从 Model IR 生成的 checkpoint、handler、sibling

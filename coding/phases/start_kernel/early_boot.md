@@ -4,15 +4,17 @@
 [`model/phases/start_kernel/early_boot.spec`](../../../model/phases/start_kernel/early_boot.spec)，
 实现入口为 [`impl/phases/start_kernel.rs`](../../../impl/phases/start_kernel.rs)。
 
-EarlyBoot 的固定运行顺序是 `Enter → SetupBootmem → SetupVmFinal → Complete`：
+EarlyBoot 只有一个 `Enter` 动作，固定按以下顺序展开：
 
 1. 把固定 banner 记录到初始可用的 Printk FIFO；
 2. 取得 ArchHead 发布的 DTB 物理/虚拟映射，严格校验 FDT 并复制唯一 bootargs；
 3. 调用 `MemBlockMemory::derive_from_dtb`，完成 `parse_dtb` 对应的系统 RAM 发现；
 4. 探测 SBI v2.0/DBCN capability；
 5. 通过链接期 `EarlyConTable` 查询 backend，启用并注册 SbiConsole，回放 banner；
-6. `SetupBootmem` 提交 Reserved 与 MemBlock Online；
-7. `SetupVmFinal` 建立并切换 `SwapperPageTable`。
+6. 提交 `MemBlockReserved` 与 `MemBlock` Online；
+7. 建立并切换 `SwapperPageTable`；
+8. 启用 CPU0 Scheduler；
+9. 执行当前 CPU 的 local IRQ Unmask，并建立 EarlyBoot 交接事实。
 
 Memory 必须在 SBI probe 前成功。任何一步失败都保持中断屏蔽并 fail-stop，
 已经完成的前序值不回滚。
@@ -21,5 +23,5 @@ Memory 必须在 SBI probe 前成功。任何一步失败都保持中断屏蔽�
 字节，要求 NUL 结尾、无内嵌 NUL、UTF-8，并且恰好包含一个独立 `earlycon=sbi` token。backend
 必须来自链接表唯一查询，不能因当前只有 SBI backend 而绕过 registry。
 
-M1 成功后 Rust 在 `SwapperPageTable` Online 处停驻；Scheduler Enable 和 Unmask 只保留在
-模型的 `Complete` 动作中。
+M1 成功后 Rust 在 `SwapperPageTable` Online 处停驻；Scheduler Enable 和 Unmask 仍只在模型的
+EarlyBoot Enter 展开中定义。

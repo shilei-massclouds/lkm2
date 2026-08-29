@@ -156,7 +156,7 @@ class MemBlockModelTests(unittest.TestCase):
             )
         )
 
-    def test_default_qemu_boot_stages_memblock_across_early_boot_actions(self) -> None:
+    def test_default_qemu_boot_expands_memblock_inside_early_boot_enter(self) -> None:
         model = compile_spec(REPOSITORY / "model/main.spec")
         path = _derive_model(model)
         units = tuple(_all_units(path.units))
@@ -194,32 +194,14 @@ class MemBlockModelTests(unittest.TestCase):
                 "MemBlockMemory",
                 "SbiCapability",
                 "EarlyConsole",
-            ),
-        )
-        setup_bootmem = next(
-            unit
-            for unit in units
-            if unit.event.target[-1] == "EarlyBoot"
-            and unit.handler == ("Action", "SetupBootmem")
-        )
-        self.assertEqual(
-            tuple(unit.event.target[-1] for unit in setup_bootmem.drives),
-            (
                 "MemBlockReserved",
                 "MemBlock",
+                "SwapperPageTable",
+                "Cpu0Scheduler",
+                "InterruptControl",
             ),
         )
-        setup_vm_final = next(
-            unit
-            for unit in units
-            if unit.event.target[-1] == "EarlyBoot"
-            and unit.handler == ("Action", "SetupVmFinal")
-        )
-        self.assertEqual(
-            tuple(unit.event.target[-1] for unit in setup_vm_final.drives),
-            ("SwapperPageTable",),
-        )
-        memblock_enable = setup_bootmem.drives[1]
+        memblock_enable = early_boot.drives[6]
         self.assertEqual(memblock_enable.drives, ())
         self.assertTrue(
             all(check.status == "passed" for check in memblock_enable.depends_on)

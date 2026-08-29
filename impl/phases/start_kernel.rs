@@ -76,8 +76,8 @@ pub(crate) extern "C" fn start_kernel() -> ! {
     if setup_vm_final(&mut memblock).is_err() {
         fail_stop();
     }
-    // M1 deliberately stops here.  Scheduler enable and interrupt unmask are
-    // retained as model-only Complete actions for the next milestone.
+    // M1 deliberately stops here. Scheduler enable and interrupt unmask remain
+    // model-only EarlyBoot Enter drives for the next implementation milestone.
     park()
 }
 
