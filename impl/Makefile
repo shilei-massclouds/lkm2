@@ -4,19 +4,25 @@
 include build.mak
 include qemu.mak
 
-.PHONY: all build checkpoints checkpoint-sibling-patch checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-dtb-blob test-memblock test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints fmt clippy run clean help FORCE
+.PHONY: all build checkpoints checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-dtb-blob test-memblock test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints fmt clippy run clean help FORCE
 
 all: build
 
 build: $(IMAGE)
 
-checkpoints: $(CHECKPOINTS_RS) $(CHECKPOINT_MANIFEST)
+checkpoints: $(CHECKPOINTS_RS) $(CHECKPOINT_MANIFEST) $(SWAPPER_CHECKPOINTS_RS) $(SWAPPER_CHECKPOINT_MANIFEST)
 
 checkpoint-sibling-patch: $(MODEL_IR) $(CHECKPOINT_MAPPING) | $(BUILD_STAMP)
 	$(CHECKPOINTGEN) --model-ir $(MODEL_IR) --mapping $(CHECKPOINT_MAPPING) \
 		--repository .. --sibling-patch-output $(BUILD_DIR)/linux-checkpoints.patch
 	@git -C ../../linux-6.12 apply --check ../lkm2/impl/$(BUILD_DIR)/linux-checkpoints.patch 2>/dev/null || \
 		git -C ../../linux-6.12 apply --reverse --check ../lkm2/impl/$(BUILD_DIR)/linux-checkpoints.patch
+
+checkpoint-sibling-patch-swapper: $(MODEL_IR) $(SWAPPER_CHECKPOINT_MAPPING) | $(BUILD_STAMP)
+	$(CHECKPOINTGEN) --model-ir $(MODEL_IR) --mapping $(SWAPPER_CHECKPOINT_MAPPING) \
+		--repository .. --sibling-patch-output $(BUILD_DIR)/linux-swapper-checkpoints.patch
+	@git -C ../../linux-6.12 apply --check ../lkm2/impl/$(BUILD_DIR)/linux-swapper-checkpoints.patch 2>/dev/null || \
+		git -C ../../linux-6.12 apply --reverse --check ../lkm2/impl/$(BUILD_DIR)/linux-swapper-checkpoints.patch
 
 checkpoint-sibling-apply:
 	../tools/bin/checkpoint-sibling-apply --sibling ../../linux-6.12 \
@@ -62,10 +68,10 @@ test-checkpoints:
 fmt:
 	$(RUSTFMT) --edition 2024 --check $(RUST_SOURCES)
 
-clippy: $(CHECKPOINTS_RS) | $(BUILD_STAMP)
+clippy: $(CHECKPOINTS_RS) $(SWAPPER_CHECKPOINTS_RS) | $(BUILD_STAMP)
 	$(CLIPPY) $(RUSTC_FLAGS) -D warnings -o $(CLIPPY_ELF) main.rs
 
-$(ELF): $(RUST_SOURCES) $(CHECKPOINTS_RS) $(LINKER_SCRIPT) | $(BUILD_STAMP)
+$(ELF): $(RUST_SOURCES) $(CHECKPOINTS_RS) $(SWAPPER_CHECKPOINTS_RS) $(LINKER_SCRIPT) | $(BUILD_STAMP)
 	$(RUSTC) $(RUSTC_FLAGS) -o $@ main.rs
 
 $(MODEL_IR): $(MODEL_SOURCES)
@@ -75,6 +81,11 @@ $(CHECKPOINTS_RS) $(CHECKPOINT_MANIFEST) &: FORCE $(MODEL_IR) $(CHECKPOINT_MAPPI
 	$(CHECKPOINTGEN) --model-ir $(MODEL_IR) --mapping $(CHECKPOINT_MAPPING) \
 		--handler $(CHECKPOINT_HANDLER) --rust-output $(CHECKPOINTS_RS) \
 		--manifest-output $(CHECKPOINT_MANIFEST)
+
+$(SWAPPER_CHECKPOINTS_RS) $(SWAPPER_CHECKPOINT_MANIFEST) &: FORCE $(MODEL_IR) $(SWAPPER_CHECKPOINT_MAPPING) $(CHECKPOINTGEN) $(shell find ../tools/src/checkpointgen -type f -name '*.py') | $(BUILD_STAMP)
+	$(CHECKPOINTGEN) --model-ir $(MODEL_IR) --mapping $(SWAPPER_CHECKPOINT_MAPPING) \
+		--handler $(CHECKPOINT_HANDLER) --rust-output $(SWAPPER_CHECKPOINTS_RS) \
+		--manifest-output $(SWAPPER_CHECKPOINT_MANIFEST)
 
 $(IMAGE): $(ELF)
 	$(OBJCOPY) -O binary $< $@
@@ -95,6 +106,7 @@ help:
 	@echo "  build  Build build/lkm2.elf and build/lkm2.bin"
 	@echo "  checkpoints Generate the Model IR checkpoint manifest and Rust code"
 	@echo "  checkpoint-sibling-patch Generate and check (but do not apply) the frozen Linux patch"
+	@echo "  checkpoint-sibling-patch-swapper Generate and check the incremental M1 Linux patch"
 	@echo "  checkpoint-sibling-apply Apply the reviewed patch or recognize its integrated commit"
 	@echo "  difftest Build sibling and run the strict Sv57 differential"
 	@echo "  checkpoint-diff-sv57 Compatibility alias for difftest"

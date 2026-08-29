@@ -13,7 +13,8 @@ impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
                                           -> impl/objects/early_console.rs
                                           -> impl/systems/sbi.rs
                                           -> impl/objects/printk.rs
-                                          -> impl/phases/start_kernel/paging_init.rs
+                                          -> impl/objects/memblock.rs
+                                          -> impl/phases/start_kernel.rs
 ```
 
 对应的主要编码契约为：
@@ -26,7 +27,7 @@ impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
   生产边界；
 - [`objects/memblock.md`](objects/memblock.md)：DTB Memory 扫描、固定容量区间集和强制保留；
 - [`phases/start_kernel/paging_init.md`](phases/start_kernel/paging_init.md)：
-  `setup_bootmem` 的阶段归属与当前实现停点；
+  EarlyBoot 的 `SetupBootmem`、`SetupVmFinal` 和 M1 停驻边界；
 - [`objects/printk.md`](objects/printk.md)：Printk 静态可用性、Console 注册与 Banner
   提交边界；
 - [`checkpoints.md`](checkpoints.md)：从 Model IR 生成的 checkpoint、handler、sibling

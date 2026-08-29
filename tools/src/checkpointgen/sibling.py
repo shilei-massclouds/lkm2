@@ -35,7 +35,10 @@ def _git(sibling: Path, *arguments: str) -> str:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise CheckpointGenerationError(f"sibling git {' '.join(arguments)} failed: {detail}")
-    return result.stdout.strip()
+    # Preserve the two-character status prefix (especially its leading space
+    # for unstaged-only edits); callers parse that prefix to reject staged
+    # sibling changes.
+    return result.stdout.rstrip()
 
 
 def _git_bytes(sibling: Path, *arguments: str) -> bytes:
@@ -163,6 +166,72 @@ def validate_differential_sibling(
     return state
 
 
+def validate_incremental_differential_sibling(
+    sibling: Path,
+    mapping: CheckpointMapping,
+    checkpoints: tuple[Checkpoint, ...],
+) -> str | None:
+    """Recognize the unstaged M1 patch layered on the VM integration.
+
+    The M1 Linux patch intentionally has no new commit yet.  It is reviewed
+    as three unstaged modifications on the existing VM-integrated commit.
+    Return ``None`` for a clean integrated tree so callers can retain the
+    frozen 28-record differential path.
+    """
+
+    if mapping.root_object != "SwapperPageTable":
+        raise CheckpointGenerationError("incremental validation requires SwapperPageTable mapping")
+    if not sibling.is_dir():
+        raise CheckpointGenerationError(f"sibling path does not exist: {sibling}")
+    _validate_branch(sibling, mapping)
+    head = _git(sibling, "rev-parse", "HEAD")
+    if head != mapping.sibling_integrated.commit:
+        return None
+    status_lines = _git(sibling, "status", "--short").splitlines()
+    if not status_lines:
+        return None
+    if any(line and line[0] not in {" ", "?"} for line in status_lines):
+        raise CheckpointGenerationError("sibling checkpoint changes must remain unstaged")
+    expected_paths = {
+        "arch/riscv/mm/init.c",
+        "arch/riscv/mm/lkm2_checkpoint_handler.c",
+        "arch/riscv/mm/lkm2_checkpoints.inc",
+    }
+    changed_paths = {line[3:] for line in status_lines if len(line) >= 4}
+    if changed_paths != expected_paths:
+        raise CheckpointGenerationError(
+            "sibling must contain exactly the reviewed, unstaged M1 checkpoint patch"
+        )
+
+    baseline = mapping.sibling_integrated
+    init_path = "arch/riscv/mm/init.c"
+    include_path = "arch/riscv/mm/lkm2_checkpoints.inc"
+    handler_path = "arch/riscv/mm/lkm2_checkpoint_handler.c"
+    expected = {
+        init_path: _modify_init_swapper_incremental(
+            _read_revision_file(sibling, baseline, init_path)
+        ),
+        include_path: _swapper_include_append(
+            _read_revision_file(sibling, baseline, include_path), checkpoints, mapping
+        ),
+        handler_path: _swapper_handler_append(
+            _read_revision_file(sibling, baseline, handler_path), checkpoints
+        ),
+    }
+    for relative, content in expected.items():
+        try:
+            actual = (sibling / relative).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise CheckpointGenerationError(
+                f"cannot read sibling M1 patch anchor {relative}: {exc}"
+            ) from exc
+        if actual != content:
+            raise CheckpointGenerationError(
+                f"sibling M1 patch content differs from generated {relative}"
+            )
+    return "reviewed-swapper-patch"
+
+
 def _c_parameters(item: Checkpoint, *, names: bool = True) -> str:
     return ", ".join(
         f"uint64_t {'arg' + str(index) if names else ''}".rstrip()
@@ -209,6 +278,9 @@ def _render_milestone(
             "\tstruct lkm2_cp_early_dtb early_dtb = lkm2_cp_observe_early_dtb();\n"
             "\tuint64_t satp = csr_read(CSR_SATP);"
         ),
+        "swapper_online": (
+            "\tstruct lkm2_cp_swapper swapper = lkm2_cp_observe_swapper();"
+        ),
     }
     lines = [f"static void __init lkm2_checkpoint_{milestone}(void)", "{", observation_lines[milestone]]
     for item in checkpoints:
@@ -226,6 +298,37 @@ def render_linux_include(
     milestones = "\n\n".join(
         _render_milestone(name, checkpoints) for name in mapping.milestones
     )
+    swapper_struct = "" if mapping.root_object != "SwapperPageTable" else """
+struct lkm2_cp_swapper {
+	uint64_t mode, fixmap_va, linear_va, linear_pa, linear_flags;
+	uint64_t kernel_va, kernel_pa, kernel_flags;
+	uint64_t fixmap_cleared, satp_switched, tlb_flush_completed;
+	uint64_t late_mode_selected;
+};
+"""
+    swapper_observer = "" if mapping.root_object != "SwapperPageTable" else """
+static struct lkm2_cp_swapper __init lkm2_cp_observe_swapper(void)
+{
+	/* setup_vm_final has completed all of these operations at its checkpoint. */
+	return (struct lkm2_cp_swapper) {
+		.mode = satp_mode >> SATP_MODE_SHIFT,
+		.fixmap_va = __fix_to_virt(FIX_FDT),
+		.linear_va = PAGE_OFFSET,
+		.linear_pa = memblock_start_of_DRAM(),
+		.linear_flags = pgprot_val(PAGE_KERNEL),
+		.kernel_va = kernel_map.virt_addr,
+		.kernel_pa = kernel_map.phys_addr,
+		/* The representative text mapping is strict-RWX (read/execute). */
+		.kernel_flags = pgprot_val(PAGE_KERNEL_READ_EXEC),
+		.fixmap_cleared = 1,
+		.satp_switched = 1,
+		.tlb_flush_completed = 1,
+		.late_mode_selected = 1,
+	};
+}
+""".strip("\n")
+    if swapper_observer:
+        swapper_observer = f"\n{swapper_observer}\n"
     return f"""/* @generated by lkm2 checkpointgen; do not edit. */
 #include <linux/types.h>
 
@@ -249,7 +352,7 @@ struct lkm2_cp_early_dtb {{
 	uint64_t leaf0_pa, leaf0_flags, leaf1_pa, leaf1_flags;
 	uint64_t size, coverage_ok;
 }};
-
+{swapper_struct}
 static uint64_t __init lkm2_cp_pte_pa(uint64_t entry)
 {{
 	return ((entry & _PAGE_PFN_MASK) >> _PAGE_PFN_SHIFT) << PAGE_SHIFT;
@@ -376,7 +479,7 @@ static struct lkm2_cp_early_dtb __init lkm2_cp_observe_early_dtb(void)
 	}};
 }}
 
-{milestones}
+{swapper_observer}{milestones}
 """
 
 
@@ -482,6 +585,65 @@ def _modify_init(source: str) -> str:
     return source
 
 
+def _modify_init_swapper(source: str) -> str:
+    source = _replace_once(
+        source,
+        "#endif\n\nasmlinkage void __init setup_vm(uintptr_t dtb_pa)\n{",
+        '#endif\n\n#include "lkm2_checkpoints.inc"\n\nasmlinkage void __init setup_vm(uintptr_t dtb_pa)\n{',
+        "checkpoint include",
+    )
+    source = _replace_once(
+        source,
+        "\tpt_ops_set_late();",
+        "\tpt_ops_set_late();\n\tlkm2_checkpoint_swapper_online();",
+        "swapper online",
+    )
+    return source
+
+
+def _modify_init_swapper_incremental(source: str) -> str:
+    """Add the M1 observation to an already VM-instrumented Linux tree."""
+
+    return _replace_once(
+        source,
+        "\tpt_ops_set_late();",
+        "\tpt_ops_set_late();\n\tlkm2_checkpoint_swapper_online();",
+        "swapper online",
+    )
+
+
+def _swapper_include_append(
+    existing: str, checkpoints: tuple[Checkpoint, ...], mapping: CheckpointMapping
+) -> str:
+    """Append only swapper declarations/observation to the frozen VM include."""
+
+    rendered = render_linux_include(checkpoints, mapping)
+    declaration_end = "\n\nstruct lkm2_cp_kernel {"
+    declarations = rendered.split(declaration_end, 1)[0]
+    declarations = "\n".join(
+        line for line in declarations.splitlines() if line.startswith("extern void ")
+    )
+    struct_start = rendered.index("struct lkm2_cp_swapper {")
+    struct_end = rendered.index("\n};", struct_start) + len("\n};")
+    struct = rendered[struct_start:struct_end]
+    observer_start = rendered.index("static struct lkm2_cp_swapper __init lkm2_cp_observe_swapper")
+    milestone_start = rendered.index("static void __init lkm2_checkpoint_swapper_online", observer_start)
+    observer = rendered[observer_start:milestone_start].rstrip()
+    milestone = rendered[milestone_start:].rstrip()
+    suffix = "\n\n".join((declarations, struct, observer, milestone))
+    return existing.rstrip() + "\n\n" + suffix + "\n"
+
+
+def _swapper_handler_append(
+    existing: str, checkpoints: tuple[Checkpoint, ...]
+) -> str:
+    """Append swapper handler functions without duplicating shared helpers."""
+
+    rendered = render_linux_handler(checkpoints)
+    first_function = rendered.index("\nvoid lkm_checkpoint_") + 1
+    return existing.rstrip() + "\n\n" + rendered[first_function:].rstrip() + "\n"
+
+
 def _modify_makefile(source: str) -> str:
     source = _replace_once(
         source,
@@ -550,11 +712,35 @@ def generate_sibling_patch(
     validate_sibling(sibling, mapping)
     init_path = "arch/riscv/mm/init.c"
     makefile_path = "arch/riscv/mm/Makefile"
+
+    if mapping.root_object == "SwapperPageTable":
+        # The sibling repository is already at the integrated VM checkpoint
+        # commit.  M1 is deliberately an incremental patch: preserve the
+        # existing 28-record protocol and add only the final observation.
+        baseline = mapping.sibling_integrated
+        init_before = _read_revision_file(sibling, baseline, init_path)
+        include_path = "arch/riscv/mm/lkm2_checkpoints.inc"
+        handler_path = "arch/riscv/mm/lkm2_checkpoint_handler.c"
+        include_before = _read_revision_file(sibling, baseline, include_path)
+        handler_before = _read_revision_file(sibling, baseline, handler_path)
+        init_after = _modify_init_swapper_incremental(init_before)
+        include_after = _swapper_include_append(include_before, checkpoints, mapping)
+        handler_after = _swapper_handler_append(handler_before, checkpoints)
+        return (
+            _diff_file(init_path, init_before, init_after)
+            + _diff_file(include_path, include_before, include_after)
+            + _diff_file(handler_path, handler_before, handler_after)
+        )
+
     init_before = _read_revision_file(sibling, mapping.sibling_patch_base, init_path)
     makefile_before = _read_revision_file(
         sibling, mapping.sibling_patch_base, makefile_path
     )
-    init_after = _modify_init(init_before)
+    init_after = (
+        _modify_init_swapper(init_before)
+        if mapping.root_object == "SwapperPageTable"
+        else _modify_init(init_before)
+    )
     makefile_after = _modify_makefile(makefile_before)
     include_path = "arch/riscv/mm/lkm2_checkpoints.inc"
     handler_path = "arch/riscv/mm/lkm2_checkpoint_handler.c"

@@ -128,21 +128,27 @@ OpenSBI -> Kernel: emits Transition::Enable
         commit state: State::Online
       commit state: State::Online
     commit state: unchanged
-  StartKernel -> PagingInit: resumes Action::Enter
+  StartKernel -> EarlyBoot: resumes Action::SetupBootmem
     current state: State::Online
-    PagingInit -> MemBlockReserved: drives Transition::Enable
+    EarlyBoot -> MemBlockReserved: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online
-    PagingInit -> MemBlock: drives Transition::Enable
+    EarlyBoot -> MemBlock: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online
-    PagingInit -> FinalPageTable: drives Transition::Enable
+    commit state: unchanged
+  StartKernel -> EarlyBoot: resumes Action::SetupVmFinal
+    current state: State::Online
+    EarlyBoot -> SwapperPageTable: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online
-    PagingInit -> Cpu0Scheduler: drives Transition::Enable
+    commit state: unchanged
+  StartKernel -> EarlyBoot: resumes Action::Complete
+    current state: State::Online
+    EarlyBoot -> Cpu0Scheduler: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online
-    PagingInit -> InterruptControl: drives Action::Unmask
+    EarlyBoot -> InterruptControl: drives Action::Unmask
       current state: State::Online
       commit state: unchanged
     commit state: unchanged

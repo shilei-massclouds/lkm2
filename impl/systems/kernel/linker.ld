@@ -21,11 +21,15 @@ SECTIONS
     ASSERT(_start == ADDR(.head.text), "_start must begin .head.text")
     ASSERT(SIZEOF(.head.text) <= 2M, ".head.text must fit in the first 2 MiB")
 
+    _text_start = ADDR(.head.text);
+
     .text : AT(ADDR(.text) - LOAD_OFFSET) ALIGN(4K)
     {
         *(.text .text.*)
     }
+    _text_end = ADDR(.text) + SIZEOF(.text);
 
+    _rodata_start = ADDR(.rodata);
     .rodata : AT(ADDR(.rodata) - LOAD_OFFSET) ALIGN(4K)
     {
         *(.rodata .rodata.*)
@@ -37,7 +41,9 @@ SECTIONS
     }
     ASSERT((__earlycon_table_end - __earlycon_table_start) == 24,
            "exactly one earlycon backend must be linked")
+    _rodata_end = ADDR(.rodata) + SIZEOF(.rodata);
 
+    _data_start = ADDR(.data);
     .data : AT(ADDR(.data) - LOAD_OFFSET) ALIGN(4K)
     {
         *(.data .data.*)
@@ -48,6 +54,7 @@ SECTIONS
         __global_pointer$ = . + 0x800;
         *(.sdata .sdata.*)
     }
+    _data_end = ADDR(.sdata) + SIZEOF(.sdata);
 
     .bss (NOLOAD) : AT(ADDR(.bss) - LOAD_OFFSET) ALIGN(4K)
     {

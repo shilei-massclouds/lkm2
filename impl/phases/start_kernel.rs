@@ -1,16 +1,13 @@
 //! Starting-kernel phase.
 
-mod paging_init;
-
 use core::arch::asm;
 
 use crate::objects::dtb_blob::DtbBlob;
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
-use crate::objects::memblock::MemBlockMemory;
+use crate::objects::memblock::{MemBlock, MemBlockMemory};
 use crate::objects::printk::EarlyPrintk;
-use crate::objects::{early_dtb_mapping, kernel_image_physical_range};
+use crate::objects::{early_dtb_mapping, kernel_image_physical_range, setup_vm_final};
 use crate::systems::sbi::{Ecall, SbiCapability, SbiConsole};
-use paging_init::setup_bootmem;
 
 const BANNER: &[u8] = b"LKM2 kernel\n";
 
@@ -64,7 +61,7 @@ pub(crate) extern "C" fn start_kernel() -> ! {
         Some(range) => range,
         None => fail_stop(),
     };
-    let memblock = match setup_bootmem(
+    let mut memblock = match MemBlock::setup_bootmem(
         memory,
         &dtb_blob,
         dtb.physical_address() as u64,
@@ -76,8 +73,11 @@ pub(crate) extern "C" fn start_kernel() -> ! {
     if memblock.memory_region_count() == 0 || memblock.reserved_region_count() == 0 {
         fail_stop();
     }
-    // The current executable prefix stops after setup_bootmem. setup_vm_final,
-    // Scheduler enable, and interrupt unmask remain later implementation work.
+    if setup_vm_final(&mut memblock).is_err() {
+        fail_stop();
+    }
+    // M1 deliberately stops here.  Scheduler enable and interrupt unmask are
+    // retained as model-only Complete actions for the next milestone.
     park()
 }
 

@@ -31,7 +31,6 @@ USER_APP_RUNTIME = (
 KERNEL = ("systems", "kernel", "Kernel")
 BOOT_HANDOFF = ("phases", "start_kernel", "boot_handoff", "BootHandoff")
 EARLY_BOOT = ("phases", "start_kernel", "early_boot", "EarlyBoot")
-PAGING_INIT = ("phases", "start_kernel", "paging_init", "PagingInit")
 BOOT_SETUP = ("phases", "start_kernel", "boot_setup", "BootSetup")
 USER_RUN_PHASE = ("phases", "user_run", "UserRunPhase")
 BOOT_CPU = ("objects", "cpu", "BootCPU")
@@ -40,7 +39,7 @@ DTB_BLOB = ("objects", "dtb_blob", "DtbBlob")
 MEMBLOCK = ("objects", "memblock", "MemBlock")
 MEMBLOCK_MEMORY = ("objects", "memblock", "MemBlockMemory")
 MEMBLOCK_RESERVED = ("objects", "memblock", "MemBlockReserved")
-FINAL_PAGE_TABLE = ("objects", "vm", "FinalPageTable")
+SWAPPER_PAGE_TABLE = ("objects", "vm", "SwapperPageTable")
 SBI_CAPABILITY = ("objects", "early_console", "SbiCapability")
 BANNER = ("objects", "printk", "Banner")
 
@@ -210,18 +209,37 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(_target_name(signal.target), CPU0_SCHEDULER)
         self.assertEqual(signal.signal, ("Action", "Schedule"))
 
-    def test_paging_init_owns_scheduler_enable_and_unmask_is_last(self) -> None:
+    def test_swapper_page_table_is_vm_child_and_paging_init_is_absent(self) -> None:
+        vm_module = next(
+            item for item in self.model.modules if item.name == ("objects", "vm")
+        )
+        swapper = next(item for item in vm_module.objects if item.name == SWAPPER_PAGE_TABLE)
+        self.assertEqual(_target_name(swapper.parent), ("Vm",))
+        self.assertEqual(swapper.initial_state, ("State", "Ready"))
+        self.assertEqual(
+            tuple(item.name[-1] for item in self.model.objects if item.name[-1] == "PagingInit"),
+            (),
+        )
+        early_boot = next(item for item in self.model.objects if item.name == EARLY_BOOT)
+        self.assertEqual(
+            {action.signal[-1] for action in early_boot.states[0].actions},
+            {"Enter", "SetupBootmem", "SetupVmFinal", "Complete"},
+        )
+
+    def test_early_boot_actions_own_m0_m1_scheduler_and_unmask_order(self) -> None:
         early_boot = next(
             item for item in self.model.objects if item.name == EARLY_BOOT
         )
         boot_setup = next(
             item for item in self.model.objects if item.name == BOOT_SETUP
         )
-        paging_init = next(
-            item for item in self.model.objects if item.name == PAGING_INIT
-        )
-        early_action = early_boot.states[0].actions[0]
-        paging_action = paging_init.states[0].actions[0]
+        actions = {
+            action.signal: action for action in early_boot.states[0].actions
+        }
+        early_action = actions[("Action", "Enter")]
+        bootmem_action = actions[("Action", "SetupBootmem")]
+        vm_final_action = actions[("Action", "SetupVmFinal")]
+        complete_action = actions[("Action", "Complete")]
         setup_action = boot_setup.states[0].actions[0]
         early_drives = next(
             block.signals for block in early_action.blocks if block.kind == "drives"
@@ -229,8 +247,14 @@ class BootSchedulerModelTests(unittest.TestCase):
         setup_drives = next(
             block.signals for block in setup_action.blocks if block.kind == "drives"
         )
-        paging_drives = next(
-            block.signals for block in paging_action.blocks if block.kind == "drives"
+        bootmem_drives = next(
+            block.signals for block in bootmem_action.blocks if block.kind == "drives"
+        )
+        vm_final_drives = next(
+            block.signals for block in vm_final_action.blocks if block.kind == "drives"
+        )
+        complete_drives = next(
+            block.signals for block in complete_action.blocks if block.kind == "drives"
         )
 
         self.assertEqual(
@@ -249,12 +273,20 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(
             tuple(
                 (_target_name(signal.target), signal.signal)
-                for signal in paging_drives
+                for signal in bootmem_drives
             ),
             (
                 (MEMBLOCK_RESERVED, ("Transition", "Enable")),
                 (MEMBLOCK, ("Transition", "Enable")),
-                (FINAL_PAGE_TABLE, ("Transition", "Enable")),
+            ),
+        )
+        self.assertEqual(
+            tuple((_target_name(signal.target), signal.signal) for signal in vm_final_drives),
+            ((SWAPPER_PAGE_TABLE, ("Transition", "Enable")),),
+        )
+        self.assertEqual(
+            tuple((_target_name(signal.target), signal.signal) for signal in complete_drives),
+            (
                 (CPU0_SCHEDULER, ("Transition", "Enable")),
                 (
                     ("CurrentCPU", "InterruptControlRef"),
@@ -281,8 +313,22 @@ class BootSchedulerModelTests(unittest.TestCase):
             user_runtime_signals=load_user_runtime_signals(StringIO("")),
         ).paths[0]
         units = tuple(_all_units(path.units))
-        early_boot = next(unit for unit in units if unit.event.target == EARLY_BOOT)
-        paging_init = next(unit for unit in units if unit.event.target == PAGING_INIT)
+        early_boot = next(
+            unit for unit in units
+            if unit.event.target == EARLY_BOOT and unit.handler == ("Action", "Enter")
+        )
+        setup_bootmem = next(
+            unit for unit in units
+            if unit.event.target == EARLY_BOOT and unit.handler == ("Action", "SetupBootmem")
+        )
+        setup_vm_final = next(
+            unit for unit in units
+            if unit.event.target == EARLY_BOOT and unit.handler == ("Action", "SetupVmFinal")
+        )
+        complete = next(
+            unit for unit in units
+            if unit.event.target == EARLY_BOOT and unit.handler == ("Action", "Complete")
+        )
         boot_setup = next(unit for unit in units if unit.event.target == BOOT_SETUP)
 
         self.assertTrue(
@@ -315,29 +361,36 @@ class BootSchedulerModelTests(unittest.TestCase):
                 ("Transition", "Enable"),
             ),
         )
-        self.assertTrue(all(check.status == "passed" for check in paging_init.ensures))
+        self.assertTrue(all(check.status == "passed" for check in setup_bootmem.ensures))
         self.assertTrue(
             {
                 "MemBlockMemory == State::Online",
                 "MemBlockReserved == State::Online",
                 "MemBlock == State::Online",
-                "FinalPageTable == State::Online",
-                "Cpu0Scheduler == State::Online",
-            }.issubset({check.expression for check in paging_init.ensures})
+            }.issubset({check.expression for check in setup_bootmem.ensures})
         )
         self.assertEqual(
-            tuple(unit.event.signal for unit in paging_init.drives),
+            tuple(unit.event.signal for unit in setup_bootmem.drives),
             (
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
-                ("Transition", "Enable"),
-                ("Transition", "Enable"),
-                ("Action", "Unmask"),
             ),
+        )
+        self.assertEqual(
+            tuple(check.expression for check in setup_vm_final.ensures),
+            ("SwapperPageTable == State::Online",),
+        )
+        self.assertEqual(
+            tuple(unit.event.signal for unit in setup_vm_final.drives),
+            (("Transition", "Enable"),),
+        )
+        self.assertEqual(
+            tuple(unit.event.signal for unit in complete.drives),
+            (("Transition", "Enable"), ("Action", "Unmask")),
         )
         self.assertEqual(early_boot.establishes, ())
         self.assertEqual(
-            tuple(check.expression for check in paging_init.establishes),
+            tuple(check.expression for check in complete.establishes),
             ("early_boot_interrupts_enabled()",),
         )
         self.assertTrue(
@@ -347,10 +400,14 @@ class BootSchedulerModelTests(unittest.TestCase):
 
     def test_failed_unmask_does_not_publish_handoff_or_run_boot_setup(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
-        paging_init = next(item for item in model.objects if item.name == PAGING_INIT)
+        early_boot = next(item for item in model.objects if item.name == EARLY_BOOT)
+        complete = next(
+            action for action in early_boot.states[0].actions
+            if action.signal == ("Action", "Complete")
+        )
         drives = next(
             block
-            for block in paging_init.states[0].actions[0].blocks
+            for block in complete.blocks
             if block.kind == "drives"
         )
         unmask = drives.signals[-1]
@@ -382,8 +439,11 @@ class BootSchedulerModelTests(unittest.TestCase):
 
     def test_boot_setup_rejects_a_missing_early_boot_handoff_fact(self) -> None:
         model = compile_spec(REPOSITORY / "model" / "main.spec")
-        paging_init = next(item for item in model.objects if item.name == PAGING_INIT)
-        action = paging_init.states[0].actions[0]
+        early_boot = next(item for item in model.objects if item.name == EARLY_BOOT)
+        action = next(
+            action for action in early_boot.states[0].actions
+            if action.signal == ("Action", "Complete")
+        )
         object.__setattr__(
             action,
             "blocks",

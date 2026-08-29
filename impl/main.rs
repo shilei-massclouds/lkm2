@@ -6,6 +6,9 @@
 #[rustfmt::skip]
 #[path = "build/checkpoints.rs"]
 mod checkpoints;
+#[path = "build/swapper_checkpoints.rs"]
+#[rustfmt::skip]
+mod swapper_checkpoints;
 #[path = "systems/kernel/config.rs"]
 mod config;
 mod objects;

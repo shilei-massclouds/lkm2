@@ -49,8 +49,8 @@ BootCommandLine["earlycon"]
 不是动态创建命令行对象。具体 backend 仍只能来自有限关系查询；正式表当前只含 SBI
 backend，因此 `EarlyConsole.Enable` 在 binding 之后静态驱动 `SbiConsole.Enable`，不把
 binding 变量作为动态 signal target。当前 EarlyBoot 的生产者—消费者顺序固定为 Banner →
-DtbBlob → MemBlockMemory → SbiCapability → EarlyConsole（nested SbiConsole）；随后 PagingInit
-执行 MemBlockReserved → MemBlock → FinalPageTable → Scheduler → Unmask。MemBlock 的独立设计边界见
+DtbBlob → MemBlockMemory → SbiCapability → EarlyConsole（nested SbiConsole）；随后 EarlyBoot
+依次执行 SetupBootmem → SetupVmFinal → Complete（MemBlockReserved → MemBlock → SwapperPageTable → Scheduler → Unmask）。MemBlock 的独立设计边界见
 [`memblock-model.md`](memblock-model.md)。
 
 ## M1：输入已就绪时完成绑定（已完成）
@@ -82,7 +82,7 @@ M1 证明正式启动推导可以消费已经准备好的输入：
 - M2 当时的 `EarlyBoot.Action::Enter` 严格依次启用 `Banner`、`DtbBlob`、`EarlyConsole`、
   `Cpu0Scheduler`，最后执行 local IRQ Unmask；M4 已在 DtbBlob 与 EarlyConsole 之间加入
   `SbiCapability`，后续 MemBlock 里程碑又在 DtbBlob 与 SbiCapability 之间加入
-  `MemBlockMemory`，并把 Reserved/父 MemBlock 移到 PagingInit；成功交接时相应对象均为
+  `MemBlockMemory`，并把 Reserved/父 MemBlock 移到 EarlyBoot 的 SetupBootmem；成功交接时相应对象均为
   Online，且
   `BootCommandLine` 存在 `earlycon` 键；具体值属于 DTB 输入，不是 EarlyBoot 契约；
 - 缺失 DTB bootargs 时，Banner 已为 Online，DtbBlob binding 以
@@ -100,8 +100,8 @@ availability 抽象。
 M2 完成标准是 Setup 产生 chosen bootargs 与 registry 两个 relation effect；Banner 的唯一
 ensure 与 DtbBlob 的范围前置条件、binding 和同值 relation effect 全部通过；默认轨迹包含
 当时的五步 EarlyBoot drive，最终保留三个 tuple、backend 字段、registry binding 和 Printk
-Console 注册事实；当前 EarlyBoot 仍是五个直接 drive，但第三步已经明确为 MemBlockMemory，
-Scheduler 与 Unmask 属于 PagingInit。
+Console 注册事实；当前 EarlyBoot 先完成五个输入 drive，再执行 SetupBootmem 与 SetupVmFinal，
+Scheduler 与 Unmask 属于 Complete（本里程碑仍只保留模型定义）。
 
 ## M3：EarlyConTable 链接期注册生命周期（已完成）
 
@@ -153,7 +153,7 @@ Printk 注册和 `BootCommandLine.has_key("earlycon")` 回归保持通过。
   DtbBlob 与 EarlyConsole 之间插入 SbiCapability，并冻结 Banner → DtbBlob →
   SbiCapability → EarlyConsole → Scheduler → Unmask。后续 MemBlock 里程碑在 DtbBlob 与
   SbiCapability 之间插入 MemBlockMemory，并把父 MemBlock、Scheduler 与 Unmask 收敛到
-  PagingInit；成功路径最终确保 MemBlock 和 capability Online。
+  EarlyBoot 的 SetupBootmem/SetupVmFinal；成功路径最终确保 MemBlock、SwapperPageTable 和 capability Online。
 
 Coding 映射固定为 `SbiCapability.Enable ↔ sbi_init()`，由它完成 version/DBCN extension
 probe；`SbiConsole.Enable ↔ early_sbi_setup()`，由它按 DBCN →
@@ -176,8 +176,8 @@ Scheduler、Unmask IRQ 或 BootSetup；已经提交的 capability 状态与 avai
 `BootCommandLine.has_key("earlycon")` 与完整启动成功回归继续保留。
 
 完成标准：默认轨迹证明 capability 的 Ready 初态、唯一 Enable 与 DBCN availability effect，
-M4 当时的六个 EarlyBoot 直接 drive；当前阶段拆分后 EarlyBoot 为五个直接 drive，
-PagingInit 另有五个 drive。SbiConsole 的上游
+M4 当时的六个 EarlyBoot 直接 drive；当前阶段先完成五个输入 drive，再执行 M0/M1 动作。
+SbiConsole 的上游
 depends_on、DBCN selection 和 backing invariant，
 以及最终同时保留 availability、selection、backend 字段和注册事实；上述成功/失败变体均保持
 正确快照与 fail-stop 顺序，

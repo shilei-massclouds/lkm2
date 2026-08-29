@@ -1712,7 +1712,7 @@ object Probe: T {}
                     }
                     external Human { emits { F.Action::Other; } }
                 """,
-                "only Action::Enter",
+                "continuation entry from outside must use resumes Action",
             ),
         )
         for source, message in invalid:
@@ -2277,7 +2277,6 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("phases", "start_kernel", "boot_idle"),
                 ("phases", "start_kernel", "boot_setup"),
                 ("phases", "start_kernel", "early_boot"),
-                ("phases", "start_kernel", "paging_init"),
                 ("phases", "user_run"),
                 ("systems",),
                 ("systems", "computer"),

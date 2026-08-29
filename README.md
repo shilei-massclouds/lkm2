@@ -56,8 +56,9 @@ Suspend、事务式 current 切换与 Resume，然后停在 UserAppRuntime，以
 ```
 
 `../linux-6.12` 仅作为只读的 Linux 机制参考与显式 checkpoint 差分基线。普通构建不
-依赖它，也不会检查它是否存在；只有 `make -C impl checkpoint-sibling-patch` 和后续显式
-apply/diff 目标会校验冻结的 sibling。生成 patch 不会修改、暂存或提交 sibling。Rust
+依赖它，也不会检查它是否存在；只有 `make -C impl checkpoint-sibling-patch`、
+`checkpoint-sibling-patch-swapper` 和后续显式 apply/diff 目标会校验冻结的 sibling。生成
+patch 不会修改、暂存或提交 sibling。Rust
 实现不使用 Cargo，不从 registry、Git 或 vendor 目录引入外部 crate，只使用仓库源码与
 固定工具链提供的 sysroot crate。
 

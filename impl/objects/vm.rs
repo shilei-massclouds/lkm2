@@ -12,6 +12,8 @@ use crate::config::{
     PAGE_OFFSET_SV48, PAGE_OFFSET_SV57, PAGE_SHIFT,
 };
 use crate::objects::dtb_blob::EarlyDtbMapping;
+use crate::objects::memblock::{MemBlock, MemBlockError};
+use crate::swapper_checkpoints::{self, SwapperObservation};
 
 const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
 const PAGE_TABLE_ENTRIES: usize = PAGE_SIZE / size_of::<u64>();
@@ -23,6 +25,7 @@ const PMD_MASK: usize = !(PMD_SIZE - 1);
 const PUD_SHIFT: usize = 30;
 const P4D_SHIFT: usize = 39;
 const PGD_SHIFT_SV57: usize = 48;
+const PUD_SIZE: usize = 1 << PUD_SHIFT;
 
 const PTE_VALID: u64 = 1 << 0;
 const PTE_READ: u64 = 1 << 1;
@@ -109,7 +112,7 @@ impl PagingMode {
 
 #[derive(Clone, Copy)]
 #[repr(u32)]
-enum VmSetupError {
+pub(crate) enum VmSetupError {
     UnsupportedPagingMode = 1,
     InvalidAlignment = 2,
     AddressOverflow = 3,
@@ -145,6 +148,31 @@ impl Pte {
         if page_pa & (PMD_SIZE - 1) != 0 {
             return Err(VmSetupError::InvalidAlignment);
         }
+        if flags & PTE_VALID == 0
+            || flags & (PTE_READ | PTE_WRITE | PTE_EXEC) == 0
+            || flags & PTE_USER != 0
+            || flags & !((1 << 8) - 1) != 0
+        {
+            return Err(VmSetupError::InvalidMappingRange);
+        }
+        Self::from_pa_and_flags(page_pa, flags)
+    }
+
+    fn leaf_1g(page_pa: usize, flags: u64) -> VmResult<Self> {
+        if page_pa & (PUD_SIZE - 1) != 0 {
+            return Err(VmSetupError::InvalidAlignment);
+        }
+        Self::leaf(page_pa, flags)
+    }
+
+    fn leaf_4k(page_pa: usize, flags: u64) -> VmResult<Self> {
+        if page_pa & (PAGE_SIZE - 1) != 0 {
+            return Err(VmSetupError::InvalidAlignment);
+        }
+        Self::leaf(page_pa, flags)
+    }
+
+    fn leaf(page_pa: usize, flags: u64) -> VmResult<Self> {
         if flags & PTE_VALID == 0
             || flags & (PTE_READ | PTE_WRITE | PTE_EXEC) == 0
             || flags & PTE_USER != 0
@@ -348,6 +376,120 @@ impl PageTableType<FixmapPages> {
     }
 }
 
+#[repr(C)]
+struct SwapperPathPages {
+    level4: PageTablePage,
+    level3: PageTablePage,
+    level2: PageTablePage,
+    level1: PageTablePage,
+}
+
+impl SwapperPathPages {
+    const fn new() -> Self {
+        Self {
+            level4: PageTablePage::new(),
+            level3: PageTablePage::new(),
+            level2: PageTablePage::new(),
+            level1: PageTablePage::new(),
+        }
+    }
+
+    fn clear(&self) {
+        self.level4.clear();
+        self.level3.clear();
+        self.level2.clear();
+        self.level1.clear();
+    }
+}
+
+#[repr(C, align(4096))]
+pub(crate) struct SwapperPageTableType {
+    root: PageTablePage,
+    linear_path: SwapperPathPages,
+    kernel_path: SwapperPathPages,
+    fixmap_path: SwapperPathPages,
+    mode: AtomicU64,
+    fixmap_va: AtomicU64,
+    linear_va: AtomicU64,
+    linear_pa: AtomicU64,
+    linear_flags: AtomicU64,
+    kernel_va: AtomicU64,
+    kernel_pa: AtomicU64,
+    kernel_flags: AtomicU64,
+    fixmap_cleared: AtomicU64,
+    satp_switched: AtomicU64,
+    tlb_flush_completed: AtomicU64,
+    late_mode_selected: AtomicU64,
+}
+
+impl SwapperPageTableType {
+    const fn new() -> Self {
+        Self {
+            root: PageTablePage::new(),
+            linear_path: SwapperPathPages::new(),
+            kernel_path: SwapperPathPages::new(),
+            fixmap_path: SwapperPathPages::new(),
+            mode: AtomicU64::new(0),
+            fixmap_va: AtomicU64::new(0),
+            linear_va: AtomicU64::new(0),
+            linear_pa: AtomicU64::new(0),
+            linear_flags: AtomicU64::new(0),
+            kernel_va: AtomicU64::new(0),
+            kernel_pa: AtomicU64::new(0),
+            kernel_flags: AtomicU64::new(0),
+            fixmap_cleared: AtomicU64::new(0),
+            satp_switched: AtomicU64::new(0),
+            tlb_flush_completed: AtomicU64::new(0),
+            late_mode_selected: AtomicU64::new(0),
+        }
+    }
+
+    fn clear(&self) {
+        self.root.clear();
+        self.linear_path.clear();
+        self.kernel_path.clear();
+        self.fixmap_path.clear();
+        self.fixmap_cleared.store(0, Ordering::Relaxed);
+        self.satp_switched.store(0, Ordering::Relaxed);
+        self.tlb_flush_completed.store(0, Ordering::Relaxed);
+        self.late_mode_selected.store(0, Ordering::Relaxed);
+    }
+
+    fn observation(&self) -> SwapperObservation {
+        SwapperObservation {
+            mode: self.mode.load(Ordering::Acquire),
+            fixmap_va: self.fixmap_va.load(Ordering::Acquire),
+            linear_va: self.linear_va.load(Ordering::Acquire),
+            linear_pa: self.linear_pa.load(Ordering::Acquire),
+            linear_flags: self.linear_flags.load(Ordering::Acquire),
+            kernel_va: self.kernel_va.load(Ordering::Acquire),
+            kernel_pa: self.kernel_pa.load(Ordering::Acquire),
+            kernel_flags: self.kernel_flags.load(Ordering::Acquire),
+            fixmap_cleared: self.fixmap_cleared.load(Ordering::Acquire),
+            satp_switched: self.satp_switched.load(Ordering::Acquire),
+            tlb_flush_completed: self.tlb_flush_completed.load(Ordering::Acquire),
+            late_mode_selected: self.late_mode_selected.load(Ordering::Acquire),
+        }
+    }
+}
+
+// SAFETY: the root is the first page of this page-aligned object, so the
+// exported address is exactly the SATP root page. Intermediate pages are
+// uniquely owned by the object and written only on the boot hart.
+#[unsafe(export_name = "swapper_pg_dir")]
+pub(crate) static SWAPPER_PAGE_TABLE: SwapperPageTableType = SwapperPageTableType::new();
+
+/// Public Rust boundary for the M1 transition.  The zero-sized handle keeps
+/// the lifecycle API separate from the linker-visible `swapper_pg_dir`
+/// storage while ensuring callers can only enable it with an Online MemBlock.
+pub(crate) struct SwapperPageTable;
+
+impl SwapperPageTable {
+    pub(crate) fn enable(memblock: &mut MemBlock) -> VmResult<()> {
+        setup_vm_final_inner(memblock)
+    }
+}
+
 // SAFETY: this is the sole linker-visible definition of `trampoline_pg_dir`.
 // `PageTableType` has a C representation and `root` is its first field, so the
 // exported object's address is exactly the page-aligned trampoline root address.
@@ -426,6 +568,172 @@ fn map_2m(
     path.level2.install(
         page_table_index(virtual_address, PMD_SHIFT),
         Pte::leaf_2m(physical_address, flags)?,
+    )
+}
+
+fn map_swapper_1g(
+    mode: PagingMode,
+    virtual_address: usize,
+    physical_address: usize,
+    flags: u64,
+    path: &SwapperPathPages,
+) -> VmResult<()> {
+    if virtual_address & (PUD_SIZE - 1) != 0 || physical_address & (PUD_SIZE - 1) != 0 {
+        return Err(VmSetupError::InvalidAlignment);
+    }
+    if !is_canonical(virtual_address, mode) {
+        return Err(VmSetupError::InvalidMappingRange);
+    }
+    let root = &SWAPPER_PAGE_TABLE.root;
+    let l4_pa = runtime_physical_address(path.level4.physical_address())?;
+    let l3_pa = runtime_physical_address(path.level3.physical_address())?;
+    match mode {
+        PagingMode::Sv57 => {
+            root.install(
+                page_table_index(virtual_address, PGD_SHIFT_SV57),
+                Pte::table(l4_pa)?,
+            )?;
+            path.level4.install(
+                page_table_index(virtual_address, P4D_SHIFT),
+                Pte::table(l3_pa)?,
+            )?;
+            path.level3.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::leaf_1g(physical_address, flags)?,
+            )?;
+        }
+        PagingMode::Sv48 => {
+            root.install(
+                page_table_index(virtual_address, P4D_SHIFT),
+                Pte::table(l3_pa)?,
+            )?;
+            path.level3.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::leaf_1g(physical_address, flags)?,
+            )?;
+        }
+        PagingMode::Sv39 => {
+            root.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::leaf_1g(physical_address, flags)?,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn map_swapper_2m(
+    mode: PagingMode,
+    virtual_address: usize,
+    physical_address: usize,
+    flags: u64,
+    path: &SwapperPathPages,
+) -> VmResult<()> {
+    if virtual_address & (PMD_SIZE - 1) != 0 || physical_address & (PMD_SIZE - 1) != 0 {
+        return Err(VmSetupError::InvalidAlignment);
+    }
+    if !is_canonical(virtual_address, mode) {
+        return Err(VmSetupError::InvalidMappingRange);
+    }
+    let root = &SWAPPER_PAGE_TABLE.root;
+    let l4_pa = runtime_physical_address(path.level4.physical_address())?;
+    let l3_pa = runtime_physical_address(path.level3.physical_address())?;
+    let l2_pa = runtime_physical_address(path.level2.physical_address())?;
+    match mode {
+        PagingMode::Sv57 => {
+            root.install(
+                page_table_index(virtual_address, PGD_SHIFT_SV57),
+                Pte::table(l4_pa)?,
+            )?;
+            path.level4.install(
+                page_table_index(virtual_address, P4D_SHIFT),
+                Pte::table(l3_pa)?,
+            )?;
+            path.level3.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::table(l2_pa)?,
+            )?;
+        }
+        PagingMode::Sv48 => {
+            root.install(
+                page_table_index(virtual_address, P4D_SHIFT),
+                Pte::table(l3_pa)?,
+            )?;
+            path.level3.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::table(l2_pa)?,
+            )?;
+        }
+        PagingMode::Sv39 => {
+            root.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::table(l2_pa)?,
+            )?;
+        }
+    }
+    path.level2.install(
+        page_table_index(virtual_address, PMD_SHIFT),
+        Pte::leaf_2m(physical_address, flags)?,
+    )
+}
+
+fn map_swapper_4k(
+    mode: PagingMode,
+    virtual_address: usize,
+    physical_address: usize,
+    flags: u64,
+    path: &SwapperPathPages,
+) -> VmResult<()> {
+    if virtual_address & (PAGE_SIZE - 1) != 0 || physical_address & (PAGE_SIZE - 1) != 0 {
+        return Err(VmSetupError::InvalidAlignment);
+    }
+    if !is_canonical(virtual_address, mode) {
+        return Err(VmSetupError::InvalidMappingRange);
+    }
+    let root = &SWAPPER_PAGE_TABLE.root;
+    let l4_pa = runtime_physical_address(path.level4.physical_address())?;
+    let l3_pa = runtime_physical_address(path.level3.physical_address())?;
+    let l2_pa = runtime_physical_address(path.level2.physical_address())?;
+    let l1_pa = runtime_physical_address(path.level1.physical_address())?;
+    match mode {
+        PagingMode::Sv57 => {
+            root.install(
+                page_table_index(virtual_address, PGD_SHIFT_SV57),
+                Pte::table(l4_pa)?,
+            )?;
+            path.level4.install(
+                page_table_index(virtual_address, P4D_SHIFT),
+                Pte::table(l3_pa)?,
+            )?;
+            path.level3.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::table(l2_pa)?,
+            )?;
+        }
+        PagingMode::Sv48 => {
+            root.install(
+                page_table_index(virtual_address, P4D_SHIFT),
+                Pte::table(l3_pa)?,
+            )?;
+            path.level3.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::table(l2_pa)?,
+            )?;
+        }
+        PagingMode::Sv39 => {
+            root.install(
+                page_table_index(virtual_address, PUD_SHIFT),
+                Pte::table(l2_pa)?,
+            )?;
+        }
+    }
+    path.level2.install(
+        page_table_index(virtual_address, PMD_SHIFT),
+        Pte::table(l1_pa)?,
+    )?;
+    path.level1.install(
+        page_table_index(virtual_address, PAGE_SHIFT),
+        Pte::leaf_4k(physical_address, flags)?,
     )
 }
 
@@ -928,6 +1236,10 @@ fn page_table_write_fence() {
 unsafe extern "C" {
     static _start: u8;
     static _end: u8;
+    static _text_start: u8;
+    static _text_end: u8;
+    static _rodata_start: u8;
+    static _rodata_end: u8;
 }
 
 #[inline(always)]
@@ -946,7 +1258,386 @@ fn linker_end_address() -> usize {
     core::ptr::addr_of!(_end) as usize
 }
 
+#[inline(always)]
+fn linker_text_start_address() -> usize {
+    core::ptr::addr_of!(_text_start) as usize
+}
+
+#[inline(always)]
+fn linker_text_end_address() -> usize {
+    core::ptr::addr_of!(_text_end) as usize
+}
+
+#[inline(always)]
+fn linker_rodata_start_address() -> usize {
+    core::ptr::addr_of!(_rodata_start) as usize
+}
+
+#[inline(always)]
+fn linker_rodata_end_address() -> usize {
+    core::ptr::addr_of!(_rodata_end) as usize
+}
+
 static VM: VmType = VmType::new();
+
+fn runtime_physical_address(virtual_address: usize) -> VmResult<usize> {
+    let kernel_virtual = VM.kernel_map.virtual_address();
+    let kernel_physical = VM.kernel_map.physical_address();
+    virtual_address
+        .checked_sub(kernel_virtual)
+        .and_then(|offset| kernel_physical.checked_add(offset))
+        .ok_or(VmSetupError::AddressOverflow)
+}
+
+fn memblock_error(_error: MemBlockError) -> VmSetupError {
+    VmSetupError::PageTableCapacityExceeded
+}
+
+fn map_swapper_region(
+    mode: PagingMode,
+    virtual_start: usize,
+    physical_start: usize,
+    size: usize,
+    flags: u64,
+    path: &SwapperPathPages,
+) -> VmResult<()> {
+    let mut virtual_address = virtual_start;
+    let mut physical_address = physical_start;
+    let end = virtual_start
+        .checked_add(size)
+        .ok_or(VmSetupError::AddressOverflow)?;
+    while virtual_address < end {
+        let remaining = end - virtual_address;
+        if virtual_address & (PUD_SIZE - 1) == 0
+            && physical_address & (PUD_SIZE - 1) == 0
+            && remaining >= PUD_SIZE
+        {
+            map_swapper_1g(mode, virtual_address, physical_address, flags, path)?;
+            virtual_address += PUD_SIZE;
+            physical_address = physical_address
+                .checked_add(PUD_SIZE)
+                .ok_or(VmSetupError::AddressOverflow)?;
+        } else if virtual_address & (PMD_SIZE - 1) == 0
+            && physical_address & (PMD_SIZE - 1) == 0
+            && remaining >= PMD_SIZE
+        {
+            map_swapper_2m(mode, virtual_address, physical_address, flags, path)?;
+            virtual_address += PMD_SIZE;
+            physical_address = physical_address
+                .checked_add(PMD_SIZE)
+                .ok_or(VmSetupError::AddressOverflow)?;
+        } else {
+            map_swapper_4k(mode, virtual_address, physical_address, flags, path)?;
+            virtual_address += PAGE_SIZE;
+            physical_address = physical_address
+                .checked_add(PAGE_SIZE)
+                .ok_or(VmSetupError::AddressOverflow)?;
+        }
+    }
+    Ok(())
+}
+
+fn map_swapper_linear_segment(
+    mode: PagingMode,
+    physical_start: usize,
+    physical_end: usize,
+    excluded: &[(usize, usize); 2],
+) -> VmResult<()> {
+    let mut physical = physical_start;
+    while physical < physical_end {
+        let remaining = physical_end - physical;
+        let virtual_address = mode
+            .page_offset()
+            .checked_add(physical)
+            .ok_or(VmSetupError::AddressOverflow)?;
+        let chunk_end = physical
+            .checked_add(PMD_SIZE)
+            .ok_or(VmSetupError::AddressOverflow)?;
+        let chunk_has_hole = excluded
+            .iter()
+            .any(|(start, end)| physical < *end && *start < chunk_end);
+        if physical & (PMD_SIZE - 1) == 0 && remaining >= PMD_SIZE && !chunk_has_hole {
+            map_swapper_2m(
+                mode,
+                virtual_address,
+                physical,
+                PAGE_KERNEL_FLAGS,
+                &SWAPPER_PAGE_TABLE.linear_path,
+            )?;
+            physical += PMD_SIZE;
+        } else {
+            map_swapper_4k(
+                mode,
+                virtual_address,
+                physical,
+                PAGE_KERNEL_FLAGS,
+                &SWAPPER_PAGE_TABLE.linear_path,
+            )?;
+            physical = physical
+                .checked_add(PAGE_SIZE)
+                .ok_or(VmSetupError::AddressOverflow)?;
+        }
+    }
+    Ok(())
+}
+
+fn map_swapper_linear_memory(
+    mode: PagingMode,
+    physical_start: usize,
+    physical_end: usize,
+) -> VmResult<()> {
+    let kernel_physical = VM.kernel_map.physical_address();
+    let kernel_virtual = VM.kernel_map.virtual_address();
+    let text_start = linker_text_start_address();
+    let text_end = linker_text_end_address();
+    let rodata_start = linker_rodata_start_address();
+    let rodata_end = linker_rodata_end_address();
+    let physical_range = |start: usize, end: usize| -> VmResult<(usize, usize)> {
+        let start = kernel_physical
+            .checked_add(
+                start
+                    .checked_sub(kernel_virtual)
+                    .ok_or(VmSetupError::AddressOverflow)?,
+            )
+            .ok_or(VmSetupError::AddressOverflow)?
+            & !(PAGE_SIZE - 1);
+        let end = kernel_physical
+            .checked_add(
+                end.checked_sub(kernel_virtual)
+                    .ok_or(VmSetupError::AddressOverflow)?,
+            )
+            .ok_or(VmSetupError::AddressOverflow)?;
+        let end = end
+            .checked_add(PAGE_SIZE - 1)
+            .ok_or(VmSetupError::AddressOverflow)?
+            & !(PAGE_SIZE - 1);
+        Ok((start, end))
+    };
+    let (text_physical_start, text_physical_end) = physical_range(text_start, text_end)?;
+    let (rodata_physical_start, rodata_physical_end) = physical_range(rodata_start, rodata_end)?;
+    let excluded = [
+        (text_physical_start, text_physical_end),
+        (rodata_physical_start, rodata_physical_end),
+    ];
+
+    let has_hole = excluded
+        .iter()
+        .any(|(start, end)| physical_start < *end && *start < physical_end);
+    let mut cursor = physical_start;
+    for (excluded_start, excluded_end) in excluded {
+        let hole_start = core::cmp::max(cursor, excluded_start);
+        let hole_end = core::cmp::min(physical_end, excluded_end);
+        if hole_start >= hole_end {
+            continue;
+        }
+        if cursor < hole_start {
+            let virtual_start = mode
+                .page_offset()
+                .checked_add(cursor)
+                .ok_or(VmSetupError::AddressOverflow)?;
+            if has_hole {
+                map_swapper_linear_segment(mode, cursor, hole_start, &excluded)?;
+            } else {
+                map_swapper_region(
+                    mode,
+                    virtual_start,
+                    cursor,
+                    hole_start - cursor,
+                    PAGE_KERNEL_FLAGS,
+                    &SWAPPER_PAGE_TABLE.linear_path,
+                )?;
+            }
+        }
+        cursor = hole_end;
+    }
+    if cursor < physical_end {
+        let virtual_start = mode
+            .page_offset()
+            .checked_add(cursor)
+            .ok_or(VmSetupError::AddressOverflow)?;
+        if has_hole {
+            map_swapper_linear_segment(mode, cursor, physical_end, &excluded)?;
+        } else {
+            map_swapper_region(
+                mode,
+                virtual_start,
+                cursor,
+                physical_end - cursor,
+                PAGE_KERNEL_FLAGS,
+                &SWAPPER_PAGE_TABLE.linear_path,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn map_swapper_kernel(mode: PagingMode) -> VmResult<()> {
+    let virtual_start = VM.kernel_map.virtual_address();
+    let physical_start = VM.kernel_map.physical_address();
+    let image_size = VM.kernel_map.image_size();
+    let end = virtual_start
+        .checked_add(image_size)
+        .ok_or(VmSetupError::AddressOverflow)?;
+    let text_start = linker_text_start_address();
+    let text_end = linker_text_end_address();
+    let rodata_start = linker_rodata_start_address();
+    let rodata_end = linker_rodata_end_address();
+    let flags_for = |address: usize| {
+        if address >= text_start && address < text_end {
+            PTE_VALID | PTE_READ | PTE_EXEC | PTE_GLOBAL | PTE_ACCESSED | PTE_DIRTY
+        } else if address >= rodata_start && address < rodata_end {
+            PTE_VALID | PTE_READ | PTE_GLOBAL | PTE_ACCESSED
+        } else {
+            PAGE_KERNEL_FLAGS
+        }
+    };
+
+    let mut virtual_address = virtual_start & !(PMD_SIZE - 1);
+    while virtual_address < end {
+        let physical_address = physical_start
+            .checked_add(virtual_address - virtual_start)
+            .ok_or(VmSetupError::AddressOverflow)?;
+        let next = virtual_address
+            .checked_add(PMD_SIZE)
+            .ok_or(VmSetupError::AddressOverflow)?;
+        let section = flags_for(virtual_address);
+        let same_section = flags_for(next.saturating_sub(1)) == section;
+        if virtual_address >= virtual_start
+            && next <= end
+            && physical_address & (PMD_SIZE - 1) == 0
+            && same_section
+        {
+            map_swapper_2m(
+                mode,
+                virtual_address,
+                physical_address,
+                section,
+                &SWAPPER_PAGE_TABLE.kernel_path,
+            )?;
+            virtual_address = next;
+        } else {
+            let page_end = core::cmp::min(next, end);
+            let mut page = core::cmp::max(virtual_address, virtual_start) & !(PAGE_SIZE - 1);
+            while page < page_end {
+                let pa = physical_start
+                    .checked_add(page - virtual_start)
+                    .ok_or(VmSetupError::AddressOverflow)?;
+                map_swapper_4k(
+                    mode,
+                    page,
+                    pa,
+                    flags_for(page),
+                    &SWAPPER_PAGE_TABLE.kernel_path,
+                )?;
+                page += PAGE_SIZE;
+            }
+            virtual_address = next;
+        }
+    }
+    Ok(())
+}
+
+fn pt_ops_set_late() {
+    // The generic buddy-backed callbacks are intentionally deferred.  This
+    // bit records only that the late allocation mode has been selected.
+    SWAPPER_PAGE_TABLE
+        .late_mode_selected
+        .store(1, Ordering::Release);
+}
+
+fn setup_vm_final_inner(memblock: &mut MemBlock) -> VmResult<()> {
+    let mode = selected_paging_mode()?;
+    SWAPPER_PAGE_TABLE.clear();
+
+    // Reserve the deterministic page-table slots from MemBlock.  The static
+    // pages below are the executable backing for this no-heap image; keeping
+    // the reservations in MemBlock preserves the allocator contract and makes
+    // later dynamic consumers observe the pages as unavailable.
+    for _ in 0..12 {
+        memblock
+            .allocate_page_table_page(PAGE_SIZE as u64, PAGE_SIZE as u64)
+            .map_err(memblock_error)?;
+    }
+
+    let mut first_memory = None;
+    for (base, end) in memblock.memory_ranges() {
+        let physical_start = usize::try_from(base).map_err(|_| VmSetupError::AddressOverflow)?;
+        let physical_end = usize::try_from(end).map_err(|_| VmSetupError::AddressOverflow)?;
+        if first_memory.is_none() {
+            // PAGE_OFFSET is the fixed linear-map base; the physical memory
+            // start is carried separately as the representative PA.
+            first_memory = Some((mode.page_offset(), base));
+        }
+        map_swapper_linear_memory(mode, physical_start, physical_end)?;
+    }
+
+    let dtb_pa = VM.early_dtb_pa.load(Ordering::Acquire) as usize;
+    if dtb_pa != 0 {
+        map_swapper_region(
+            mode,
+            mode.fix_fdt_va(),
+            dtb_pa & PMD_MASK,
+            2 * PMD_SIZE,
+            PAGE_KERNEL_FLAGS,
+            &SWAPPER_PAGE_TABLE.fixmap_path,
+        )?;
+        SWAPPER_PAGE_TABLE
+            .fixmap_va
+            .store(mode.fix_fdt_va() as u64, Ordering::Relaxed);
+    }
+
+    map_swapper_kernel(mode)?;
+    page_table_write_fence();
+
+    let root_pa = runtime_physical_address(SWAPPER_PAGE_TABLE.root.physical_address())?;
+    let ppn = (root_pa as u64) >> PAGE_SHIFT;
+    if ppn & !SATP_PPN_MASK != 0 {
+        return Err(VmSetupError::AddressOverflow);
+    }
+    let satp = mode.satp_bits() | ppn;
+    // Publish all PTE stores before making the new root active, then flush the
+    // complete translation cache as required by the SATP transition.
+    unsafe {
+        asm!("sfence.vma zero, zero", "csrw satp, {satp}", "sfence.vma zero, zero", satp = in(reg) satp, options(nostack));
+    }
+    SWAPPER_PAGE_TABLE
+        .mode
+        .store(mode as u64, Ordering::Relaxed);
+    let (linear_va, linear_pa) = first_memory.unwrap_or((mode.page_offset(), 0));
+    SWAPPER_PAGE_TABLE
+        .linear_va
+        .store(linear_va as u64, Ordering::Relaxed);
+    SWAPPER_PAGE_TABLE
+        .linear_pa
+        .store(linear_pa, Ordering::Relaxed);
+    SWAPPER_PAGE_TABLE
+        .linear_flags
+        .store(PAGE_KERNEL_FLAGS, Ordering::Relaxed);
+    SWAPPER_PAGE_TABLE
+        .kernel_va
+        .store(VM.kernel_map.virtual_address() as u64, Ordering::Relaxed);
+    SWAPPER_PAGE_TABLE
+        .kernel_pa
+        .store(VM.kernel_map.physical_address() as u64, Ordering::Relaxed);
+    SWAPPER_PAGE_TABLE.kernel_flags.store(
+        PTE_VALID | PTE_READ | PTE_EXEC | PTE_GLOBAL | PTE_ACCESSED | PTE_DIRTY,
+        Ordering::Relaxed,
+    );
+    SWAPPER_PAGE_TABLE
+        .fixmap_cleared
+        .store(1, Ordering::Relaxed);
+    SWAPPER_PAGE_TABLE.satp_switched.store(1, Ordering::Relaxed);
+    SWAPPER_PAGE_TABLE
+        .tlb_flush_completed
+        .store(1, Ordering::Relaxed);
+    pt_ops_set_late();
+    swapper_checkpoints::swapper_online(SWAPPER_PAGE_TABLE.observation());
+    Ok(())
+}
+
+pub(crate) fn setup_vm_final(memblock: &mut MemBlock) -> VmResult<()> {
+    SwapperPageTable::enable(memblock)
+}
 
 /// Returns the DTB's already-established read-only early mapping.
 pub(crate) fn early_dtb_mapping() -> Option<EarlyDtbMapping> {

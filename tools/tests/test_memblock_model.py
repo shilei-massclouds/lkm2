@@ -156,7 +156,7 @@ class MemBlockModelTests(unittest.TestCase):
             )
         )
 
-    def test_default_qemu_boot_stages_memblock_across_paging_init(self) -> None:
+    def test_default_qemu_boot_stages_memblock_across_early_boot_actions(self) -> None:
         model = compile_spec(REPOSITORY / "model/main.spec")
         path = _derive_model(model)
         units = tuple(_all_units(path.units))
@@ -196,23 +196,30 @@ class MemBlockModelTests(unittest.TestCase):
                 "EarlyConsole",
             ),
         )
-        paging_init = next(
+        setup_bootmem = next(
             unit
             for unit in units
-            if unit.event.target[-1] == "PagingInit"
-            and unit.handler == ("Action", "Enter")
+            if unit.event.target[-1] == "EarlyBoot"
+            and unit.handler == ("Action", "SetupBootmem")
         )
         self.assertEqual(
-            tuple(unit.event.target[-1] for unit in paging_init.drives),
+            tuple(unit.event.target[-1] for unit in setup_bootmem.drives),
             (
                 "MemBlockReserved",
                 "MemBlock",
-                "FinalPageTable",
-                "Cpu0Scheduler",
-                "InterruptControl",
             ),
         )
-        memblock_enable = paging_init.drives[1]
+        setup_vm_final = next(
+            unit
+            for unit in units
+            if unit.event.target[-1] == "EarlyBoot"
+            and unit.handler == ("Action", "SetupVmFinal")
+        )
+        self.assertEqual(
+            tuple(unit.event.target[-1] for unit in setup_vm_final.drives),
+            ("SwapperPageTable",),
+        )
+        memblock_enable = setup_bootmem.drives[1]
         self.assertEqual(memblock_enable.drives, ())
         self.assertTrue(
             all(check.status == "passed" for check in memblock_enable.depends_on)
@@ -243,7 +250,7 @@ class MemBlockModelTests(unittest.TestCase):
         units = tuple(_all_units(path.units))
         self.assertFalse(
             any(
-                (unit.event.target[-1] == "FinalPageTable")
+                (unit.event.target[-1] == "SwapperPageTable")
                 or (
                     unit.event.target[-1] == "Cpu0Scheduler"
                     and unit.handler == ("Transition", "Enable")
@@ -293,10 +300,11 @@ class MemBlockModelTests(unittest.TestCase):
             )
         )
         self.assertFalse(
-            any(
-                unit.event.target[-1] in {"SbiCapability", "EarlyConsole", "PagingInit"}
-                for unit in units
-            )
+                any(
+                    unit.event.target[-1]
+                    in {"SbiCapability", "EarlyConsole", "SwapperPageTable"}
+                    for unit in units
+                )
         )
         self.assert_paging_failure_stops_later_boot(path)
 

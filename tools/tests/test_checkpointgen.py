@@ -24,7 +24,13 @@ from checkpointgen import (  # noqa: E402
 )
 from checkpointgen.generator import MappingCheckpoint  # noqa: E402
 from checkpointgen.runner import CheckpointRunError, parse_record, validate_records  # noqa: E402
-from checkpointgen.sibling import validate_sibling  # noqa: E402
+from checkpointgen.sibling import (  # noqa: E402
+    _modify_init_swapper_incremental,
+    _swapper_handler_append,
+    _swapper_include_append,
+    render_linux_include,
+    validate_sibling,
+)
 from model_ir import load_model_ir  # noqa: E402
 
 
@@ -40,6 +46,10 @@ class CheckpointGeneratorTests(unittest.TestCase):
             encoding="utf-8"
         ) as stream:
             cls.mapping = load_mapping(stream)
+        with (REPOSITORY / "tools" / "checkpoints" / "swapper.json").open(
+            encoding="utf-8"
+        ) as stream:
+            cls.swapper_mapping = load_mapping(stream)
 
     def test_vm_lifecycle_extracts_exactly_the_frozen_28(self) -> None:
         checkpoints = build_checkpoints(self.model, self.mapping)
@@ -48,6 +58,26 @@ class CheckpointGeneratorTests(unittest.TestCase):
             tuple(item.canonical_id for item in checkpoints),
             tuple(item.canonical_id for item in self.mapping.checkpoints),
         )
+
+    def test_swapper_mapping_is_an_independent_nine_checkpoint_scope(self) -> None:
+        checkpoints = build_checkpoints(self.model, self.swapper_mapping)
+        self.assertEqual(len(checkpoints), 9)
+        self.assertTrue(
+            all(item.canonical_id.startswith("SwapperPageTable.Online.Invariant.") for item in checkpoints)
+        )
+        self.assertEqual(self.swapper_mapping.root_object, "SwapperPageTable")
+        self.assertIn("SwapperObservation", render_rust(checkpoints, self.swapper_mapping, "empty"))
+        self.assertIn("lkm2_cp_observe_swapper", render_linux_include(checkpoints, self.swapper_mapping))
+
+    def test_swapper_sibling_patch_is_incremental(self) -> None:
+        checkpoints = build_checkpoints(self.model, self.swapper_mapping)
+        include = _swapper_include_append("legacy-vm-include\n", checkpoints, self.swapper_mapping)
+        handler = _swapper_handler_append("legacy-vm-handler\n", checkpoints)
+        init = _modify_init_swapper_incremental("\tpt_ops_set_late();\n")
+        self.assertTrue(include.startswith("legacy-vm-include\n\n"))
+        self.assertTrue(handler.startswith("legacy-vm-handler\n\nvoid lkm_checkpoint_"))
+        self.assertNotIn("extern void", handler)
+        self.assertIn("lkm2_checkpoint_swapper_online();", init)
 
     def test_vm_checkpoint_scope_is_frozen(self) -> None:
         self.assertEqual(self.mapping.module, ("objects", "vm"))

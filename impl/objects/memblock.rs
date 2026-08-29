@@ -21,6 +21,8 @@ pub(crate) enum MemBlockError {
     DynamicReservationUnsupported,
     RegionCapacityExceeded,
     AddressOverflow,
+    InvalidAllocationAlignment,
+    AllocationExhausted,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -90,6 +92,21 @@ impl<const CAPACITY: usize> RegionSet<CAPACITY> {
 
     const fn len(&self) -> usize {
         self.len
+    }
+
+    fn get(&self, index: usize) -> Option<PhysRange> {
+        self.regions
+            .get(index)
+            .copied()
+            .filter(|range| range.end > range.base)
+    }
+
+    fn overlaps(&self, range: PhysRange) -> Option<PhysRange> {
+        self.regions[..self.len]
+            .iter()
+            .rev()
+            .copied()
+            .find(|item| item.base < range.end && range.base < item.end)
     }
 }
 
@@ -196,6 +213,30 @@ impl MemBlockMemory {
     pub(crate) const fn region_count(&self) -> usize {
         self.regions.len()
     }
+
+    /// Iterate over the sorted, half-open physical memory ranges without
+    /// exposing the fixed-capacity backing store.
+    pub(crate) fn memory_ranges(&self) -> MemoryRangeIter<'_> {
+        MemoryRangeIter {
+            set: &self.regions,
+            next: 0,
+        }
+    }
+}
+
+pub(crate) struct MemoryRangeIter<'a> {
+    set: &'a RegionSet<MAX_MEMORY_REGIONS>,
+    next: usize,
+}
+
+impl Iterator for MemoryRangeIter<'_> {
+    type Item = (u64, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.set.get(self.next)?;
+        self.next += 1;
+        Some((range.base, range.end))
+    }
 }
 
 pub(crate) struct MemBlockReserved {
@@ -252,6 +293,60 @@ impl MemBlock {
 
     pub(crate) const fn reserved_region_count(&self) -> usize {
         self.reserved.region_count()
+    }
+
+    pub(crate) fn memory_ranges(&self) -> MemoryRangeIter<'_> {
+        self.memory.memory_ranges()
+    }
+
+    /// Allocate one physically contiguous page from the highest suitable
+    /// address, avoiding and recording every reservation.  This is an
+    /// intentionally narrow interface for early page-table pages; it is not a
+    /// general-purpose allocator.
+    pub(crate) fn allocate_page_table_page(
+        &mut self,
+        alignment: u64,
+        page_size: u64,
+    ) -> Result<u64, MemBlockError> {
+        if alignment == 0
+            || page_size == 0
+            || !alignment.is_power_of_two()
+            || !page_size.is_multiple_of(alignment)
+        {
+            return Err(MemBlockError::InvalidAllocationAlignment);
+        }
+
+        for memory_index in (0..self.memory.regions.len()).rev() {
+            let Some(memory) = self.memory.regions.get(memory_index) else {
+                continue;
+            };
+            let Some(last_start) = memory.end.checked_sub(page_size) else {
+                continue;
+            };
+            let mut candidate = last_start & !(alignment - 1);
+            while candidate >= memory.base {
+                let Some(end) = candidate.checked_add(page_size) else {
+                    break;
+                };
+                let candidate_range = PhysRange {
+                    base: candidate,
+                    end,
+                };
+                let Some(conflict) = self.reserved.regions.overlaps(candidate_range) else {
+                    self.reserved.regions.add(candidate_range)?;
+                    return Ok(candidate);
+                };
+                let Some(before) = conflict.base.checked_sub(page_size) else {
+                    break;
+                };
+                let next = before & !(alignment - 1);
+                if next >= candidate {
+                    break;
+                }
+                candidate = next;
+            }
+        }
+        Err(MemBlockError::AllocationExhausted)
     }
 }
 
@@ -723,5 +818,66 @@ mod tests {
             .unwrap();
         assert_eq!(regions.len(), 1);
         assert_eq!(regions.regions[0], PhysRange { base: 0, end: 30 });
+    }
+
+    #[test]
+    fn page_table_allocation_is_aligned_high_first_and_avoids_reserved() {
+        let mut memory_regions = RegionSet::<MAX_MEMORY_REGIONS>::new();
+        memory_regions
+            .add(PhysRange::from_base_size(0x1000, 0x9000).unwrap())
+            .unwrap();
+        let mut reserved_regions = RegionSet::<MAX_RESERVED_REGIONS>::new();
+        reserved_regions
+            .add(PhysRange::from_base_size(0x9000, 0x1000).unwrap())
+            .unwrap();
+        let mut memblock = MemBlock {
+            memory: MemBlockMemory {
+                regions: memory_regions,
+            },
+            reserved: MemBlockReserved {
+                regions: reserved_regions,
+            },
+        };
+
+        let page = memblock.allocate_page_table_page(0x1000, 0x1000).unwrap();
+        assert_eq!(page, 0x8000);
+        assert!(
+            memblock
+                .reserved
+                .regions
+                .overlaps(PhysRange {
+                    base: page,
+                    end: page + 0x1000,
+                })
+                .is_some()
+        );
+        assert!(matches!(
+            memblock.allocate_page_table_page(0x3000, 0x1000),
+            Err(MemBlockError::InvalidAllocationAlignment)
+        ));
+    }
+
+    #[test]
+    fn page_table_allocation_reports_exhaustion() {
+        let mut memory_regions = RegionSet::<MAX_MEMORY_REGIONS>::new();
+        memory_regions
+            .add(PhysRange::from_base_size(0x1000, 0x1000).unwrap())
+            .unwrap();
+        let mut reserved_regions = RegionSet::<MAX_RESERVED_REGIONS>::new();
+        reserved_regions
+            .add(PhysRange::from_base_size(0x1000, 0x1000).unwrap())
+            .unwrap();
+        let mut memblock = MemBlock {
+            memory: MemBlockMemory {
+                regions: memory_regions,
+            },
+            reserved: MemBlockReserved {
+                regions: reserved_regions,
+            },
+        };
+        assert!(matches!(
+            memblock.allocate_page_table_page(0x1000, 0x1000),
+            Err(MemBlockError::AllocationExhausted)
+        ));
     }
 }

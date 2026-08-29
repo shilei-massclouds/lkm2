@@ -17,9 +17,10 @@ Rust 声明必须使用 `extern "C"` 和 `u64` 参数，C 声明使用 `uint64_t
 错误，不得警告后跳过。
 
 当前 VM 生命周期固定包含 28 项，执行顺序和六个里程碑由
-`tools/checkpoints/vm.json` 唯一记录。对象状态等式没有参数；其余表达式使用映射中冻结
-的参数名顺序。观测值必须来自实际 KernelMap、SATP 和页表表项；二进制镜像大小、末叶子
-地址、页表页地址和 root PPN 不属于跨实现协议。
+`tools/checkpoints/vm.json` 唯一记录；M1 另有独立的 `SwapperPageTable` 9 项
+`swapper_online` 套件，由 `tools/checkpoints/swapper.json` 记录。对象状态等式没有参数；
+其余表达式使用映射中冻结的参数名顺序。观测值必须来自实际 KernelMap、SATP 和页表表项；
+二进制镜像大小、末叶子地址、页表页地址和 root PPN 不属于跨实现协议。
 
 ## VM 与 ArchHead 覆盖边界
 
@@ -57,12 +58,12 @@ DBCN 错误不改变启动控制流。页表观测只能通过安全的 `AtomicU
 ## Sibling patch 与执行
 
 sibling 固定为相邻 `linux-6.12` 的 `dev` 分支，并使用两个独立锚点：patch base 为
-`d0fef99b651d141dd6ffbbddeb8b729b2f8faaff`，已集成 checkpoint 的提交为
-`2f5f2bbdcdbede7b65b18f36cfcc72150a40ee0f`。生成器必须从 patch-base Git 对象读取并校验
-修改锚点，不得用当前工作树内容代替历史输入；同时必须验证生成后的四个文件与 integrated
-提交的冻结指纹完全一致。patch 是未跟踪构建产物；生成器不得暂存、提交、切换提交或自动
-应用。显式应用必须先运行 `git apply --check`，通过 reverse-check 识别已应用或已集成
-状态；应用到 patch base 后必须保持 unstaged，已集成状态则必须保持干净。
+`d0fef99b651d141dd6ffbbddeb8b729b2f8faaff`，已集成 VM checkpoint 的提交为
+`2f5f2bbdcdbede7b65b18f36cfcc72150a40ee0f`。VM 套件仍从 patch-base Git 对象生成并校验
+四文件冻结 patch；M1 套件则以已集成 VM 提交为基线，只增量追加 swapper include、handler
+和 `pt_ops_set_late()` 后的观测调用，不改写旧 28 项协议。patch 是未跟踪构建产物；生成器
+不得暂存、提交、切换提交或自动应用。显式应用必须先运行 `git apply --check`，通过
+reverse-check 识别已应用或已集成状态。
 
 Linux patch 在 `setup_vm` 的同六个语义边界调用生成 wrapper，并以独立 C 文件提供固定
 DBCN handler。它运行在 `sbi_init()` 之前，所以不得调用 Linux SBI 或 logging API，也

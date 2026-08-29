@@ -9,6 +9,13 @@ predicate trampoline_first_segment_mapping_established() -> bool;
 predicate early_kernel_image_mapping_established() -> bool;
 predicate early_dtb_four_mib_mapping_established() -> bool;
 predicate vm_setup_completes_with_satp_bare() -> bool;
+predicate swapper_fixmap_established() -> bool;
+predicate swapper_linear_map_established() -> bool;
+predicate swapper_kernel_map_established() -> bool;
+predicate swapper_fixmap_cleared() -> bool;
+predicate swapper_satp_switched() -> bool;
+predicate swapper_tlb_flush_completed() -> bool;
+predicate swapper_late_paging_mode_selected() -> bool;
 
 type VmType {
     initial_state: State::Base;
@@ -130,12 +137,26 @@ type PageTableType {
     }
 }
 
-type FinalPageTableType {
+type SwapperPageTableType {
     initial_state: State::Ready;
 
     state State::Ready {
         transitions {
             on Transition::Enable -> State::Online {
+                depends_on {
+                    Vm.state == State::Ready;
+                    MemBlock.state == State::Online;
+                }
+
+                establishes {
+                    swapper_fixmap_established();
+                    swapper_linear_map_established();
+                    swapper_kernel_map_established();
+                    swapper_fixmap_cleared();
+                    swapper_satp_switched();
+                    swapper_tlb_flush_completed();
+                    swapper_late_paging_mode_selected();
+                }
             }
         }
     }
@@ -193,19 +214,41 @@ object EarlyPageTable: PageTableType {
     }
 }
 
-object FinalPageTable: FinalPageTableType {
+object SwapperPageTable: SwapperPageTableType {
     parent: Vm;
 
     state State::Ready {
         transitions {
             override on Transition::Enable -> State::Online {
                 depends_on {
+                    Vm.state == State::Ready;
                     MemBlock.state == State::Online;
+                }
+
+                establishes {
+                    swapper_fixmap_established();
+                    swapper_linear_map_established();
+                    swapper_kernel_map_established();
+                    swapper_fixmap_cleared();
+                    swapper_satp_switched();
+                    swapper_tlb_flush_completed();
+                    swapper_late_paging_mode_selected();
                 }
             }
         }
     }
 
     state State::Online {
+        invariant {
+            Vm.state == State::Ready;
+            MemBlock.state == State::Online;
+            swapper_fixmap_established();
+            swapper_linear_map_established();
+            swapper_kernel_map_established();
+            swapper_fixmap_cleared();
+            swapper_satp_switched();
+            swapper_tlb_flush_completed();
+            swapper_late_paging_mode_selected();
+        }
     }
 }

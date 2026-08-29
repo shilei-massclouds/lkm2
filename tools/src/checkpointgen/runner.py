@@ -13,8 +13,13 @@ import sys
 import time
 from typing import Sequence
 
-from .generator import CheckpointGenerationError, load_mapping
-from .sibling import validate_differential_sibling
+from model_ir import load_model_ir
+
+from .generator import CheckpointGenerationError, build_checkpoints, load_mapping
+from .sibling import (
+    validate_differential_sibling,
+    validate_incremental_differential_sibling,
+)
 
 
 RECORD_PREFIX = "LKMCP1 "
@@ -65,7 +70,9 @@ def _read_manifest(path: Path) -> tuple[dict[str, object], ...]:
     return tuple(checkpoints)
 
 
-def _collect_qemu(command: list[str], expected_count: int, timeout: float) -> tuple[str, ...]:
+def _collect_qemu(
+    command: list[str], expected_count: int, timeout: float, *, allow_extra: bool = False
+) -> tuple[str, ...]:
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -100,6 +107,8 @@ def _collect_qemu(command: list[str], expected_count: int, timeout: float) -> tu
                 line = raw.decode("utf-8", errors="replace").rstrip("\r")
                 transcript.append(line)
                 if line.startswith(RECORD_PREFIX):
+                    if len(records) >= expected_count and allow_extra:
+                        continue
                     records.append(line)
                     if len(records) > expected_count:
                         raise CheckpointRunError("QEMU emitted too many checkpoint records")
@@ -171,6 +180,10 @@ def run_self(repository: Path, mode_name: str, timeout: float) -> None:
     if build.returncode != 0:
         raise CheckpointRunError(f"lkm2 debugcon build failed:\n{build.stdout}")
     manifest = _read_manifest(implementation / "build" / "checkpoints.manifest.json")
+    swapper_manifest = _read_manifest(
+        implementation / "build" / "swapper_checkpoints.manifest.json"
+    )
+    combined_manifest = (*manifest, *swapper_manifest)
     command = [
         "qemu-system-riscv64",
         "-machine",
@@ -182,12 +195,16 @@ def run_self(repository: Path, mode_name: str, timeout: float) -> None:
         "-smp",
         "1",
         "-nographic",
+        "-append",
+        "earlycon=sbi",
         *CPU_ARGUMENTS[mode_name],
         "-kernel",
         str(implementation / "build" / "lkm2.bin"),
     ]
-    records = _collect_qemu(command, len(manifest), timeout)
-    validate_records(records, manifest, mode_name)
+    records = _collect_qemu(command, len(combined_manifest), timeout)
+    split = len(manifest)
+    validate_records(records[:split], manifest, mode_name)
+    validate_records(records[split:], swapper_manifest, mode_name)
 
 
 def _verify_sibling_pc_relative(sibling: Path) -> None:
@@ -236,7 +253,10 @@ def run_diff(
             encoding="utf-8"
         ) as stream:
             mapping = load_mapping(stream)
-        sibling_state = validate_differential_sibling(sibling, mapping)
+        with (repository / "tools" / "checkpoints" / "swapper.json").open(
+            encoding="utf-8"
+        ) as stream:
+            swapper_mapping = load_mapping(stream)
     except (OSError, UnicodeError, CheckpointGenerationError) as exc:
         raise CheckpointRunError(f"invalid sibling differential state: {exc}") from exc
     if build_sibling:
@@ -271,7 +291,25 @@ def run_diff(
     )
     if lkm_build.returncode != 0:
         raise CheckpointRunError(f"lkm2 debugcon build failed:\n{lkm_build.stdout}")
+    try:
+        with (repository / "tools" / "build" / "modelc" / "model.ir.json").open(
+            encoding="utf-8"
+        ) as stream:
+            model = load_model_ir(stream)
+        swapper_checkpoints = build_checkpoints(model, swapper_mapping)
+        sibling_state = validate_incremental_differential_sibling(
+            sibling, swapper_mapping, swapper_checkpoints
+        )
+        if sibling_state is None:
+            sibling_state = validate_differential_sibling(sibling, mapping)
+    except (OSError, UnicodeError, CheckpointGenerationError) as exc:
+        raise CheckpointRunError(f"invalid sibling differential state: {exc}") from exc
+    swapper_enabled = sibling_state == "reviewed-swapper-patch"
     manifest = _read_manifest(implementation / "build" / "checkpoints.manifest.json")
+    swapper_manifest = _read_manifest(
+        implementation / "build" / "swapper_checkpoints.manifest.json"
+    )
+    expected_manifest = (*manifest, *swapper_manifest) if swapper_enabled else manifest
     common = [
         "qemu-system-riscv64",
         "-machine",
@@ -283,17 +321,26 @@ def run_diff(
         "-smp",
         "1",
         "-nographic",
+        "-append",
+        "earlycon=sbi",
     ]
     lkm_lines = _collect_qemu(
         [*common, "-kernel", str(implementation / "build" / "lkm2.bin")],
-        len(manifest),
+        len(expected_manifest),
         timeout,
+        allow_extra=not swapper_enabled,
     )
     linux_lines = _collect_qemu(
-        [*common, "-kernel", str(image)], len(manifest), timeout
+        [*common, "-kernel", str(image)], len(expected_manifest), timeout
     )
-    lkm_records = validate_records(lkm_lines, manifest, "sv57")
-    linux_records = validate_records(linux_lines, manifest, "sv57")
+    if swapper_enabled:
+        split = len(manifest)
+        validate_records(lkm_lines[:split], manifest, "sv57")
+        validate_records(lkm_lines[split:], swapper_manifest, "sv57")
+        validate_records(linux_lines[:split], manifest, "sv57")
+        validate_records(linux_lines[split:], swapper_manifest, "sv57")
+    lkm_records = validate_records(lkm_lines, expected_manifest, "sv57")
+    linux_records = validate_records(linux_lines, expected_manifest, "sv57")
     if lkm_records != linux_records:
         for index, (left, right) in enumerate(
             zip(lkm_records, linux_records, strict=True)

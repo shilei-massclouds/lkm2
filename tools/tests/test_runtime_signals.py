@@ -104,13 +104,11 @@ class UserRuntimeSignalEngineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             model_root = Path(directory) / "model"
             shutil.copytree(REPOSITORY / "model", model_root)
-            paging_init_spec = (
-                model_root / "phases" / "start_kernel" / "paging_init.spec"
-            )
+            early_boot_spec = model_root / "phases" / "start_kernel" / "early_boot.spec"
             # Keep this gate-focused fixture masked until its explicit control
             # root runs after the boot continuation.
-            paging_init_spec.write_text(
-                paging_init_spec.read_text(encoding="utf-8").replace(
+            early_boot_spec.write_text(
+                early_boot_spec.read_text(encoding="utf-8").replace(
                     "CurrentCPU.InterruptControlRef.Action::Unmask;",
                     "CurrentCPU.InterruptControlRef.Action::MaskAll;",
                     1,
@@ -309,9 +307,9 @@ object RuntimeSignalControl: RuntimeSignalControlType {{}}
                 ),
                 encoding="utf-8",
             )
-            paging_init = model_root / "phases" / "start_kernel" / "paging_init.spec"
-            paging_init.write_text(
-                paging_init.read_text(encoding="utf-8").replace(
+            early_boot = model_root / "phases" / "start_kernel" / "early_boot.spec"
+            early_boot.write_text(
+                early_boot.read_text(encoding="utf-8").replace(
                     "CurrentCPU.InterruptControlRef.Action::Unmask;",
                     "CurrentCPU.InterruptControlRef.Action::ClearPending;",
                     1,

@@ -14,13 +14,11 @@ Kernel
     ├── MemBlockMemory
     └── MemBlockReserved
 
-EarlyBoot / parse_dtb
+EarlyBoot / parse_dtb and SetupBootmem
   -> MemBlockMemory.Enable
-
-PagingInit / setup_bootmem
   -> MemBlockReserved.Enable
   -> MemBlock.Enable
-  -> FinalPageTable.Enable
+  -> SwapperPageTable.Enable
 ```
 
 Memory 消费 Online 的 DtbBlob 和 QEMU 提供的有效、非空 `/memory` 内容事实，并建立
@@ -44,22 +42,23 @@ provenance/completion。来源严格单向为 `DtbBlob → MemBlock`。
 ```text
 EarlyBoot:
   Banner → DtbBlob → MemBlockMemory → SbiCapability → EarlyConsole
-PagingInit:
-  MemBlockReserved → MemBlock → FinalPageTable → Scheduler → Unmask
+EarlyBoot actions:
+  MemBlockReserved → MemBlock → SwapperPageTable → Scheduler → Unmask
 ```
 
 Memory 输入缺失时三个 MemBlock 对象都保持 Ready，EarlyBoot 不继续 capability 或 Console。
 Reserved 输入缺失时，已经完成的 Memory、capability 与 Console 保持 Online，Reserved 与父
-MemBlock 保持 Ready；PagingInit 不继续 FinalPageTable、Scheduler、Unmask 或 BootSetup。
+MemBlock 保持 Ready；EarlyBoot 不继续 SwapperPageTable、Scheduler、Unmask 或 BootSetup。
 
 MemBlock Online 本身就是早期物理内存分配的状态前提，不增加同义
 `ready_for_allocation` predicate。
 
 ## 实现边界
 
-当前 Rust 前缀已经实现固定容量的 DTB `/memory` 扫描、FDT reserve map、静态
-`/reserved-memory/reg`、KernelImage 与 DTB 自身保留，并在 `setup_bootmem` 成功后保持中断屏蔽
-停驻。它尚未实现 `setup_vm_final`、Scheduler、Unmask 或 allocator API。
+当前 Rust 已实现固定容量的 DTB `/memory` 扫描、FDT reserve map、静态
+`/reserved-memory/reg`、KernelImage 与 DTB 自身保留，以及 `setup_vm_final` 的 SwapperPageTable
+构造和切换；M1 成功后保持中断屏蔽停驻。Scheduler、Unmask、buddy allocator 和 NUMA 仍留给
+后续里程碑。
 
 NUMA、hotplug、NOMAP、memory limit、动态 `/reserved-memory` 分配、区间裁剪/对齐和实际分配
 策略仍留给后续里程碑；容器容量、排序与合并是 coding/impl 细节，不进入 model。

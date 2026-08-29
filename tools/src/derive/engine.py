@@ -2696,14 +2696,20 @@ class _Execution:
         self, event: DerivationEvent, kind: str, path: str
     ) -> DerivationUnit:
         before = self.states[event.target]
-        if event.signal != ("Action", "Enter"):
+        if event.signal[0] != "Action":
             return self._continuation_failure_unit(
                 event,
                 kind,
                 f"{path}.handler",
                 "invalid_continuation_action",
-                "only Action::Enter can externally start or resume a continuation",
+                "continuation entry must use an Action signal",
             )
+        # A continuation may expose additional phase actions.  They are
+        # independent synchronous entries rather than a resumed breakpoint;
+        # discard the completed runtime so each action gets a fresh frame.
+        existing = self.continuations.get(event.target)
+        if existing is not None and existing.completed and event.signal != ("Action", "Enter"):
+            self.continuations.pop(event.target, None)
         runtime = self.continuations.get(event.target)
         if (
             runtime is not None
@@ -2763,7 +2769,7 @@ class _Execution:
                     kind,
                     f"{path}.handler",
                     "unhandled_signal",
-                    "continuation has no Action::Enter handler",
+                    "continuation has no handler for the requested Action",
                 )
             runtime = _ContinuationRuntime(event.target)
             runtime.frames.append(
@@ -2809,6 +2815,8 @@ class _Execution:
                 return unit
             raise RuntimeError("continuation execution exhausted without a result")
         finally:
+            if event.signal != ("Action", "Enter"):
+                self.continuations.pop(event.target, None)
             runtime.owner_active = False
 
     def _run_collection(

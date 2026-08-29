@@ -1407,17 +1407,16 @@ class ModelIR:
                         )
                     if signal.mode == "resume" and (
                         not target.continuation
-                        or signal.signal != ("Action", "Enter")
+                        or signal.signal[0] != "Action"
                     ):
                         raise ModelIRValidationError(
-                            "resumes must target Action::Enter on a continuation object"
+                            "resumes must target an Action on a continuation object"
                         )
                     if target.continuation and (
-                        signal.mode != "resume"
-                        or signal.signal != ("Action", "Enter")
+                        signal.mode != "resume" or signal.signal[0] != "Action"
                     ):
                         raise ModelIRValidationError(
-                            "external continuation entry must use resumes Action::Enter"
+                            "external continuation entry must use resumes Action"
                         )
             for model_object in module.objects:
                 if model_object.name[-1] in {
@@ -1826,15 +1825,14 @@ class ModelIR:
                                     )
                                 if signal.mode == "resume" and (
                                     not target.continuation
-                                    or signal.signal != ("Action", "Enter")
+                                    or signal.signal[0] != "Action"
                                 ):
                                     raise ModelIRValidationError(
-                                        "resumes must target Action::Enter on a "
+                                        "resumes must target an Action on a "
                                         "continuation object"
                                     )
                                 if target.continuation and not (
-                                    signal.mode == "resume"
-                                    and signal.signal == ("Action", "Enter")
+                                    signal.mode == "resume" and signal.signal[0] == "Action"
                                 ) and not (
                                     signal.signal[0] == "Action"
                                     and signal.source == target_name
@@ -1842,7 +1840,7 @@ class ModelIR:
                                 ):
                                     raise ModelIRValidationError(
                                         "continuation entry from outside must use "
-                                        "resumes Action::Enter"
+                                        "resumes Action"
                                     )
                                 if block.kind == "yields" and (
                                     not model_object.continuation

@@ -1415,16 +1415,16 @@ def _expand_inheritance(
             return
         is_continuation = target_name in continuation_names
         if signal.mode == "resume" and (
-            not is_continuation or signal.signal != ("Action", "Enter")
+            not is_continuation or signal.signal[0] != "Action"
         ):
             raise _semantic_error(
                 module,
                 owner,
-                "resumes must target Action::Enter on a continuation object",
+                "resumes must target an Action on a continuation object",
             )
         if not is_continuation:
             return
-        if signal.mode == "resume" and signal.signal == ("Action", "Enter"):
+        if signal.mode == "resume" and signal.signal[0] == "Action":
             return
         if not (
             signal.signal[0] == "Action"
@@ -1434,8 +1434,7 @@ def _expand_inheritance(
             raise _semantic_error(
                 module,
                 owner,
-                "only Action::Enter may enter a continuation, and continuation entry "
-                "from outside must use resumes Action::Enter; "
+                "continuation entry from outside must use resumes Action; "
                 "other Actions must be synchronous calls from the same continuation",
             )
 

@@ -8,7 +8,7 @@
 ## 生命周期与来源
 
 两个子对象由各自所属的启动阶段驱动，而不是由父对象嵌套驱动：`parse_dtb` 对应的
-EarlyBoot 边界驱动 `MemBlockMemory.Enable`，`paging_init()` 中的 `setup_bootmem()` 边界驱动
+EarlyBoot 边界驱动 `MemBlockMemory.Enable`，其 `SetupBootmem` 动作边界驱动
 `MemBlockReserved.Enable`。随后 `MemBlock.Enable` 只检查两个子对象都已 Online，才提交父对象
 Online。这一拆分保留 Memory 与 Reserved 的独立失败和提交语义。
 
@@ -30,7 +30,7 @@ FDT reserve map 条目和 `/reserved-memory` 描述；模型不为这些来源�
 
 Memory 成功而 Reserved 失败时，`MemBlockMemory` 保持 Online，`MemBlockReserved` 与
 `MemBlock` 保持 Ready；此前已经完成的 SBI capability 与 EarlyConsole 也保持 Online，但
-`setup_vm_final`、Scheduler、interrupt Unmask 和 BootSetup 不得执行。Memory 自身失败时三个
+`SwapperPageTable`、Scheduler、interrupt Unmask 和 BootSetup 不得执行。Memory 自身失败时三个
 MemBlock 对象都保持 Ready，EarlyBoot 不得继续 SBI capability 或 Console。
 
 ## 抽象边界
