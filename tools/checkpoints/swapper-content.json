@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "implementation_only": true,
+  "scope": {
+    "module": "objects.vm",
+    "root_object": "SwapperPageTable",
+    "begins_after": "arch_head_stack_established"
+  },
+  "sibling": {
+    "path": "../linux-6.12",
+    "branch": "dev",
+    "patch_base": {
+      "commit": "acb69c4c4d9a3eb63cab13eeaf47bf118b969ccb",
+      "files": {
+        "arch/riscv/mm/init.c": "cb7ba9044facac139f14b21fcf00db4be41829f34cca18e235106f55b62c0e22",
+        "arch/riscv/mm/lkm2_checkpoint_handler.c": "0a8cc04ba5dda6b3696bf0233251047efb9ab3502b078277984a90fb5467edaa",
+        "arch/riscv/mm/lkm2_checkpoints.inc": "532fca5144b2a141a696ec741281b054d205a1dfa20a304ea492dca8bcdf3568"
+      }
+    },
+    "integrated": {
+      "commit": "e5668acadb200fd194c988329288810338eba963",
+      "files": {
+        "arch/riscv/mm/init.c": "0ee04c2705e6cbd5a69d434c6e807b74c518911ba6167e6a83d88ae8ad0956c0",
+        "arch/riscv/mm/lkm2_checkpoint_handler.c": "d1707c7bc7d53fdcc0f42a73a301ada2dc1c275482bd78340719a23287128eeb",
+        "arch/riscv/mm/lkm2_checkpoints.inc": "3c8d7338a1f9d97df21076afe8822dc166703a70ce95c984b9aa22c84938f9c9"
+      }
+    }
+  },
+  "milestones": ["swapper_content"],
+  "checkpoints": [
+    {"id": "SwapperPageTable.Content.fixmap", "milestone": "swapper_content", "parameters": ["valid", "count", "digest_lo", "digest_hi"]},
+    {"id": "SwapperPageTable.Content.linear", "milestone": "swapper_content", "parameters": ["valid", "count", "digest_lo", "digest_hi"]},
+    {"id": "SwapperPageTable.Content.kernel_walk_valid", "milestone": "swapper_content", "parameters": ["valid"]}
+  ]
+}

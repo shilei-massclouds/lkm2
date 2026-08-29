@@ -12,6 +12,9 @@ mod memblock_checkpoints;
 #[path = "build/swapper_checkpoints.rs"]
 #[rustfmt::skip]
 mod swapper_checkpoints;
+#[path = "build/swapper_content_checkpoints.rs"]
+#[rustfmt::skip]
+mod swapper_content_checkpoints;
 #[path = "systems/kernel/config.rs"]
 mod config;
 mod objects;

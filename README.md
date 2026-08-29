@@ -57,7 +57,8 @@ Suspend、事务式 current 切换与 Resume，然后停在 UserAppRuntime，以
 
 `../linux-6.12` 仅作为只读的 Linux 机制参考与显式 checkpoint 差分基线。普通构建不
 依赖它，也不会检查它是否存在；只有 `make -C impl checkpoint-sibling-patch`、
-`checkpoint-sibling-patch-swapper` 和后续显式 apply/diff 目标会校验冻结的 sibling。生成
+`checkpoint-sibling-patch-swapper`、`checkpoint-sibling-patch-memblock`、
+`checkpoint-sibling-patch-swapper-content` 和后续显式 apply/diff 目标会校验冻结的 sibling。生成
 patch 不会修改、暂存或提交 sibling。Rust
 实现不使用 Cargo，不从 registry、Git 或 vendor 目录引入外部 crate，只使用仓库源码与
 固定工具链提供的 sysroot crate。
@@ -68,7 +69,8 @@ patch 不会修改、暂存或提交 sibling。Rust
 
 实现 checkpoint 默认使用可完全优化消除的 `empty` handler。可用
 `make -C impl CHECKPOINT_HANDLER=debugcon build` 生成原始 SBI DBCN 记录；
-`make -C impl test-checkpoints` 会分别验证 Sv57、Sv48 和 Sv39。checkpoint ABI、28 项冻结
+`make -C impl test-checkpoints` 会分别验证 Sv57、Sv48 和 Sv39。Sv57 成功路径当前包含
+原有 50 项与 3 项 implementation-only swapper 页表内容记录。checkpoint ABI、28 项冻结
 清单以及 sibling 审查门见 [`coding/checkpoints.md`](coding/checkpoints.md)。
 checkpoint debugcon 是独立于 `Printk → EarlyConsole → SbiConsole` 的观测通道；启动横幅
 及其 smoke test 不依赖 checkpoint handler。

@@ -24,7 +24,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="checkpointgen", description="Generate implementation checkpoints from Model IR"
     )
-    parser.add_argument("--model-ir", type=Path, required=True)
+    parser.add_argument("--model-ir", type=Path)
     parser.add_argument("--mapping", type=Path, required=True)
     parser.add_argument("--handler")
     parser.add_argument("--rust-output", type=Path)
@@ -37,10 +37,14 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        with arguments.model_ir.open(encoding="utf-8") as stream:
-            model = load_model_ir(stream)
+        model = None
+        if arguments.model_ir is not None:
+            with arguments.model_ir.open(encoding="utf-8") as stream:
+                model = load_model_ir(stream)
         with arguments.mapping.open(encoding="utf-8") as stream:
             mapping = load_mapping(stream)
+        if model is None and not mapping.implementation_only:
+            raise CheckpointGenerationError("--model-ir is required for model-derived mappings")
         checkpoints = build_checkpoints(model, mapping)
         if arguments.sibling_patch_output is not None:
             if any(

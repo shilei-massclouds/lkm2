@@ -24,6 +24,31 @@ Rust 声明必须使用 `extern "C"` 和 `u64` 参数，C 声明使用 `uint64_t
 其余表达式使用映射中冻结的参数名顺序。观测值必须来自实际 KernelMap、SATP 和页表表项；
 二进制镜像大小、末叶子地址、页表页地址和 root PPN 不属于跨实现协议。
 
+在上述 50 项之后还有独立的 `swapper-content` implementation-only 套件。它不从 Model IR
+提取表达式，也不伪造 model invariant；三个固定 ID 分别观测 fixmap、linear map 和本侧
+kernel image walker 自洽性。前两项参数顺序为 `valid,count,digest_lo,digest_hi`，kernel 项
+仅为 `valid`。runner 对任何 `valid != 1` 立即失败，避免双方同时构造失败被误判为一致。
+
+## Swapper 页表内容协议
+
+统一语义项是按 VA 递增的 4 KiB `(va:u64, pa:u64, normalized_flags:u64)`，三个字段均按
+小端编码。Sv39/Sv48/Sv57 walker 支持 1 GiB、2 MiB 和 4 KiB leaf；huge leaf 全部展开，
+root、任意中间页表 backing PA、leaf level 与分配顺序均不进入摘要。摘要流以 `LKMPTE1`、
+版本与 class 开头，以 count 结尾，并使用两个不同初始种子的流式 FNV-1a64 lane 形成
+`digest_lo/digest_hi`。它只用于错误检测，不声明密码学安全性。
+
+fixmap 摘要覆盖最终两 PMD 的 FDT 窗口并保留稳定的 `V/R/W/X/U/G/A/D` 位。linear 摘要覆盖
+规范化 MemBlock Memory 中实际可进入 direct map 的完整范围；Linux `for_each_mem_range()`
+排除的前导固件 `MEMBLOCK_NOMAP` 保留区（QEMU virt 上为 OpenSBI 所有）在 Rust 侧也从实际映射
+和摘要域排除。其余范围保留绝对 VA/PA，flags 只投影为双方共同稳定的有效、可读语义，因此各自
+text/rodata 别名的 W/X 分段差异不会污染比较。kernel 只检查本侧
+`[kernel_va, kernel_va + image_size)` 无空洞、VA→PA 偏移正确、leaf 合法且不出现 W+X；它不
+输出 count/digest，也不检查镜像尾部之后的映射。
+
+内容不一致的诊断协议使用启动参数 `lkm2.ptdiag`。`LKMPTC1` 以 512 个规范项（2 MiB）为
+chunk 定位首个差异，`LKMPTI1` 只输出目标 chunk 最多 512 项；runner 的解析和首项定位不会
+在正常成功路径输出整个 128 MiB 页表。
+
 ## MemBlock 范围协议
 
 只读观测固定在 `setup_bootmem` 成功返回后、`setup_vm_final` 首次动态分配页表页之前。Memory
@@ -90,12 +115,17 @@ MemBlock 套件使用 `33760df4d924f1d8f6b7c1e03c21bf03f0ac9d0b` →
 `acb69c4c4d9a3eb63cab13eeaf47bf118b969ccb` 锚点，以三文件独立增量追加 include、handler 与
 `setup_bootmem()` 后的四个调用；生成内容由三文件 SHA-256 锚定。
 
+`swapper-content` 以该 MemBlock integrated commit 为 patch base，仅在同三个文件追加 content
+include、handler 和 `pt_ops_set_late()` 后的观测调用，并冻结
+`e5668acadb200fd194c988329288810338eba963` 为 integrated commit。runner 接受生成内容逐字一致
+的未暂存 review patch，或该 integrated commit 上的干净工作树；干净 MemBlock 基线不视为已集成。
+
 Linux patch 在 `setup_vm` 的同六个语义边界调用生成 wrapper，并以独立 C 文件提供固定
 DBCN handler。它运行在 `sbi_init()` 之前，所以不得调用 Linux SBI 或 logging API，也
 不增加 Kconfig 选择。MMU-off 调用和字符串访问都必须验证为可用的 PC-relative 访问。
 
 差分 runner 固定使用同一 OpenSBI、QEMU virt、128 MiB、单 hart 和默认 CPU，过滤
-`LKMCP1`。Sv57 必须严格比较 50 项 canonical ID 顺序、参数名顺序和所有值，并比较 Memory/
+`LKMCP1`。Sv57 必须严格比较 53 项 canonical ID 顺序、参数名顺序和所有值，并比较 Memory/
 Reserved 的 `LKMRNG1` 序列；缺失、重复
 或差异均失败。Sv48 通过 CPU 配置禁用 Sv57，Sv39 同时禁用 Sv57/Sv48；后二者只验证
 lkm2 回退与记录自洽。
@@ -104,8 +134,8 @@ lkm2 回退与记录自洽。
 上的未暂存 review patch或 VM integrated 提交上的干净工作树；对 M1 套件还接受
 VM integrated 提交上的未暂存增量 patch，或 M1 integrated 提交上的干净工作树。review
 状态都必须位于冻结分支、不得包含暂存修改；MemBlock review 或 integrated 状态均严格比较
-全部 50 项记录。
+旧 50 项；content review 或 integrated 状态严格比较全部 53 项记录。
 
-缓冲 handler、最终内核页表、Sv48/Sv39 sibling 差分、Linux alternatives/KASLR/
+缓冲 handler、Sv48/Sv39 sibling 差分、Linux alternatives/KASLR/
 `pt_ops` 迁移不在本阶段范围；ArchHead 对已观测 early 页表的 SATP 重定位不增加新的
 checkpoint 协议项。

@@ -21,16 +21,20 @@ from .sibling import (
     validate_differential_sibling,
     validate_incremental_differential_sibling,
     validate_memblock_differential_sibling,
+    validate_incremental_content_sibling,
 )
 
 
 RECORD_PREFIX = "LKMCP1 "
 RANGE_RECORD_PREFIX = "LKMRNG1 "
+CONTENT_CHUNK_PREFIX = "LKMPTC1 "
+CONTENT_ITEM_PREFIX = "LKMPTI1 "
 FIELD = re.compile(r"([a-zA-Z0-9_.-]+)=([^ ]+)")
 CHECKPOINT_SUITES = (
     ("vm.json", "checkpoints.manifest.json"),
     ("memblock.json", "memblock_checkpoints.manifest.json"),
     ("swapper.json", "swapper_checkpoints.manifest.json"),
+    ("swapper-content.json", "swapper_content_checkpoints.manifest.json"),
 )
 CPU_ARGUMENTS = {
     "sv57": (),
@@ -48,6 +52,7 @@ class CheckpointRunError(RuntimeError):
 class CollectedOutput:
     checkpoints: tuple[str, ...]
     ranges: tuple[str, ...]
+    diagnostics: tuple[str, ...] = ()
 
 
 def parse_record(line: str) -> tuple[str, str, tuple[tuple[str, int], ...]]:
@@ -91,6 +96,46 @@ def parse_range_record(line: str) -> tuple[str, int, int, int]:
     return kind, values[0], values[1], values[2]
 
 
+def _parse_content_fields(line: str, prefix: str) -> list[tuple[str, str]]:
+    line = line.strip()
+    if not line.startswith(prefix):
+        raise CheckpointRunError("not a page-table content diagnostic record")
+    fields = FIELD.findall(line[len(prefix) :])
+    if not fields:
+        raise CheckpointRunError(f"malformed page-table diagnostic record: {line}")
+    return fields
+
+
+def parse_content_chunk_record(line: str) -> tuple[str, int, int, int, int]:
+    fields = _parse_content_fields(line, CONTENT_CHUNK_PREFIX)
+    if tuple(key for key, _ in fields) != ("class", "chunk", "count", "digest_lo", "digest_hi"):
+        raise CheckpointRunError(f"malformed page-table chunk record: {line}")
+    name = fields[0][1]
+    if name not in {"fixmap", "linear", "kernel"}:
+        raise CheckpointRunError(f"unknown page-table content class {name!r}")
+    values = []
+    for key, value in fields[1:]:
+        if re.fullmatch(r"0x[0-9a-f]{16}", value) is None:
+            raise CheckpointRunError(f"invalid page-table chunk {key} for {name}")
+        values.append(int(value, 16))
+    return name, values[0], values[1], values[2], values[3]
+
+
+def parse_content_item_record(line: str) -> tuple[str, int, int, int, int]:
+    fields = _parse_content_fields(line, CONTENT_ITEM_PREFIX)
+    if tuple(key for key, _ in fields) != ("class", "index", "va", "pa", "flags"):
+        raise CheckpointRunError(f"malformed page-table item record: {line}")
+    name = fields[0][1]
+    if name not in {"fixmap", "linear", "kernel"}:
+        raise CheckpointRunError(f"unknown page-table content class {name!r}")
+    values = []
+    for key, value in fields[1:]:
+        if re.fullmatch(r"0x[0-9a-f]{16}", value) is None:
+            raise CheckpointRunError(f"invalid page-table item {key} for {name}")
+        values.append(int(value, 16))
+    return name, values[0], values[1], values[2], values[3]
+
+
 def _read_manifest(path: Path) -> tuple[dict[str, object], ...]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -103,10 +148,36 @@ def _read_manifest(path: Path) -> tuple[dict[str, object], ...]:
 
 
 def _read_manifests(implementation: Path) -> tuple[tuple[dict[str, object], ...], ...]:
-    return tuple(
+    manifests = tuple(
         _read_manifest(implementation / "build" / manifest)
         for _mapping, manifest in CHECKPOINT_SUITES
     )
+    _validate_manifest_identities(manifests)
+    return manifests
+
+
+def _validate_manifest_identities(
+    manifests: tuple[tuple[dict[str, object], ...], ...],
+) -> None:
+    ids: set[str] = set()
+    hashes: dict[str, str] = {}
+    for manifest in manifests:
+        for item in manifest:
+            canonical_id = item.get("id")
+            hash16 = item.get("hash")
+            if type(canonical_id) is not str or type(hash16) is not str:
+                raise CheckpointRunError("checkpoint manifest identity is malformed")
+            if canonical_id in ids:
+                raise CheckpointRunError(
+                    f"checkpoint manifests contain duplicate canonical ID {canonical_id!r}"
+                )
+            ids.add(canonical_id)
+            previous = hashes.get(hash16)
+            if previous is not None and previous != canonical_id:
+                raise CheckpointRunError(
+                    f"checkpoint manifest hash collision between {previous!r} and {canonical_id!r}"
+                )
+            hashes[hash16] = canonical_id
 
 
 def _collect_qemu(
@@ -125,6 +196,7 @@ def _collect_qemu(
     pending = b""
     records: list[str] = []
     ranges: list[str] = []
+    diagnostics: list[str] = []
     transcript: list[str] = []
     try:
         while len(records) < expected_count:
@@ -152,6 +224,8 @@ def _collect_qemu(
                         raise CheckpointRunError("QEMU emitted too many checkpoint records")
                 elif line.startswith(RANGE_RECORD_PREFIX):
                     ranges.append(line)
+                elif line.startswith("LKMPTI1 ") or line.startswith("LKMPTC1 "):
+                    diagnostics.append(line)
     except Exception as exc:
         if isinstance(exc, CheckpointRunError):
             detail = "\n".join(transcript[-20:])
@@ -166,7 +240,7 @@ def _collect_qemu(
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=2)
-    return CollectedOutput(tuple(records), tuple(ranges))
+    return CollectedOutput(tuple(records), tuple(ranges), tuple(diagnostics))
 
 
 def validate_records(
@@ -205,6 +279,8 @@ def validate_records(
         for flag in ("path_ok", "coverage_ok"):
             if flag in values and values[flag] != 1:
                 raise CheckpointRunError(f"{canonical_id} observed {flag}=0")
+        if "valid" in values and values["valid"] != 1:
+            raise CheckpointRunError(f"{canonical_id} observed valid=0")
     return parsed
 
 
@@ -291,6 +367,161 @@ def _range_mismatch(
         f"{kind} normalized range mismatch at index {mismatch}:\n"
         f"lkm2 {kind}: {_format_ranges(left)}\n"
         f"linux {kind}: {_format_ranges(right)}"
+    )
+
+
+def _content_mismatch(
+    left: tuple[tuple[str, str, tuple[tuple[str, int], ...]], ...],
+    right: tuple[tuple[str, str, tuple[tuple[str, int], ...]], ...],
+) -> str:
+    """Describe a content-suite mismatch without dumping an entire page table."""
+    for index, (lkm, linux) in enumerate(zip(left, right)):
+        if lkm != linux:
+            class_name = lkm[0].rsplit(".", 1)[-1]
+            return (
+                f"swapper-content mismatch class={class_name} index={index}:\n"
+                f"lkm2: {lkm!r}\nlinux: {linux!r}"
+            )
+    return (
+        "swapper-content record count mismatch:\n"
+        f"lkm2: {left!r}\nlinux: {right!r}"
+    )
+
+
+def _diagnose_content_mismatch(
+    common: list[str],
+    lkm_image: Path,
+    linux_image: Path,
+    expected_count: int,
+    timeout: float,
+    class_name: str,
+) -> str:
+    """Run the two bounded diagnostic passes for one content class."""
+    def command(image: Path, diagnostic: str) -> list[str]:
+        result = list(common)
+        append = result.index("-append") + 1
+        result[append] = result[append] + " " + diagnostic
+        return [*result, "-kernel", str(image)]
+
+    chunk_arg = f"lkm2.ptdiag={class_name},chunks"
+    left_chunks = _collect_qemu(command(lkm_image, chunk_arg), expected_count, timeout)
+    right_chunks = _collect_qemu(command(linux_image, chunk_arg), expected_count, timeout)
+    left = tuple(
+        item
+        for item in map(parse_content_chunk_record, left_chunks.diagnostics)
+        if item[0] == class_name
+    )
+    right = tuple(
+        item
+        for item in map(parse_content_chunk_record, right_chunks.diagnostics)
+        if item[0] == class_name
+    )
+    left_by_chunk = {item[1]: item for item in left}
+    right_by_chunk = {item[1]: item for item in right}
+    if len(left_by_chunk) != len(left) or len(right_by_chunk) != len(right):
+        raise CheckpointRunError(
+            f"duplicate swapper-content diagnostic chunk for class={class_name}"
+        )
+
+    def validate_chunks(
+        side: str, chunks: dict[int, tuple[str, int, int, int, int]]
+    ) -> None:
+        indexes = tuple(sorted(chunks))
+        if indexes and indexes != tuple(range(indexes[-1] + 1)):
+            raise CheckpointRunError(
+                f"non-contiguous {side} swapper-content chunks for class={class_name}"
+            )
+        for position, record in chunks.items():
+            count = record[2]
+            if count == 0 or count > 512 or (position != indexes[-1] and count != 512):
+                raise CheckpointRunError(
+                    f"invalid {side} swapper-content chunk size for class={class_name}"
+                )
+
+    validate_chunks("lkm2", left_by_chunk)
+    validate_chunks("linux", right_by_chunk)
+    chunk_index = next(
+        (
+            index
+            for index in sorted(left_by_chunk.keys() | right_by_chunk.keys())
+            if left_by_chunk.get(index) != right_by_chunk.get(index)
+        ),
+        None,
+    )
+    if chunk_index is None:
+        return f"swapper-content mismatch class={class_name}; diagnostic chunk digests unexpectedly match"
+
+    item_arg = f"lkm2.ptdiag={class_name},items,{chunk_index}"
+    left_items_output = _collect_qemu(command(lkm_image, item_arg), expected_count, timeout)
+    right_items_output = _collect_qemu(command(linux_image, item_arg), expected_count, timeout)
+    left_items = tuple(
+        item
+        for item in map(parse_content_item_record, left_items_output.diagnostics)
+        if item[0] == class_name
+    )
+    right_items = tuple(
+        item
+        for item in map(parse_content_item_record, right_items_output.diagnostics)
+        if item[0] == class_name
+    )
+    if len(left_items) > 512 or len(right_items) > 512:
+        raise CheckpointRunError(
+            f"unbounded swapper-content item diagnostic for class={class_name}"
+        )
+    left_by_index = {item[1]: item for item in left_items}
+    right_by_index = {item[1]: item for item in right_items}
+    if len(left_by_index) != len(left_items) or len(right_by_index) != len(right_items):
+        raise CheckpointRunError(
+            f"duplicate swapper-content diagnostic item for class={class_name}"
+        )
+    expected_start = chunk_index * 512
+    expected_end = expected_start + 512
+    if any(
+        not expected_start <= index < expected_end
+        for index in left_by_index.keys() | right_by_index.keys()
+    ):
+        raise CheckpointRunError(
+            f"out-of-chunk swapper-content item diagnostic for class={class_name}"
+        )
+
+    def validate_items(
+        side: str,
+        items: dict[int, tuple[str, int, int, int, int]],
+        chunks: dict[int, tuple[str, int, int, int, int]],
+    ) -> None:
+        expected_count = chunks.get(chunk_index, (class_name, chunk_index, 0, 0, 0))[2]
+        expected_indexes = set(range(expected_start, expected_start + expected_count))
+        if set(items) != expected_indexes:
+            raise CheckpointRunError(
+                f"incomplete {side} swapper-content item chunk for class={class_name}"
+            )
+
+    validate_items("lkm2", left_by_index, left_by_chunk)
+    validate_items("linux", right_by_index, right_by_chunk)
+    first_index = next(
+        (
+            index
+            for index in sorted(left_by_index.keys() | right_by_index.keys())
+            if left_by_index.get(index) != right_by_index.get(index)
+        ),
+        None,
+    )
+    format_items = lambda items: "[" + ", ".join(
+        f"(index={item[1]}, va=0x{item[2]:016x}, pa=0x{item[3]:016x}, flags=0x{item[4]:016x})"
+        for item in items
+    ) + "]"
+    if first_index is None:
+        return (
+            f"swapper-content mismatch class={class_name} chunk={chunk_index}; "
+            "chunk digests differ but complete item records match:\n"
+            f"lkm2 chunk: {format_items(left_items)}\n"
+            f"linux chunk: {format_items(right_items)}"
+        )
+    return (
+        f"swapper-content mismatch class={class_name} chunk={chunk_index} "
+        f"first_index={first_index}:\n"
+        f"lkm2 chunk: {format_items(left_items)}\n"
+        f"linux chunk: {format_items(right_items)}"
     )
 
 
@@ -382,7 +613,7 @@ def run_diff(
                 encoding="utf-8"
             ) as stream:
                 mappings.append(load_mapping(stream))
-        mapping, memblock_mapping, swapper_mapping = mappings
+        mapping, memblock_mapping, swapper_mapping, content_mapping = mappings
     except (OSError, UnicodeError, CheckpointGenerationError) as exc:
         raise CheckpointRunError(f"invalid sibling differential state: {exc}") from exc
     if build_sibling:
@@ -424,20 +655,30 @@ def run_diff(
             model = load_model_ir(stream)
         memblock_checkpoints = build_checkpoints(model, memblock_mapping)
         swapper_checkpoints = build_checkpoints(model, swapper_mapping)
-        sibling_state = validate_memblock_differential_sibling(
-            sibling, memblock_mapping, memblock_checkpoints
+        content_checkpoints = build_checkpoints(None, content_mapping)
+        content_state = validate_incremental_content_sibling(
+            sibling, content_mapping, content_checkpoints
         )
-        if sibling_state is None:
-            swapper_state = validate_incremental_differential_sibling(
-                sibling, swapper_mapping, swapper_checkpoints
+        if content_state is not None:
+            sibling_state = content_state
+        else:
+            sibling_state = validate_memblock_differential_sibling(
+                sibling, memblock_mapping, memblock_checkpoints
             )
-            if swapper_state is not None:
-                raise CheckpointGenerationError(
-                    "sibling has VM/Swapper checkpoints but no MemBlock review patch"
+            if sibling_state is None:
+                swapper_state = validate_incremental_differential_sibling(
+                    sibling, swapper_mapping, swapper_checkpoints
                 )
-            sibling_state = validate_differential_sibling(sibling, mapping)
+                if swapper_state is not None:
+                    raise CheckpointGenerationError(
+                        "sibling has VM/Swapper checkpoints but no MemBlock review patch"
+                    )
+                sibling_state = validate_differential_sibling(sibling, mapping)
+                raise CheckpointGenerationError(
+                    f"sibling state {sibling_state!r} has no MemBlock review patch"
+                )
             raise CheckpointGenerationError(
-                f"sibling state {sibling_state!r} has no MemBlock review patch"
+                f"sibling state {sibling_state!r} has no swapper-content review patch"
             )
     except (OSError, UnicodeError, CheckpointGenerationError) as exc:
         raise CheckpointRunError(f"invalid sibling differential state: {exc}") from exc
@@ -479,6 +720,22 @@ def run_diff(
             zip(lkm_records, linux_records, strict=True)
         ):
             if left != right:
+                if left[0].startswith("SwapperPageTable.Content."):
+                    class_name = left[0].rsplit(".", 1)[-1]
+                    if class_name in {"fixmap", "linear"}:
+                        raise CheckpointRunError(
+                            _diagnose_content_mismatch(
+                                common,
+                                implementation / "build" / "lkm2.bin",
+                                image,
+                                len(expected_manifest),
+                                timeout,
+                                class_name,
+                            )
+                        )
+                    content_left = tuple(item for item in lkm_records if item[0].startswith("SwapperPageTable.Content."))
+                    content_right = tuple(item for item in linux_records if item[0].startswith("SwapperPageTable.Content."))
+                    raise CheckpointRunError(_content_mismatch(content_left, content_right))
                 raise CheckpointRunError(
                     f"Sv57 differential mismatch at record {index + 1}:\n"
                     f"lkm2: {left!r}\nlinux: {right!r}"

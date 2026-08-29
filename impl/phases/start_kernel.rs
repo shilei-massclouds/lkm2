@@ -6,7 +6,10 @@ use crate::objects::dtb_blob::DtbBlob;
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
 use crate::objects::memblock::{MemBlock, MemBlockMemory, RangeCheckpointObservation};
 use crate::objects::printk::EarlyPrintk;
-use crate::objects::{early_dtb_mapping, kernel_image_physical_range, setup_vm_final};
+use crate::objects::{
+    configure_page_table_diagnostics, early_dtb_mapping, kernel_image_physical_range,
+    setup_vm_final,
+};
 use crate::systems::sbi::{Ecall, SbiCapability, SbiConsole};
 
 const BANNER: &[u8] = b"LKM2 kernel\n";
@@ -35,6 +38,7 @@ pub(crate) extern "C" fn start_kernel() -> ! {
         Ok(command_line) => command_line,
         Err(_) => fail_stop(),
     };
+    configure_page_table_diagnostics(command_line.as_str());
     let memory = match MemBlockMemory::derive_from_dtb(&dtb_blob) {
         Ok(memory) => memory,
         Err(_) => fail_stop(),

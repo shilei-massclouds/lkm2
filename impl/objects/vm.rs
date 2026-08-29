@@ -14,6 +14,7 @@ use crate::config::{
 use crate::objects::dtb_blob::EarlyDtbMapping;
 use crate::objects::memblock::{MemBlock, MemBlockError};
 use crate::swapper_checkpoints::{self, SwapperObservation};
+use crate::swapper_content_checkpoints::{self, SwapperContentObservation};
 
 const PAGE_SIZE: usize = 1 << PAGE_SHIFT;
 const PAGE_TABLE_ENTRIES: usize = PAGE_SIZE / size_of::<u64>();
@@ -471,6 +472,425 @@ impl SwapperPageTableType {
             late_mode_selected: self.late_mode_selected.load(Ordering::Acquire),
         }
     }
+
+    fn content_observation(
+        &self,
+        memblock: &MemBlock,
+        mode: PagingMode,
+    ) -> SwapperContentObservation {
+        let (fixmap_valid, fixmap_count, fixmap_lo, fixmap_hi) = self.digest_window(
+            mode,
+            mode.fix_fdt_va(),
+            2 * PMD_SIZE,
+            1,
+            PTE_VALID | PTE_PERMISSION_MASK,
+        );
+        let mut linear = ContentDigest::new(2);
+        let mut linear_valid = true;
+        let linear_physical_base = memblock
+            .memory_ranges()
+            .next()
+            .and_then(|(base, _limit)| usize::try_from(base).ok())
+            .map(|base| base & PMD_MASK);
+        let linear_mappable_start = linear_mappable_physical_start(memblock);
+        if let (Some(linear_base), Some(mappable_start)) =
+            (linear_physical_base, linear_mappable_start)
+        {
+            for (base, end) in memblock.memory_ranges() {
+                let Ok(memory_start) = usize::try_from(base) else {
+                    linear_valid = false;
+                    continue;
+                };
+                let Ok(limit) = usize::try_from(end) else {
+                    linear_valid = false;
+                    continue;
+                };
+                // Linux excludes the leading firmware-owned NOMAP reservation
+                // from for_each_mem_range().  The Rust MemBlock deliberately
+                // keeps the older implementation-independent reservation
+                // schema, so derive the same linear-map projection here.
+                let start = core::cmp::max(memory_start, mappable_start);
+                if start >= limit {
+                    continue;
+                }
+                let Some(size) = limit.checked_sub(start) else {
+                    linear_valid = false;
+                    continue;
+                };
+                let virtual_start = start
+                    .checked_sub(linear_base)
+                    .and_then(|offset| mode.page_offset().checked_add(offset));
+                let count_before = linear.count;
+                let (valid, count) = self.digest_into(
+                    mode,
+                    &mut linear,
+                    ContentRange {
+                        virtual_start,
+                        physical_start: Some(start),
+                        size,
+                        flags_mask: PTE_VALID | PTE_READ,
+                        required_flags: PTE_VALID | PTE_READ,
+                        forbidden_flags: PTE_USER,
+                        path: &self.linear_path,
+                    },
+                );
+                linear_valid &= valid;
+                if count == count_before && size != 0 {
+                    linear_valid = false;
+                }
+            }
+        } else {
+            linear_valid = false;
+        }
+        linear_valid &= linear.count != 0;
+        let linear_count = linear.count;
+        let (linear_lo, linear_hi) = linear.finish();
+        let kernel_valid = self.kernel_walk_valid(mode);
+        SwapperContentObservation {
+            fixmap_valid,
+            fixmap_count,
+            fixmap_digest_lo: fixmap_lo,
+            fixmap_digest_hi: fixmap_hi,
+            linear_valid: u64::from(linear_valid),
+            linear_count,
+            linear_digest_lo: linear_lo,
+            linear_digest_hi: linear_hi,
+            kernel_walk_valid: u64::from(kernel_valid),
+        }
+    }
+
+    fn digest_window(
+        &self,
+        mode: PagingMode,
+        virtual_start: usize,
+        size: usize,
+        class: u8,
+        flags_mask: u64,
+    ) -> (u64, u64, u64, u64) {
+        let mut digest = ContentDigest::new(class);
+        let (valid, _count) = self.digest_into(
+            mode,
+            &mut digest,
+            ContentRange {
+                virtual_start: Some(virtual_start),
+                physical_start: None,
+                size,
+                flags_mask,
+                required_flags: PTE_VALID,
+                forbidden_flags: 0,
+                path: &self.fixmap_path,
+            },
+        );
+        let count = digest.count;
+        let (lo, hi) = digest.finish();
+        (u64::from(valid), count, lo, hi)
+    }
+
+    fn digest_into(
+        &self,
+        mode: PagingMode,
+        digest: &mut ContentDigest,
+        range: ContentRange<'_>,
+    ) -> (bool, u64) {
+        let Some(mut va) = range.virtual_start else {
+            return (false, 0);
+        };
+        let end = match va.checked_add(range.size) {
+            Some(end) => end,
+            None => return (false, 0),
+        };
+        let mut pa = range.physical_start;
+        let mut valid = true;
+        while va < end {
+            let expected_pa = pa;
+            let entry = lookup_path(&self.root, range.path, mode, va);
+            let (entry_pa, entry_flags) = match entry {
+                Some((pte, leaf_size)) => (
+                    pte.physical_address() as usize + (va & (leaf_size - 1)),
+                    pte.flags(),
+                ),
+                None => {
+                    valid = false;
+                    (0, 0)
+                }
+            };
+            if let Some(expected) = expected_pa
+                && entry_pa != expected
+            {
+                valid = false;
+            }
+            if entry_flags & range.required_flags != range.required_flags
+                || entry_flags & range.forbidden_flags != 0
+            {
+                valid = false;
+            }
+            digest.push(va as u64, entry_pa as u64, entry_flags & range.flags_mask);
+            va = match va.checked_add(PAGE_SIZE) {
+                Some(next) => next,
+                None => return (false, digest.count),
+            };
+            if let Some(current) = pa {
+                pa = current.checked_add(PAGE_SIZE);
+                if pa.is_none() && va < end {
+                    valid = false;
+                }
+            }
+        }
+        (valid, digest.count)
+    }
+
+    fn kernel_walk_valid(&self, mode: PagingMode) -> bool {
+        let start = VM.kernel_map.virtual_address();
+        let size = VM.kernel_map.image_size();
+        if size == 0 || start & (PAGE_SIZE - 1) != 0 {
+            return false;
+        }
+        let Some(end) = start.checked_add(size) else {
+            return false;
+        };
+        let mut va = start;
+        while va < end {
+            let Some((pte, leaf_size)) = lookup_path(&self.root, &self.kernel_path, mode, va)
+            else {
+                return false;
+            };
+            let Some(expected_pa) = VM.kernel_map.physical_address().checked_add(va - start) else {
+                return false;
+            };
+            if pte.physical_address() as usize + (va & (leaf_size - 1)) != expected_pa
+                || !valid_leaf_flags(pte.flags())
+                || pte.flags() & PTE_USER != 0
+                || pte.flags() & PTE_WRITE != 0 && pte.flags() & PTE_EXEC != 0
+            {
+                return false;
+            }
+            va = match va.checked_add(PAGE_SIZE) {
+                Some(next) => next,
+                None => return false,
+            };
+        }
+        true
+    }
+}
+
+const CONTENT_FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+const CONTENT_FNV_OFFSET_LO: u64 = 0xcbf2_9ce4_8422_2325;
+const CONTENT_FNV_OFFSET_HI: u64 = 0x8422_2325_cbf2_9ce4;
+
+struct ContentRange<'a> {
+    virtual_start: Option<usize>,
+    physical_start: Option<usize>,
+    size: usize,
+    flags_mask: u64,
+    required_flags: u64,
+    forbidden_flags: u64,
+    path: &'a SwapperPathPages,
+}
+
+struct ContentDigest {
+    lo: u64,
+    hi: u64,
+    count: u64,
+    class: u64,
+    diagnostic_lo: u64,
+    diagnostic_hi: u64,
+    diagnostic_count: u64,
+    diagnostic_chunk: u64,
+    diagnostic_index: u64,
+}
+
+impl ContentDigest {
+    fn new(class: u8) -> Self {
+        let mut result = Self {
+            lo: CONTENT_FNV_OFFSET_LO,
+            hi: CONTENT_FNV_OFFSET_HI,
+            count: 0,
+            class: u64::from(class),
+            diagnostic_lo: CONTENT_FNV_OFFSET_LO,
+            diagnostic_hi: CONTENT_FNV_OFFSET_HI,
+            diagnostic_count: 0,
+            diagnostic_chunk: 0,
+            diagnostic_index: 0,
+        };
+        for byte in b"LKMPTE1" {
+            result.byte(*byte);
+            result.diagnostic_byte(*byte);
+        }
+        result.byte(1);
+        result.byte(class);
+        result.diagnostic_byte(1);
+        result.diagnostic_byte(class);
+        result
+    }
+
+    fn byte(&mut self, byte: u8) {
+        self.lo = (self.lo ^ u64::from(byte)).wrapping_mul(CONTENT_FNV_PRIME);
+        self.hi = (self.hi ^ u64::from(byte)).wrapping_mul(CONTENT_FNV_PRIME);
+    }
+
+    fn word(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.byte(byte);
+        }
+    }
+
+    fn diagnostic_byte(&mut self, byte: u8) {
+        self.diagnostic_lo = (self.diagnostic_lo ^ u64::from(byte)).wrapping_mul(CONTENT_FNV_PRIME);
+        self.diagnostic_hi = (self.diagnostic_hi ^ u64::from(byte)).wrapping_mul(CONTENT_FNV_PRIME);
+    }
+
+    fn diagnostic_word(&mut self, value: u64) {
+        for byte in value.to_le_bytes() {
+            self.diagnostic_byte(byte);
+        }
+    }
+
+    fn reset_diagnostic_chunk(&mut self) {
+        self.diagnostic_lo = CONTENT_FNV_OFFSET_LO;
+        self.diagnostic_hi = CONTENT_FNV_OFFSET_HI;
+        self.diagnostic_count = 0;
+        for byte in b"LKMPTE1" {
+            self.diagnostic_byte(*byte);
+        }
+        self.diagnostic_byte(1);
+        self.diagnostic_byte(self.class as u8);
+    }
+
+    fn emit_diagnostic_chunk(&mut self) {
+        if self.diagnostic_count == 0 {
+            return;
+        }
+        self.diagnostic_word(self.diagnostic_count);
+        swapper_content_checkpoints::content_chunk(
+            self.class,
+            self.diagnostic_chunk,
+            self.diagnostic_count,
+            self.diagnostic_lo,
+            self.diagnostic_hi,
+        );
+        self.diagnostic_chunk = self.diagnostic_chunk.wrapping_add(1);
+        self.reset_diagnostic_chunk();
+    }
+
+    fn push(&mut self, va: u64, pa: u64, flags: u64) {
+        self.word(va);
+        self.word(pa);
+        self.word(flags);
+        self.count = self.count.wrapping_add(1);
+        if PT_DIAG_CLASS.load(Ordering::Relaxed) == self.class {
+            match PT_DIAG_STAGE.load(Ordering::Acquire) {
+                1 => {
+                    self.diagnostic_word(va);
+                    self.diagnostic_word(pa);
+                    self.diagnostic_word(flags);
+                    self.diagnostic_count += 1;
+                    if self.diagnostic_count == 512 {
+                        self.emit_diagnostic_chunk();
+                    }
+                }
+                2 if self.diagnostic_index / 512 == PT_DIAG_CHUNK.load(Ordering::Relaxed) => {
+                    swapper_content_checkpoints::content_item(
+                        self.class,
+                        self.diagnostic_index,
+                        va,
+                        pa,
+                        flags,
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.diagnostic_index = self.diagnostic_index.wrapping_add(1);
+    }
+
+    fn finish(mut self) -> (u64, u64) {
+        if PT_DIAG_CLASS.load(Ordering::Relaxed) == self.class
+            && PT_DIAG_STAGE.load(Ordering::Acquire) == 1
+        {
+            self.emit_diagnostic_chunk();
+        }
+        self.word(self.count);
+        (self.lo, self.hi)
+    }
+}
+
+fn valid_leaf_flags(flags: u64) -> bool {
+    flags & PTE_VALID != 0
+        && flags & (PTE_READ | PTE_WRITE | PTE_EXEC) != 0
+        && flags & !(PTE_VALID | PTE_PERMISSION_MASK) == 0
+        && !(flags & PTE_WRITE != 0 && flags & PTE_READ == 0)
+}
+
+fn lookup_path(
+    root: &PageTablePage,
+    path: &SwapperPathPages,
+    mode: PagingMode,
+    va: usize,
+) -> Option<(Pte, usize)> {
+    if !is_canonical(va, mode) {
+        return None;
+    }
+    // Every intermediate page is owned by this class-specific path.  Validate
+    // the actual parent PTE while following those typed pages, avoiding any
+    // conversion of an arbitrary backing PA into a raw pointer.  Parent PAs
+    // affect validity only and never enter the semantic digest.
+    match mode {
+        PagingMode::Sv57 => {
+            if !swapper_table_entry_targets(
+                root,
+                page_table_index(va, PGD_SHIFT_SV57),
+                &path.level4,
+            ) || !swapper_table_entry_targets(
+                &path.level4,
+                page_table_index(va, P4D_SHIFT),
+                &path.level3,
+            ) {
+                return None;
+            }
+        }
+        PagingMode::Sv48 => {
+            if !swapper_table_entry_targets(root, page_table_index(va, P4D_SHIFT), &path.level3) {
+                return None;
+            }
+        }
+        PagingMode::Sv39 => {}
+    }
+
+    let pud_page = if mode == PagingMode::Sv39 {
+        root
+    } else {
+        &path.level3
+    };
+    let pud_index = page_table_index(va, PUD_SHIFT);
+    let pud_entry = pud_page.read(pud_index)?;
+    if valid_leaf_flags(pud_entry.flags()) {
+        return Some((pud_entry, PUD_SIZE));
+    }
+    if !swapper_table_entry_targets(pud_page, pud_index, &path.level2) {
+        return None;
+    }
+
+    let pmd_index = page_table_index(va, PMD_SHIFT);
+    let pmd_entry = path.level2.read(pmd_index)?;
+    if valid_leaf_flags(pmd_entry.flags()) {
+        return Some((pmd_entry, PMD_SIZE));
+    }
+    if !swapper_table_entry_targets(&path.level2, pmd_index, &path.level1) {
+        return None;
+    }
+
+    let entry = path.level1.read(page_table_index(va, PAGE_SHIFT))?;
+    valid_leaf_flags(entry.flags()).then_some((entry, PAGE_SIZE))
+}
+
+fn swapper_table_entry_targets(page: &PageTablePage, index: usize, target: &PageTablePage) -> bool {
+    let Some(entry) = page.read(index) else {
+        return false;
+    };
+    let Ok(target_pa) = runtime_physical_address(target.physical_address()) else {
+        return false;
+    };
+    entry.flags() == PAGE_TABLE_FLAGS && entry.physical_address() == target_pa as u64
 }
 
 // SAFETY: the root is the first page of this page-aligned object, so the
@@ -1280,6 +1700,61 @@ fn linker_rodata_end_address() -> usize {
 
 static VM: VmType = VmType::new();
 
+static PT_DIAG_CLASS: AtomicU64 = AtomicU64::new(0);
+static PT_DIAG_STAGE: AtomicU64 = AtomicU64::new(0);
+static PT_DIAG_CHUNK: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn configure_page_table_diagnostics(command_line: &str) {
+    if !swapper_content_checkpoints::ENABLED {
+        return;
+    }
+    PT_DIAG_CLASS.store(0, Ordering::Relaxed);
+    PT_DIAG_STAGE.store(0, Ordering::Relaxed);
+    PT_DIAG_CHUNK.store(0, Ordering::Relaxed);
+    let Some(value) = command_line
+        .split_ascii_whitespace()
+        .find_map(|token| token.strip_prefix("lkm2.ptdiag="))
+    else {
+        return;
+    };
+    let mut parts = value.split(',');
+    let class = match parts.next() {
+        Some("fixmap") => 1,
+        Some("linear") => 2,
+        Some("kernel") => 3,
+        _ => return,
+    };
+    let stage = match parts.next() {
+        Some("chunks") => 1,
+        Some("items") => 2,
+        _ => return,
+    };
+    let mut chunk = 0_u64;
+    if stage == 2 {
+        let Some(value) = parts.next() else {
+            return;
+        };
+        for byte in value.bytes() {
+            if !byte.is_ascii_digit() {
+                return;
+            }
+            chunk = match chunk
+                .checked_mul(10)
+                .and_then(|current| current.checked_add(u64::from(byte - b'0')))
+            {
+                Some(value) => value,
+                None => return,
+            };
+        }
+    }
+    if parts.next().is_some() {
+        return;
+    }
+    PT_DIAG_CHUNK.store(chunk, Ordering::Relaxed);
+    PT_DIAG_CLASS.store(class, Ordering::Relaxed);
+    PT_DIAG_STAGE.store(stage, Ordering::Release);
+}
+
 fn runtime_physical_address(virtual_address: usize) -> VmResult<usize> {
     let kernel_virtual = VM.kernel_map.virtual_address();
     let kernel_physical = VM.kernel_map.physical_address();
@@ -1291,6 +1766,29 @@ fn runtime_physical_address(virtual_address: usize) -> VmResult<usize> {
 
 fn memblock_error(_error: MemBlockError) -> VmSetupError {
     VmSetupError::PageTableCapacityExceeded
+}
+
+/// Return the first page that belongs in the direct map.  Platform firmware
+/// may reserve a contiguous prefix of the first Memory range as NOMAP (OpenSBI
+/// does so on QEMU virt).  Linux omits that prefix from for_each_mem_range();
+/// derive the equivalent boundary from the normalized Rust reservation set.
+fn linear_mappable_physical_start(memblock: &MemBlock) -> Option<usize> {
+    let (memory_base, _memory_end) = memblock.memory_ranges().next()?;
+    let mut cursor = usize::try_from(memory_base).ok()?;
+    for (base, end) in memblock.reserved_ranges() {
+        let base = usize::try_from(base).ok()?;
+        let end = usize::try_from(end).ok()?;
+        if end <= cursor {
+            continue;
+        }
+        if base > cursor {
+            break;
+        }
+        cursor = end;
+    }
+    cursor
+        .checked_add(PAGE_SIZE - 1)
+        .map(|end| end & !(PAGE_SIZE - 1))
 }
 
 fn map_swapper_region(
@@ -1337,138 +1835,29 @@ fn map_swapper_region(
     Ok(())
 }
 
-fn map_swapper_linear_segment(
-    mode: PagingMode,
-    physical_start: usize,
-    physical_end: usize,
-    excluded: &[(usize, usize); 2],
-) -> VmResult<()> {
-    let mut physical = physical_start;
-    while physical < physical_end {
-        let remaining = physical_end - physical;
-        let virtual_address = mode
-            .page_offset()
-            .checked_add(physical)
-            .ok_or(VmSetupError::AddressOverflow)?;
-        let chunk_end = physical
-            .checked_add(PMD_SIZE)
-            .ok_or(VmSetupError::AddressOverflow)?;
-        let chunk_has_hole = excluded
-            .iter()
-            .any(|(start, end)| physical < *end && *start < chunk_end);
-        if physical & (PMD_SIZE - 1) == 0 && remaining >= PMD_SIZE && !chunk_has_hole {
-            map_swapper_2m(
-                mode,
-                virtual_address,
-                physical,
-                PAGE_KERNEL_FLAGS,
-                &SWAPPER_PAGE_TABLE.linear_path,
-            )?;
-            physical += PMD_SIZE;
-        } else {
-            map_swapper_4k(
-                mode,
-                virtual_address,
-                physical,
-                PAGE_KERNEL_FLAGS,
-                &SWAPPER_PAGE_TABLE.linear_path,
-            )?;
-            physical = physical
-                .checked_add(PAGE_SIZE)
-                .ok_or(VmSetupError::AddressOverflow)?;
-        }
-    }
-    Ok(())
-}
-
 fn map_swapper_linear_memory(
     mode: PagingMode,
+    linear_physical_base: usize,
     physical_start: usize,
     physical_end: usize,
 ) -> VmResult<()> {
-    let kernel_physical = VM.kernel_map.physical_address();
-    let kernel_virtual = VM.kernel_map.virtual_address();
-    let text_start = linker_text_start_address();
-    let text_end = linker_text_end_address();
-    let rodata_start = linker_rodata_start_address();
-    let rodata_end = linker_rodata_end_address();
-    let physical_range = |start: usize, end: usize| -> VmResult<(usize, usize)> {
-        let start = kernel_physical
-            .checked_add(
-                start
-                    .checked_sub(kernel_virtual)
-                    .ok_or(VmSetupError::AddressOverflow)?,
-            )
-            .ok_or(VmSetupError::AddressOverflow)?
-            & !(PAGE_SIZE - 1);
-        let end = kernel_physical
-            .checked_add(
-                end.checked_sub(kernel_virtual)
-                    .ok_or(VmSetupError::AddressOverflow)?,
-            )
-            .ok_or(VmSetupError::AddressOverflow)?;
-        let end = end
-            .checked_add(PAGE_SIZE - 1)
-            .ok_or(VmSetupError::AddressOverflow)?
-            & !(PAGE_SIZE - 1);
-        Ok((start, end))
-    };
-    let (text_physical_start, text_physical_end) = physical_range(text_start, text_end)?;
-    let (rodata_physical_start, rodata_physical_end) = physical_range(rodata_start, rodata_end)?;
-    let excluded = [
-        (text_physical_start, text_physical_end),
-        (rodata_physical_start, rodata_physical_end),
-    ];
-
-    let has_hole = excluded
-        .iter()
-        .any(|(start, end)| physical_start < *end && *start < physical_end);
-    let mut cursor = physical_start;
-    for (excluded_start, excluded_end) in excluded {
-        let hole_start = core::cmp::max(cursor, excluded_start);
-        let hole_end = core::cmp::min(physical_end, excluded_end);
-        if hole_start >= hole_end {
-            continue;
-        }
-        if cursor < hole_start {
-            let virtual_start = mode
-                .page_offset()
-                .checked_add(cursor)
-                .ok_or(VmSetupError::AddressOverflow)?;
-            if has_hole {
-                map_swapper_linear_segment(mode, cursor, hole_start, &excluded)?;
-            } else {
-                map_swapper_region(
-                    mode,
-                    virtual_start,
-                    cursor,
-                    hole_start - cursor,
-                    PAGE_KERNEL_FLAGS,
-                    &SWAPPER_PAGE_TABLE.linear_path,
-                )?;
-            }
-        }
-        cursor = hole_end;
-    }
-    if cursor < physical_end {
-        let virtual_start = mode
-            .page_offset()
-            .checked_add(cursor)
-            .ok_or(VmSetupError::AddressOverflow)?;
-        if has_hole {
-            map_swapper_linear_segment(mode, cursor, physical_end, &excluded)?;
-        } else {
-            map_swapper_region(
-                mode,
-                virtual_start,
-                cursor,
-                physical_end - cursor,
-                PAGE_KERNEL_FLAGS,
-                &SWAPPER_PAGE_TABLE.linear_path,
-            )?;
-        }
-    }
-    Ok(())
+    let offset = physical_start
+        .checked_sub(linear_physical_base)
+        .ok_or(VmSetupError::AddressOverflow)?;
+    let virtual_start = mode
+        .page_offset()
+        .checked_add(offset)
+        .ok_or(VmSetupError::AddressOverflow)?;
+    map_swapper_region(
+        mode,
+        virtual_start,
+        physical_start,
+        physical_end
+            .checked_sub(physical_start)
+            .ok_or(VmSetupError::AddressOverflow)?,
+        PAGE_KERNEL_FLAGS,
+        &SWAPPER_PAGE_TABLE.linear_path,
+    )
 }
 
 fn map_swapper_kernel(mode: PagingMode) -> VmResult<()> {
@@ -1559,16 +1948,28 @@ fn setup_vm_final_inner(memblock: &mut MemBlock) -> VmResult<()> {
             .map_err(memblock_error)?;
     }
 
+    let linear_physical_base = memblock
+        .memory_ranges()
+        .next()
+        .and_then(|(base, _limit)| usize::try_from(base).ok())
+        .map(|base| base & PMD_MASK)
+        .ok_or(VmSetupError::InvalidMappingRange)?;
+    let linear_mappable_start =
+        linear_mappable_physical_start(memblock).ok_or(VmSetupError::InvalidMappingRange)?;
     let mut first_memory = None;
     for (base, end) in memblock.memory_ranges() {
-        let physical_start = usize::try_from(base).map_err(|_| VmSetupError::AddressOverflow)?;
+        let memory_start = usize::try_from(base).map_err(|_| VmSetupError::AddressOverflow)?;
         let physical_end = usize::try_from(end).map_err(|_| VmSetupError::AddressOverflow)?;
         if first_memory.is_none() {
             // PAGE_OFFSET is the fixed linear-map base; the physical memory
             // start is carried separately as the representative PA.
             first_memory = Some((mode.page_offset(), base));
         }
-        map_swapper_linear_memory(mode, physical_start, physical_end)?;
+        let physical_start = core::cmp::max(memory_start, linear_mappable_start);
+        if physical_start >= physical_end {
+            continue;
+        }
+        map_swapper_linear_memory(mode, linear_physical_base, physical_start, physical_end)?;
     }
 
     let dtb_pa = VM.early_dtb_pa.load(Ordering::Acquire) as usize;
@@ -1632,6 +2033,11 @@ fn setup_vm_final_inner(memblock: &mut MemBlock) -> VmResult<()> {
         .store(1, Ordering::Relaxed);
     pt_ops_set_late();
     swapper_checkpoints::swapper_online(SWAPPER_PAGE_TABLE.observation());
+    if swapper_content_checkpoints::ENABLED {
+        swapper_content_checkpoints::swapper_content(
+            SWAPPER_PAGE_TABLE.content_observation(memblock, mode),
+        );
+    }
     Ok(())
 }
 

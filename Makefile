@@ -8,7 +8,7 @@ ifeq ($(VERBOSE),1)
 RUN_QUIET :=
 endif
 
-.PHONY: all setup build derive run test test-derive test-smoke test-checkpoints checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-apply difftest checkpoint-diff-sv57 clean help
+.PHONY: all setup build derive run test test-derive test-smoke test-checkpoints checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-patch-swapper-content checkpoint-sibling-apply difftest checkpoint-diff-sv57 clean help
 
 all: build
 
@@ -23,7 +23,7 @@ test:
 	$(TOOLS_MAKE) test
 	$(IMPL_MAKE) test
 
-test-checkpoints checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-apply difftest checkpoint-diff-sv57:
+test-checkpoints checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-patch-swapper-content checkpoint-sibling-apply difftest checkpoint-diff-sv57:
 	$(IMPL_MAKE) $@
 
 build:
@@ -54,6 +54,7 @@ help:
 	@echo "  checkpoint-sibling-patch Generate and check the frozen Linux patch"
 	@echo "  checkpoint-sibling-patch-swapper Generate and check the incremental M1 Linux patch"
 	@echo "  checkpoint-sibling-patch-memblock Generate and check the incremental MemBlock Linux patch"
+	@echo "  checkpoint-sibling-patch-swapper-content Generate and check the implementation-only page-table content patch"
 	@echo "  checkpoint-sibling-apply Apply the reviewed patch or recognize its integrated commit"
 	@echo "  difftest Run strict lkm2/Linux Sv57 differential"
 	@echo "  checkpoint-diff-sv57 Compatibility alias for difftest"

@@ -41,6 +41,10 @@ class CheckpointMapping:
     sibling_branch: str
     sibling_patch_base: SiblingRevision
     sibling_integrated: SiblingRevision
+    # Content observations are deliberately outside Model IR.  They still use
+    # the same deterministic renderer/ABI, but their IDs and parameter schema
+    # are fixed by the mapping itself.
+    implementation_only: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +125,11 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         ) from exc
     data = _require_dict(raw, "mapping")
     expected = {"schema_version", "scope", "sibling", "milestones", "checkpoints"}
-    if set(data) != expected:
+    raw_implementation_only = data.get("implementation_only", False)
+    if type(raw_implementation_only) is not bool:
+        raise CheckpointGenerationError("implementation_only must be a boolean")
+    implementation_only = raw_implementation_only
+    if set(data) not in (expected, expected | {"implementation_only"}):
         raise CheckpointGenerationError(
             f"mapping fields must be exactly {', '.join(sorted(expected))}"
         )
@@ -129,11 +137,19 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         raise CheckpointGenerationError("unsupported checkpoint mapping schema_version")
 
     scope = _require_dict(data["scope"], "scope")
-    if set(scope) not in (
+    allowed_scope = (
         {"module", "root_object", "begins_after"},
         {"module", "root_object", "begins_after", "expression_blocks"},
-    ):
+        {"module", "root_object", "begins_after", "implementation_only"},
+        {"module", "root_object", "begins_after", "expression_blocks", "implementation_only"},
+    )
+    if set(scope) not in allowed_scope:
         raise CheckpointGenerationError("scope has missing or unknown fields")
+    if "implementation_only" in scope:
+        if type(scope["implementation_only"]) is not bool:
+            raise CheckpointGenerationError("scope.implementation_only must be a boolean")
+        if scope["implementation_only"]:
+            implementation_only = True
     module_text = _require_string(scope["module"], "scope.module")
     module = tuple(module_text.split("."))
     if any(not part.isidentifier() for part in module):
@@ -203,6 +219,21 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         raise CheckpointGenerationError(
             f"milestone {missing_milestones[0]!r} has no checkpoints"
         )
+    if implementation_only:
+        expected_content = (
+            ("SwapperPageTable.Content.fixmap", ("valid", "count", "digest_lo", "digest_hi")),
+            ("SwapperPageTable.Content.linear", ("valid", "count", "digest_lo", "digest_hi")),
+            ("SwapperPageTable.Content.kernel_walk_valid", ("valid",)),
+        )
+        actual_content = tuple((item.canonical_id, item.parameters) for item in checkpoints)
+        if actual_content != expected_content:
+            raise CheckpointGenerationError(
+                "implementation-only swapper content mapping must contain the fixed IDs and parameter order"
+            )
+        if milestones != ("swapper_content",):
+            raise CheckpointGenerationError(
+                "implementation-only swapper content mapping must use the swapper_content milestone"
+            )
     return CheckpointMapping(
         module=module,
         root_object=_require_string(scope["root_object"], "scope.root_object"),
@@ -214,6 +245,7 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         sibling_branch=_require_string(sibling["branch"], "sibling.branch"),
         sibling_patch_base=sibling_patch_base,
         sibling_integrated=sibling_integrated,
+        implementation_only=implementation_only,
     )
 
 
@@ -310,12 +342,19 @@ def _symbol(canonical_id: str, hash16: str) -> str:
 
 
 def build_checkpoints(
-    model: ModelIR,
+    model: ModelIR | None,
     mapping: CheckpointMapping,
     *,
     hash_function: Callable[[str], str] = _default_hash,
 ) -> tuple[Checkpoint, ...]:
-    extracted = set(extract_canonical_ids(model, mapping))
+    if mapping.implementation_only:
+        # There is intentionally no model expression to extract for this
+        # suite.  Keep the mapping as the single source of its fixed ABI.
+        extracted = {item.canonical_id for item in mapping.checkpoints}
+    else:
+        if model is None:
+            raise CheckpointGenerationError("model IR is required for model-derived mappings")
+        extracted = set(extract_canonical_ids(model, mapping))
     configured = {item.canonical_id for item in mapping.checkpoints}
     missing = sorted(extracted - configured)
     if missing:
@@ -431,6 +470,19 @@ pub(crate) struct SwapperObservation {
 }
 
 #[derive(Clone, Copy)]
+pub(crate) struct SwapperContentObservation {
+    pub(crate) fixmap_valid: u64,
+    pub(crate) fixmap_count: u64,
+    pub(crate) fixmap_digest_lo: u64,
+    pub(crate) fixmap_digest_hi: u64,
+    pub(crate) linear_valid: u64,
+    pub(crate) linear_count: u64,
+    pub(crate) linear_digest_lo: u64,
+    pub(crate) linear_digest_hi: u64,
+    pub(crate) kernel_walk_valid: u64,
+}
+
+#[derive(Clone, Copy)]
 pub(crate) struct MemBlockRangeObservation {
     pub(crate) count: u64,
     pub(crate) digest: u64,
@@ -440,6 +492,12 @@ pub(crate) struct MemBlockRangeObservation {
 
 def _observation_source(checkpoint: Checkpoint, parameter: str) -> str:
     tail = checkpoint.canonical_id.rsplit(".", 1)[-1]
+    if checkpoint.canonical_id.startswith("SwapperPageTable.Content."):
+        content_class = checkpoint.canonical_id.rsplit(".", 1)[-1]
+        prefix = "fixmap" if content_class == "fixmap" else "linear"
+        if content_class == "kernel_walk_valid":
+            return "content.kernel_walk_valid"
+        return f"content.{prefix}_{parameter}"
     if tail in {
         "kernel_map_established",
         "kernel_map_records_supported_paging_mode",
@@ -482,6 +540,7 @@ def _milestone_signature(milestone: str) -> str:
             "early_kernel: EarlyKernelObservation, early_dtb: EarlyDtbObservation, satp: u64"
         ),
         "swapper_online": "swapper: SwapperObservation",
+        "swapper_content": "content: SwapperContentObservation",
         "memblock_ready": "memory: MemBlockRangeObservation",
         "memblock_memory_online": "memory: MemBlockRangeObservation",
         "memblock_reserved_online": "reserved: MemBlockRangeObservation",
@@ -508,7 +567,7 @@ def _render_declarations(checkpoints: tuple[Checkpoint, ...]) -> str:
 
 
 def _render_empty_handlers(
-    checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool
+    checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool, include_content: bool
 ) -> str:
     lines = ["mod selected_handler {"]
     for index, item in enumerate(checkpoints):
@@ -525,12 +584,22 @@ def _render_empty_handlers(
                 "    pub(super) fn range(_kind: &[u8], _index: u64, _base: u64, _end: u64) {}",
             ]
         )
+    if include_content:
+        lines.extend(
+            [
+                "",
+                "    #[inline(always)]",
+                "    pub(super) fn content_chunk(_class: u64, _chunk: u64, _count: u64, _lo: u64, _hi: u64) {}",
+                "    #[inline(always)]",
+                "    pub(super) fn content_item(_class: u64, _index: u64, _va: u64, _pa: u64, _flags: u64) {}",
+            ]
+        )
     lines.append("}")
     return "\n".join(lines)
 
 
 def _render_debugcon_handlers(
-    checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool
+    checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool, include_content: bool
 ) -> str:
     lines = [
         "mod selected_handler {",
@@ -606,6 +675,31 @@ def _render_debugcon_handlers(
                 "    }",
             ]
         )
+    if include_content:
+        lines.extend(
+            [
+                "",
+                "    fn class_name(class: u64) -> &'static [u8] {",
+                "        match class { 1 => b\"fixmap\", 2 => b\"linear\", _ => b\"kernel\" }",
+                "    }",
+                "",
+                "    pub(super) fn content_chunk(class: u64, chunk: u64, count: u64, lo: u64, hi: u64) {",
+                "        write_bytes(b\"LKMPTC1 class=\"); write_bytes(class_name(class));",
+                "        write_bytes(b\" chunk=0x\"); write_hex(chunk);",
+                "        write_bytes(b\" count=0x\"); write_hex(count);",
+                "        write_bytes(b\" digest_lo=0x\"); write_hex(lo);",
+                "        write_bytes(b\" digest_hi=0x\"); write_hex(hi); write_byte(b'\\n');",
+                "    }",
+                "",
+                "    pub(super) fn content_item(class: u64, index: u64, va: u64, pa: u64, flags: u64) {",
+                "        write_bytes(b\"LKMPTI1 class=\"); write_bytes(class_name(class));",
+                "        write_bytes(b\" index=0x\"); write_hex(index);",
+                "        write_bytes(b\" va=0x\"); write_hex(va);",
+                "        write_bytes(b\" pa=0x\"); write_hex(pa);",
+                "        write_bytes(b\" flags=0x\"); write_hex(flags); write_byte(b'\\n');",
+                "    }",
+            ]
+        )
     lines.append("}")
     return "\n".join(lines)
 
@@ -652,6 +746,26 @@ pub(crate) fn reserved_range(index: u64, base: u64, end: u64) {
 """.rstrip()
 
 
+def _render_content_wrappers(mapping: CheckpointMapping, *, enabled: bool) -> str:
+    if not mapping.implementation_only:
+        return ""
+    enabled_literal = "true" if enabled else "false"
+    return f"""
+
+pub(crate) const ENABLED: bool = {enabled_literal};
+
+#[inline(always)]
+pub(crate) fn content_chunk(class: u64, chunk: u64, count: u64, lo: u64, hi: u64) {{
+    selected_handler::content_chunk(class, chunk, count, lo, hi);
+}}
+
+#[inline(always)]
+pub(crate) fn content_item(class: u64, index: u64, va: u64, pa: u64, flags: u64) {{
+    selected_handler::content_item(class, index, va, pa, flags);
+}}
+""".rstrip()
+
+
 def render_rust(
     checkpoints: tuple[Checkpoint, ...],
     mapping: CheckpointMapping,
@@ -662,10 +776,11 @@ def render_rust(
             f"unknown CHECKPOINT_HANDLER {handler!r}; expected empty or debugcon"
         )
     include_ranges = mapping.root_object == "MemBlock"
+    include_content = mapping.implementation_only
     handlers = (
-        _render_empty_handlers(checkpoints, include_ranges=include_ranges)
+        _render_empty_handlers(checkpoints, include_ranges=include_ranges, include_content=include_content)
         if handler == "empty"
-        else _render_debugcon_handlers(checkpoints, include_ranges=include_ranges)
+        else _render_debugcon_handlers(checkpoints, include_ranges=include_ranges, include_content=include_content)
     )
     return (
         "// @generated by checkpointgen; do not edit.\n"
@@ -679,6 +794,7 @@ def render_rust(
         + "\n"
         + _render_wrappers(checkpoints, mapping.milestones)
         + _render_range_wrappers(mapping)
+        + _render_content_wrappers(mapping, enabled=handler == "debugcon")
         + "\n"
     )
 
