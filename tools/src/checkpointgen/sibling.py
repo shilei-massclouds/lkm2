@@ -117,9 +117,13 @@ def validate_sibling(sibling: Path, mapping: CheckpointMapping) -> None:
         raise CheckpointGenerationError("sibling worktree is not clean")
     commit = _git(sibling, "rev-parse", "HEAD")
     revisions = {
-        mapping.sibling_patch_base.commit: (mapping.sibling_patch_base, "patch-base"),
-        mapping.sibling_integrated.commit: (mapping.sibling_integrated, "integrated"),
+        mapping.sibling_patch_base.commit: (mapping.sibling_patch_base, "patch-base")
     }
+    if mapping.sibling_integrated.commit is not None:
+        revisions[mapping.sibling_integrated.commit] = (
+            mapping.sibling_integrated,
+            "integrated",
+        )
     current = revisions.get(commit)
     if current is None:
         raise CheckpointGenerationError(
@@ -143,7 +147,10 @@ def validate_differential_sibling(
     status = _git(sibling, "status", "--short")
     if any(line and line[0] not in {" ", "?"} for line in status.splitlines()):
         raise CheckpointGenerationError("sibling checkpoint changes must remain unstaged")
-    if commit == mapping.sibling_integrated.commit:
+    if (
+        mapping.sibling_integrated.commit is not None
+        and commit == mapping.sibling_integrated.commit
+    ):
         if status:
             raise CheckpointGenerationError(
                 "integrated sibling checkpoint worktree must be clean"
@@ -185,7 +192,10 @@ def validate_incremental_differential_sibling(
         raise CheckpointGenerationError(f"sibling path does not exist: {sibling}")
     _validate_branch(sibling, mapping)
     head = _git(sibling, "rev-parse", "HEAD")
-    if head == mapping.sibling_integrated.commit:
+    if (
+        mapping.sibling_integrated.commit is not None
+        and head == mapping.sibling_integrated.commit
+    ):
         status_lines = _git(sibling, "status", "--short").splitlines()
         if status_lines:
             raise CheckpointGenerationError(
@@ -240,6 +250,77 @@ def validate_incremental_differential_sibling(
     return "reviewed-swapper-patch"
 
 
+def validate_memblock_differential_sibling(
+    sibling: Path,
+    mapping: CheckpointMapping,
+    checkpoints: tuple[Checkpoint, ...],
+) -> str | None:
+    """Recognize the exact MemBlock patch layered on the M1 integration."""
+
+    if mapping.root_object != "MemBlock":
+        raise CheckpointGenerationError("MemBlock validation requires MemBlock mapping")
+    if not sibling.is_dir():
+        raise CheckpointGenerationError(f"sibling path does not exist: {sibling}")
+    _validate_branch(sibling, mapping)
+    head = _git(sibling, "rev-parse", "HEAD")
+    if (
+        mapping.sibling_integrated.commit is not None
+        and head == mapping.sibling_integrated.commit
+    ):
+        status_lines = _git(sibling, "status", "--short").splitlines()
+        if status_lines:
+            raise CheckpointGenerationError(
+                "integrated sibling MemBlock checkpoint worktree must be clean"
+            )
+        _validate_worktree_files(sibling, mapping.sibling_integrated, "integrated")
+        return "integrated-memblock"
+    if head != mapping.sibling_patch_base.commit:
+        return None
+    status_lines = _git(sibling, "status", "--short").splitlines()
+    if not status_lines:
+        return None
+    if any(line and line[0] not in {" ", "?"} for line in status_lines):
+        raise CheckpointGenerationError("sibling checkpoint changes must remain unstaged")
+    expected_paths = {
+        "arch/riscv/mm/init.c",
+        "arch/riscv/mm/lkm2_checkpoint_handler.c",
+        "arch/riscv/mm/lkm2_checkpoints.inc",
+    }
+    changed_paths = {line[3:] for line in status_lines if len(line) >= 4}
+    if changed_paths != expected_paths:
+        raise CheckpointGenerationError(
+            "sibling must contain exactly the reviewed, unstaged MemBlock checkpoint patch"
+        )
+
+    baseline = mapping.sibling_patch_base
+    init_path = "arch/riscv/mm/init.c"
+    include_path = "arch/riscv/mm/lkm2_checkpoints.inc"
+    handler_path = "arch/riscv/mm/lkm2_checkpoint_handler.c"
+    expected = {
+        init_path: _modify_init_memblock_incremental(
+            _read_revision_file(sibling, baseline, init_path)
+        ),
+        include_path: _memblock_include_append(
+            _read_revision_file(sibling, baseline, include_path), checkpoints, mapping
+        ),
+        handler_path: _memblock_handler_append(
+            _read_revision_file(sibling, baseline, handler_path), checkpoints
+        ),
+    }
+    for relative, content in expected.items():
+        try:
+            actual = (sibling / relative).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise CheckpointGenerationError(
+                f"cannot read sibling MemBlock patch anchor {relative}: {exc}"
+            ) from exc
+        if actual != content:
+            raise CheckpointGenerationError(
+                f"sibling MemBlock patch content differs from generated {relative}"
+            )
+    return "reviewed-memblock-patch"
+
+
 def _c_parameters(item: Checkpoint, *, names: bool = True) -> str:
     return ", ".join(
         f"uint64_t {'arg' + str(index) if names else ''}".rstrip()
@@ -289,6 +370,21 @@ def _render_milestone(
         "swapper_online": (
             "\tstruct lkm2_cp_swapper swapper = lkm2_cp_observe_swapper();"
         ),
+        "memblock_ready": (
+            "\tstruct lkm2_cp_memblock memory = lkm2_cp_observe_memblock(&memblock.memory);\n"
+            "\tlkm2_cp_emit_ranges(&memory, true);"
+        ),
+        "memblock_memory_online": (
+            "\tstruct lkm2_cp_memblock memory = lkm2_cp_observe_memblock(&memblock.memory);"
+        ),
+        "memblock_reserved_online": (
+            "\tstruct lkm2_cp_memblock reserved = lkm2_cp_observe_reserved();\n"
+            "\tlkm2_cp_emit_ranges(&reserved, false);"
+        ),
+        "memblock_online": (
+            "\tstruct lkm2_cp_memblock memory = lkm2_cp_observe_memblock(&memblock.memory);\n"
+            "\tstruct lkm2_cp_memblock reserved = lkm2_cp_observe_reserved();"
+        ),
     }
     lines = [f"static void __init lkm2_checkpoint_{milestone}(void)", "{", observation_lines[milestone]]
     for item in checkpoints:
@@ -300,9 +396,183 @@ def _render_milestone(
     return "\n".join(lines)
 
 
+def _render_memblock_linux_include(
+    checkpoints: tuple[Checkpoint, ...], mapping: CheckpointMapping
+) -> str:
+    milestones = "\n\n".join(
+        _render_milestone(name, checkpoints) for name in mapping.milestones
+    )
+    return f"""/* @generated by lkm2 checkpointgen; MemBlock incremental fragment. */
+#include <linux/types.h>
+
+{_render_c_declarations(checkpoints)}
+extern void lkm2_checkpoint_memory_range(uint64_t index, uint64_t base, uint64_t end);
+extern void lkm2_checkpoint_reserved_range(uint64_t index, uint64_t base, uint64_t end);
+
+#define LKM2_CP_MAX_MEMBLOCK_RANGES 128
+#define LKM2_CP_RANGE_DIGEST_OFFSET 0xcbf29ce484222325ULL
+#define LKM2_CP_RANGE_DIGEST_PRIME 0x100000001b3ULL
+
+struct lkm2_cp_range {{
+	uint64_t base, end;
+}};
+
+struct lkm2_cp_memblock {{
+	uint64_t count, digest, stored;
+	struct lkm2_cp_range ranges[LKM2_CP_MAX_MEMBLOCK_RANGES];
+}};
+
+static uint64_t __init lkm2_cp_digest_word(uint64_t digest, uint64_t value)
+{{
+	int shift;
+
+	for (shift = 56; shift >= 0; shift -= 8) {{
+		digest ^= (value >> shift) & 0xff;
+		digest *= LKM2_CP_RANGE_DIGEST_PRIME;
+	}}
+	return digest;
+}}
+
+static struct lkm2_cp_memblock __init
+lkm2_cp_observe_memblock(const struct memblock_type *type)
+{{
+	struct lkm2_cp_memblock result = {{
+		.digest = LKM2_CP_RANGE_DIGEST_OFFSET,
+	}};
+	unsigned long i, j;
+
+	if (type->cnt > LKM2_CP_MAX_MEMBLOCK_RANGES) {{
+		result.count = ~0ULL;
+		return result;
+	}}
+	for (i = 0; i < type->cnt; i++) {{
+		uint64_t base = type->regions[i].base;
+		uint64_t end = base + type->regions[i].size;
+
+		if (!type->regions[i].size)
+			continue;
+		if (end < base) {{
+			result.count = ~0ULL;
+			result.stored = 0;
+			return result;
+		}}
+		j = result.stored;
+		while (j && result.ranges[j - 1].base > base) {{
+			result.ranges[j] = result.ranges[j - 1];
+			j--;
+		}}
+		result.ranges[j].base = base;
+		result.ranges[j].end = end;
+		result.stored++;
+	}}
+	for (i = 0, j = 0; i < result.stored; i++) {{
+		if (j && result.ranges[i].base <= result.ranges[j - 1].end) {{
+			if (result.ranges[i].end > result.ranges[j - 1].end)
+				result.ranges[j - 1].end = result.ranges[i].end;
+			continue;
+		}}
+		result.ranges[j++] = result.ranges[i];
+	}}
+	result.stored = j;
+	result.count = j;
+	for (i = 0; i < result.stored; i++) {{
+		result.digest = lkm2_cp_digest_word(result.digest, result.ranges[i].base);
+		result.digest = lkm2_cp_digest_word(result.digest, result.ranges[i].end);
+	}}
+	return result;
+}}
+
+static bool __init
+lkm2_cp_append_projected(struct memblock_region *regions, unsigned long *count,
+			 uint64_t base, uint64_t size, uint64_t excluded_base,
+			 uint64_t excluded_end)
+{{
+	uint64_t end = base + size;
+
+	if (!size)
+		return true;
+	if (end < base)
+		return false;
+	if (end <= excluded_base || base >= excluded_end) {{
+		if (*count == LKM2_CP_MAX_MEMBLOCK_RANGES)
+			return false;
+		regions[*count].base = base;
+		regions[(*count)++].size = size;
+		return true;
+	}}
+	if (base < excluded_base) {{
+		if (*count == LKM2_CP_MAX_MEMBLOCK_RANGES)
+			return false;
+		regions[*count].base = base;
+		regions[(*count)++].size = excluded_base - base;
+	}}
+	if (end > excluded_end) {{
+		if (*count == LKM2_CP_MAX_MEMBLOCK_RANGES)
+			return false;
+		regions[*count].base = excluded_end;
+		regions[(*count)++].size = end - excluded_end;
+	}}
+	return true;
+}}
+
+static struct lkm2_cp_memblock __init lkm2_cp_observe_reserved(void)
+{{
+	struct memblock_region projected[LKM2_CP_MAX_MEMBLOCK_RANGES] = {{ }};
+	struct memblock_type type = {{ .regions = projected }};
+	uint64_t kernel_base = IS_ENABLED(CONFIG_XIP_KERNEL) ?
+		__pa_symbol(&_sdata) : __pa_symbol(&_start);
+	uint64_t kernel_end = __pa_symbol(&_end);
+	struct memblock_region *region;
+
+	if (IS_ENABLED(CONFIG_64BIT) && IS_ENABLED(CONFIG_STRICT_KERNEL_RWX))
+		kernel_end = ALIGN(kernel_end, PMD_SIZE);
+	for_each_reserved_mem_region(region) {{
+		if (!lkm2_cp_append_projected(projected, &type.cnt,
+					       region->base, region->size,
+					       kernel_base, kernel_end)) {{
+			type.cnt = LKM2_CP_MAX_MEMBLOCK_RANGES + 1;
+			break;
+		}}
+	}}
+	if (type.cnt <= LKM2_CP_MAX_MEMBLOCK_RANGES) {{
+		for_each_mem_region(region) {{
+			if (!memblock_is_nomap(region))
+				continue;
+			if (!lkm2_cp_append_projected(projected, &type.cnt,
+						       region->base, region->size,
+						       kernel_base, kernel_end)) {{
+				type.cnt = LKM2_CP_MAX_MEMBLOCK_RANGES + 1;
+				break;
+			}}
+		}}
+	}}
+	return lkm2_cp_observe_memblock(&type);
+}}
+
+static void __init
+lkm2_cp_emit_ranges(const struct lkm2_cp_memblock *observation, bool memory)
+{{
+	uint64_t i;
+
+	for (i = 0; i < observation->stored; i++) {{
+		if (memory)
+			lkm2_checkpoint_memory_range(i, observation->ranges[i].base,
+						 observation->ranges[i].end);
+		else
+			lkm2_checkpoint_reserved_range(i, observation->ranges[i].base,
+						   observation->ranges[i].end);
+	}}
+}}
+
+{milestones}
+"""
+
+
 def render_linux_include(
     checkpoints: tuple[Checkpoint, ...], mapping: CheckpointMapping
 ) -> str:
+    if mapping.root_object == "MemBlock":
+        return _render_memblock_linux_include(checkpoints, mapping)
     milestones = "\n\n".join(
         _render_milestone(name, checkpoints) for name in mapping.milestones
     )
@@ -491,7 +761,9 @@ static struct lkm2_cp_early_dtb __init lkm2_cp_observe_early_dtb(void)
 """
 
 
-def render_linux_handler(checkpoints: tuple[Checkpoint, ...]) -> str:
+def render_linux_handler(
+    checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool = False
+) -> str:
     lines = [
         "// SPDX-License-Identifier: GPL-2.0-only",
         "/* @generated by lkm2 checkpointgen; fixed raw SBI DBCN handler. */",
@@ -543,6 +815,23 @@ def render_linux_handler(checkpoints: tuple[Checkpoint, ...]) -> str:
         if not args:
             pass
         lines.extend(["\tlkm2_cp_write_byte('\\n');", "}"])
+    if include_ranges:
+        for kind in ("memory", "reserved"):
+            lines.extend(
+                [
+                    "",
+                    f"void lkm2_checkpoint_{kind}_range(uint64_t index, uint64_t base, uint64_t end)",
+                    "{",
+                    f'\tlkm2_cp_write_bytes("LKMRNG1 kind={kind} index=0x");',
+                    "\tlkm2_cp_write_hex(index);",
+                    '\tlkm2_cp_write_bytes(" base=0x");',
+                    "\tlkm2_cp_write_hex(base);",
+                    '\tlkm2_cp_write_bytes(" end=0x");',
+                    "\tlkm2_cp_write_hex(end);",
+                    "\tlkm2_cp_write_byte('\\n');",
+                    "}",
+                ]
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -620,6 +909,22 @@ def _modify_init_swapper_incremental(source: str) -> str:
     )
 
 
+def _modify_init_memblock_incremental(source: str) -> str:
+    """Observe memblock at setup_bootmem completion, before final page tables."""
+
+    return _replace_once(
+        source,
+        "\tsetup_bootmem();\n\tsetup_vm_final();",
+        "\tsetup_bootmem();\n"
+        "\tlkm2_checkpoint_memblock_ready();\n"
+        "\tlkm2_checkpoint_memblock_memory_online();\n"
+        "\tlkm2_checkpoint_memblock_reserved_online();\n"
+        "\tlkm2_checkpoint_memblock_online();\n"
+        "\tsetup_vm_final();",
+        "MemBlock setup boundary",
+    )
+
+
 def _swapper_include_append(
     existing: str, checkpoints: tuple[Checkpoint, ...], mapping: CheckpointMapping
 ) -> str:
@@ -648,6 +953,25 @@ def _swapper_handler_append(
     """Append swapper handler functions without duplicating shared helpers."""
 
     rendered = render_linux_handler(checkpoints)
+    first_function = rendered.index("\nvoid lkm_checkpoint_") + 1
+    return existing.rstrip() + "\n\n" + rendered[first_function:].rstrip() + "\n"
+
+
+def _memblock_include_append(
+    existing: str, checkpoints: tuple[Checkpoint, ...], mapping: CheckpointMapping
+) -> str:
+    """Append the independent MemBlock observation fragment."""
+
+    rendered = render_linux_include(checkpoints, mapping)
+    return existing.rstrip() + "\n\n" + rendered.rstrip() + "\n"
+
+
+def _memblock_handler_append(
+    existing: str, checkpoints: tuple[Checkpoint, ...]
+) -> str:
+    """Append MemBlock handlers while reusing the frozen raw DBCN helpers."""
+
+    rendered = render_linux_handler(checkpoints, include_ranges=True)
     first_function = rendered.index("\nvoid lkm_checkpoint_") + 1
     return existing.rstrip() + "\n\n" + rendered[first_function:].rstrip() + "\n"
 
@@ -721,7 +1045,7 @@ def generate_sibling_patch(
     init_path = "arch/riscv/mm/init.c"
     makefile_path = "arch/riscv/mm/Makefile"
 
-    if mapping.root_object == "SwapperPageTable":
+    if mapping.root_object in {"SwapperPageTable", "MemBlock"}:
         # The sibling repository is already at the integrated VM checkpoint
         # commit.  M1 is deliberately an incremental patch: preserve the
         # existing 28-record protocol and add only the final observation.
@@ -731,9 +1055,14 @@ def generate_sibling_patch(
         handler_path = "arch/riscv/mm/lkm2_checkpoint_handler.c"
         include_before = _read_revision_file(sibling, baseline, include_path)
         handler_before = _read_revision_file(sibling, baseline, handler_path)
-        init_after = _modify_init_swapper_incremental(init_before)
-        include_after = _swapper_include_append(include_before, checkpoints, mapping)
-        handler_after = _swapper_handler_append(handler_before, checkpoints)
+        if mapping.root_object == "SwapperPageTable":
+            init_after = _modify_init_swapper_incremental(init_before)
+            include_after = _swapper_include_append(include_before, checkpoints, mapping)
+            handler_after = _swapper_handler_append(handler_before, checkpoints)
+        else:
+            init_after = _modify_init_memblock_incremental(init_before)
+            include_after = _memblock_include_append(include_before, checkpoints, mapping)
+            handler_after = _memblock_handler_append(handler_before, checkpoints)
         generated = {
             init_path: init_after,
             include_path: include_after,

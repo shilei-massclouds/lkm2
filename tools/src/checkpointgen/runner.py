@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections import OrderedDict
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
@@ -19,11 +20,18 @@ from .generator import CheckpointGenerationError, build_checkpoints, load_mappin
 from .sibling import (
     validate_differential_sibling,
     validate_incremental_differential_sibling,
+    validate_memblock_differential_sibling,
 )
 
 
 RECORD_PREFIX = "LKMCP1 "
+RANGE_RECORD_PREFIX = "LKMRNG1 "
 FIELD = re.compile(r"([a-zA-Z0-9_.-]+)=([^ ]+)")
+CHECKPOINT_SUITES = (
+    ("vm.json", "checkpoints.manifest.json"),
+    ("memblock.json", "memblock_checkpoints.manifest.json"),
+    ("swapper.json", "swapper_checkpoints.manifest.json"),
+)
 CPU_ARGUMENTS = {
     "sv57": (),
     "sv48": ("-cpu", "rv64,sv57=false"),
@@ -34,6 +42,12 @@ EXPECTED_MODE = {"sv57": 10, "sv48": 9, "sv39": 8}
 
 class CheckpointRunError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class CollectedOutput:
+    checkpoints: tuple[str, ...]
+    ranges: tuple[str, ...]
 
 
 def parse_record(line: str) -> tuple[str, str, tuple[tuple[str, int], ...]]:
@@ -59,6 +73,24 @@ def parse_record(line: str) -> tuple[str, str, tuple[tuple[str, int], ...]]:
     return canonical_id, hash16, tuple(parameters)
 
 
+def parse_range_record(line: str) -> tuple[str, int, int, int]:
+    line = line.strip()
+    if not line.startswith(RANGE_RECORD_PREFIX):
+        raise CheckpointRunError("not a MemBlock range record")
+    fields = FIELD.findall(line[len(RANGE_RECORD_PREFIX) :])
+    if tuple(key for key, _ in fields) != ("kind", "index", "base", "end"):
+        raise CheckpointRunError(f"malformed MemBlock range record: {line}")
+    kind = fields[0][1]
+    if kind not in {"memory", "reserved"}:
+        raise CheckpointRunError(f"unknown MemBlock range kind {kind!r}")
+    values = []
+    for key, value in fields[1:]:
+        if re.fullmatch(r"0x[0-9a-f]{16}", value) is None:
+            raise CheckpointRunError(f"invalid MemBlock range {key} for {kind}")
+        values.append(int(value, 16))
+    return kind, values[0], values[1], values[2]
+
+
 def _read_manifest(path: Path) -> tuple[dict[str, object], ...]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -70,9 +102,16 @@ def _read_manifest(path: Path) -> tuple[dict[str, object], ...]:
     return tuple(checkpoints)
 
 
+def _read_manifests(implementation: Path) -> tuple[tuple[dict[str, object], ...], ...]:
+    return tuple(
+        _read_manifest(implementation / "build" / manifest)
+        for _mapping, manifest in CHECKPOINT_SUITES
+    )
+
+
 def _collect_qemu(
-    command: list[str], expected_count: int, timeout: float, *, allow_extra: bool = False
-) -> tuple[str, ...]:
+    command: list[str], expected_count: int, timeout: float
+) -> CollectedOutput:
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -85,6 +124,7 @@ def _collect_qemu(
     deadline = time.monotonic() + timeout
     pending = b""
     records: list[str] = []
+    ranges: list[str] = []
     transcript: list[str] = []
     try:
         while len(records) < expected_count:
@@ -107,11 +147,11 @@ def _collect_qemu(
                 line = raw.decode("utf-8", errors="replace").rstrip("\r")
                 transcript.append(line)
                 if line.startswith(RECORD_PREFIX):
-                    if len(records) >= expected_count and allow_extra:
-                        continue
                     records.append(line)
                     if len(records) > expected_count:
                         raise CheckpointRunError("QEMU emitted too many checkpoint records")
+                elif line.startswith(RANGE_RECORD_PREFIX):
+                    ranges.append(line)
     except Exception as exc:
         if isinstance(exc, CheckpointRunError):
             detail = "\n".join(transcript[-20:])
@@ -126,7 +166,7 @@ def _collect_qemu(
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=2)
-    return tuple(records)
+    return CollectedOutput(tuple(records), tuple(ranges))
 
 
 def validate_records(
@@ -168,6 +208,92 @@ def validate_records(
     return parsed
 
 
+def _range_digest(ranges: tuple[tuple[int, int], ...]) -> int:
+    digest = 0xCBF2_9CE4_8422_2325
+    for base, end in ranges:
+        for byte in (*base.to_bytes(8, "big"), *end.to_bytes(8, "big")):
+            digest ^= byte
+            digest = (digest * 0x100_0000_01B3) & ((1 << 64) - 1)
+    return digest
+
+
+def validate_range_records(
+    lines: tuple[str, ...],
+    checkpoints: tuple[tuple[str, str, tuple[tuple[str, int], ...]], ...],
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    grouped: dict[str, list[tuple[int, int, int]]] = {"memory": [], "reserved": []}
+    for line in lines:
+        kind, index, base, end = parse_range_record(line)
+        grouped[kind].append((index, base, end))
+
+    expected_values: dict[str, dict[str, set[int]]] = {
+        "memory": {"count": set(), "digest": set()},
+        "reserved": {"count": set(), "digest": set()},
+    }
+    for _canonical_id, _hash16, parameters in checkpoints:
+        for key, value in parameters:
+            for kind in expected_values:
+                prefix = f"{kind}_"
+                if key == prefix + "count":
+                    expected_values[kind]["count"].add(value)
+                elif key == prefix + "digest":
+                    expected_values[kind]["digest"].add(value)
+
+    result: dict[str, tuple[tuple[int, int], ...]] = {}
+    for kind, entries in grouped.items():
+        entries.sort()
+        indexes = tuple(index for index, _base, _end in entries)
+        if indexes != tuple(range(len(entries))):
+            raise CheckpointRunError(f"{kind} range indexes are not contiguous from zero")
+        ranges = tuple((base, end) for _index, base, end in entries)
+        for index, (base, end) in enumerate(ranges):
+            if base >= end:
+                raise CheckpointRunError(f"{kind} range {index} is empty or inverted")
+            if index and ranges[index - 1][1] >= base:
+                raise CheckpointRunError(
+                    f"{kind} ranges {index - 1} and {index} are not normalized"
+                )
+        counts = expected_values[kind]["count"]
+        digests = expected_values[kind]["digest"]
+        if len(counts) != 1 or len(digests) != 1:
+            raise CheckpointRunError(f"{kind} checkpoint summaries are missing or inconsistent")
+        expected_count = next(iter(counts))
+        expected_digest = next(iter(digests))
+        if len(ranges) != expected_count:
+            raise CheckpointRunError(
+                f"{kind} range count {len(ranges)} != checkpoint count {expected_count}"
+            )
+        actual_digest = _range_digest(ranges)
+        if actual_digest != expected_digest:
+            raise CheckpointRunError(
+                f"{kind} range digest 0x{actual_digest:016x} != checkpoint digest "
+                f"0x{expected_digest:016x}"
+            )
+        result[kind] = ranges
+    return result
+
+
+def _format_ranges(ranges: tuple[tuple[int, int], ...]) -> str:
+    return "[" + ", ".join(f"[0x{base:016x}, 0x{end:016x})" for base, end in ranges) + "]"
+
+
+def _range_mismatch(
+    kind: str,
+    left: tuple[tuple[int, int], ...],
+    right: tuple[tuple[int, int], ...],
+) -> str:
+    mismatch = min(len(left), len(right))
+    for index, (left_range, right_range) in enumerate(zip(left, right)):
+        if left_range != right_range:
+            mismatch = index
+            break
+    return (
+        f"{kind} normalized range mismatch at index {mismatch}:\n"
+        f"lkm2 {kind}: {_format_ranges(left)}\n"
+        f"linux {kind}: {_format_ranges(right)}"
+    )
+
+
 def run_self(repository: Path, mode_name: str, timeout: float) -> None:
     implementation = repository / "impl"
     build = subprocess.run(
@@ -179,11 +305,8 @@ def run_self(repository: Path, mode_name: str, timeout: float) -> None:
     )
     if build.returncode != 0:
         raise CheckpointRunError(f"lkm2 debugcon build failed:\n{build.stdout}")
-    manifest = _read_manifest(implementation / "build" / "checkpoints.manifest.json")
-    swapper_manifest = _read_manifest(
-        implementation / "build" / "swapper_checkpoints.manifest.json"
-    )
-    combined_manifest = (*manifest, *swapper_manifest)
+    manifests = _read_manifests(implementation)
+    combined_manifest = tuple(item for manifest in manifests for item in manifest)
     command = [
         "qemu-system-riscv64",
         "-machine",
@@ -201,10 +324,14 @@ def run_self(repository: Path, mode_name: str, timeout: float) -> None:
         "-kernel",
         str(implementation / "build" / "lkm2.bin"),
     ]
-    records = _collect_qemu(command, len(combined_manifest), timeout)
-    split = len(manifest)
-    validate_records(records[:split], manifest, mode_name)
-    validate_records(records[split:], swapper_manifest, mode_name)
+    output = _collect_qemu(command, len(combined_manifest), timeout)
+    parsed: list[tuple[str, str, tuple[tuple[str, int], ...]]] = []
+    offset = 0
+    for manifest in manifests:
+        lines = output.checkpoints[offset : offset + len(manifest)]
+        parsed.extend(validate_records(lines, manifest, mode_name))
+        offset += len(manifest)
+    validate_range_records(output.ranges, tuple(parsed))
 
 
 def _verify_sibling_pc_relative(sibling: Path) -> None:
@@ -249,14 +376,13 @@ def run_diff(
     repository: Path, sibling: Path, timeout: float, build_sibling: bool
 ) -> str:
     try:
-        with (repository / "tools" / "checkpoints" / "vm.json").open(
-            encoding="utf-8"
-        ) as stream:
-            mapping = load_mapping(stream)
-        with (repository / "tools" / "checkpoints" / "swapper.json").open(
-            encoding="utf-8"
-        ) as stream:
-            swapper_mapping = load_mapping(stream)
+        mappings = []
+        for mapping_name, _manifest_name in CHECKPOINT_SUITES:
+            with (repository / "tools" / "checkpoints" / mapping_name).open(
+                encoding="utf-8"
+            ) as stream:
+                mappings.append(load_mapping(stream))
+        mapping, memblock_mapping, swapper_mapping = mappings
     except (OSError, UnicodeError, CheckpointGenerationError) as exc:
         raise CheckpointRunError(f"invalid sibling differential state: {exc}") from exc
     if build_sibling:
@@ -296,20 +422,27 @@ def run_diff(
             encoding="utf-8"
         ) as stream:
             model = load_model_ir(stream)
+        memblock_checkpoints = build_checkpoints(model, memblock_mapping)
         swapper_checkpoints = build_checkpoints(model, swapper_mapping)
-        sibling_state = validate_incremental_differential_sibling(
-            sibling, swapper_mapping, swapper_checkpoints
+        sibling_state = validate_memblock_differential_sibling(
+            sibling, memblock_mapping, memblock_checkpoints
         )
         if sibling_state is None:
+            swapper_state = validate_incremental_differential_sibling(
+                sibling, swapper_mapping, swapper_checkpoints
+            )
+            if swapper_state is not None:
+                raise CheckpointGenerationError(
+                    "sibling has VM/Swapper checkpoints but no MemBlock review patch"
+                )
             sibling_state = validate_differential_sibling(sibling, mapping)
+            raise CheckpointGenerationError(
+                f"sibling state {sibling_state!r} has no MemBlock review patch"
+            )
     except (OSError, UnicodeError, CheckpointGenerationError) as exc:
         raise CheckpointRunError(f"invalid sibling differential state: {exc}") from exc
-    swapper_enabled = sibling_state in {"reviewed-swapper-patch", "integrated-swapper"}
-    manifest = _read_manifest(implementation / "build" / "checkpoints.manifest.json")
-    swapper_manifest = _read_manifest(
-        implementation / "build" / "swapper_checkpoints.manifest.json"
-    )
-    expected_manifest = (*manifest, *swapper_manifest) if swapper_enabled else manifest
+    manifests = _read_manifests(implementation)
+    expected_manifest = tuple(item for manifest in manifests for item in manifest)
     common = [
         "qemu-system-riscv64",
         "-machine",
@@ -324,24 +457,24 @@ def run_diff(
         "-append",
         "earlycon=sbi",
     ]
-    lkm_lines = _collect_qemu(
+    lkm_output = _collect_qemu(
         [*common, "-kernel", str(implementation / "build" / "lkm2.bin")],
         len(expected_manifest),
         timeout,
-        allow_extra=not swapper_enabled,
     )
-    linux_lines = _collect_qemu(
+    linux_output = _collect_qemu(
         [*common, "-kernel", str(image)], len(expected_manifest), timeout
     )
-    if swapper_enabled:
-        split = len(manifest)
-        validate_records(lkm_lines[:split], manifest, "sv57")
-        validate_records(lkm_lines[split:], swapper_manifest, "sv57")
-        validate_records(linux_lines[:split], manifest, "sv57")
-        validate_records(linux_lines[split:], swapper_manifest, "sv57")
-    lkm_records = validate_records(lkm_lines, expected_manifest, "sv57")
-    linux_records = validate_records(linux_lines, expected_manifest, "sv57")
+    lkm_records = validate_records(lkm_output.checkpoints, expected_manifest, "sv57")
+    linux_records = validate_records(linux_output.checkpoints, expected_manifest, "sv57")
+    lkm_ranges = validate_range_records(lkm_output.ranges, lkm_records)
+    linux_ranges = validate_range_records(linux_output.ranges, linux_records)
     if lkm_records != linux_records:
+        for kind in ("memory", "reserved"):
+            if lkm_ranges[kind] != linux_ranges[kind]:
+                raise CheckpointRunError(
+                    _range_mismatch(kind, lkm_ranges[kind], linux_ranges[kind])
+                )
         for index, (left, right) in enumerate(
             zip(lkm_records, linux_records, strict=True)
         ):
@@ -351,6 +484,11 @@ def run_diff(
                     f"lkm2: {left!r}\nlinux: {right!r}"
                 )
         raise CheckpointRunError("Sv57 differential output differs")
+    for kind in ("memory", "reserved"):
+        if lkm_ranges[kind] != linux_ranges[kind]:
+            raise CheckpointRunError(
+                _range_mismatch(kind, lkm_ranges[kind], linux_ranges[kind])
+            )
     return sibling_state
 
 

@@ -1,0 +1,102 @@
+{
+  "schema_version": 2,
+  "scope": {
+    "module": "objects.memblock",
+    "root_object": "MemBlock",
+    "begins_after": "arch_head_stack_established",
+    "expression_blocks": ["ensures", "establishes", "invariant"]
+  },
+  "sibling": {
+    "path": "../linux-6.12",
+    "branch": "dev",
+    "patch_base": {
+      "commit": "33760df4d924f1d8f6b7c1e03c21bf03f0ac9d0b",
+      "files": {
+        "arch/riscv/mm/init.c": "18d0e7a5d8ff1e4406bddd3f46fd9cee9aa09bb8ad6e0424188c5e14c0938420",
+        "arch/riscv/mm/lkm2_checkpoint_handler.c": "164c178c12ebdbde8f44b75e92f09d8332b638a64f1176b92b5d82cead4b0008",
+        "arch/riscv/mm/lkm2_checkpoints.inc": "20fd0fc6d818d99e4531ee74fcd7b9ef10b17075dbf331bd1298510ac76c6ff6"
+      }
+    },
+    "integrated": {
+      "commit": "acb69c4c4d9a3eb63cab13eeaf47bf118b969ccb",
+      "files": {
+        "arch/riscv/mm/init.c": "cb7ba9044facac139f14b21fcf00db4be41829f34cca18e235106f55b62c0e22",
+        "arch/riscv/mm/lkm2_checkpoint_handler.c": "0a8cc04ba5dda6b3696bf0233251047efb9ab3502b078277984a90fb5467edaa",
+        "arch/riscv/mm/lkm2_checkpoints.inc": "532fca5144b2a141a696ec741281b054d205a1dfa20a304ea492dca8bcdf3568"
+      }
+    }
+  },
+  "milestones": [
+    "memblock_ready",
+    "memblock_memory_online",
+    "memblock_reserved_online",
+    "memblock_online"
+  ],
+  "checkpoints": [
+    {
+      "id": "MemBlockMemory.Enable.Establishes.memblock_memory_derived_from_dtb",
+      "milestone": "memblock_ready",
+      "parameters": ["memory_count", "memory_digest"]
+    },
+    {
+      "id": "MemBlockMemory.Online.Invariant.DtbBlob.Online",
+      "milestone": "memblock_memory_online",
+      "parameters": []
+    },
+    {
+      "id": "MemBlockMemory.Online.Invariant.dtb_blob_describes_nonempty_valid_physical_memory",
+      "milestone": "memblock_memory_online",
+      "parameters": []
+    },
+    {
+      "id": "MemBlockMemory.Online.Invariant.memblock_memory_derived_from_dtb",
+      "milestone": "memblock_memory_online",
+      "parameters": ["memory_count", "memory_digest"]
+    },
+    {
+      "id": "MemBlockReserved.Enable.Establishes.memblock_required_reservations_complete",
+      "milestone": "memblock_reserved_online",
+      "parameters": ["reserved_count", "reserved_digest"]
+    },
+    {
+      "id": "MemBlockReserved.Online.Invariant.MemBlockMemory.Online",
+      "milestone": "memblock_reserved_online",
+      "parameters": []
+    },
+    {
+      "id": "MemBlockReserved.Online.Invariant.DtbBlob.Online",
+      "milestone": "memblock_reserved_online",
+      "parameters": []
+    },
+    {
+      "id": "MemBlockReserved.Online.Invariant.KernelImage.Ready",
+      "milestone": "memblock_reserved_online",
+      "parameters": []
+    },
+    {
+      "id": "MemBlockReserved.Online.Invariant.dtb_blob_physical_range_valid",
+      "milestone": "memblock_reserved_online",
+      "parameters": []
+    },
+    {
+      "id": "MemBlockReserved.Online.Invariant.dtb_blob_reserve_map_and_reserved_memory_valid",
+      "milestone": "memblock_reserved_online",
+      "parameters": []
+    },
+    {
+      "id": "MemBlockReserved.Online.Invariant.memblock_required_reservations_complete",
+      "milestone": "memblock_reserved_online",
+      "parameters": ["reserved_count", "reserved_digest"]
+    },
+    {
+      "id": "MemBlock.Online.Invariant.MemBlockMemory.Online",
+      "milestone": "memblock_online",
+      "parameters": ["memory_count", "memory_digest"]
+    },
+    {
+      "id": "MemBlock.Online.Invariant.MemBlockReserved.Online",
+      "milestone": "memblock_online",
+      "parameters": ["reserved_count", "reserved_digest"]
+    }
+  ]
+}

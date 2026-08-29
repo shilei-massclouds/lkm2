@@ -23,8 +23,19 @@ from checkpointgen import (  # noqa: E402
     render_rust,
 )
 from checkpointgen.generator import MappingCheckpoint  # noqa: E402
-from checkpointgen.runner import CheckpointRunError, parse_record, validate_records  # noqa: E402
+from checkpointgen.runner import (  # noqa: E402
+    CheckpointRunError,
+    _range_digest,
+    _range_mismatch,
+    parse_range_record,
+    parse_record,
+    validate_range_records,
+    validate_records,
+)
 from checkpointgen.sibling import (  # noqa: E402
+    _memblock_handler_append,
+    _memblock_include_append,
+    _modify_init_memblock_incremental,
     _modify_init_swapper_incremental,
     _swapper_handler_append,
     _swapper_include_append,
@@ -50,6 +61,10 @@ class CheckpointGeneratorTests(unittest.TestCase):
             encoding="utf-8"
         ) as stream:
             cls.swapper_mapping = load_mapping(stream)
+        with (REPOSITORY / "tools" / "checkpoints" / "memblock.json").open(
+            encoding="utf-8"
+        ) as stream:
+            cls.memblock_mapping = load_mapping(stream)
 
     def test_vm_lifecycle_extracts_exactly_the_frozen_28(self) -> None:
         checkpoints = build_checkpoints(self.model, self.mapping)
@@ -78,6 +93,55 @@ class CheckpointGeneratorTests(unittest.TestCase):
         self.assertTrue(handler.startswith("legacy-vm-handler\n\nvoid lkm_checkpoint_"))
         self.assertNotIn("extern void", handler)
         self.assertIn("lkm2_checkpoint_swapper_online();", init)
+
+    def test_memblock_mapping_covers_all_thirteen_model_expressions(self) -> None:
+        checkpoints = build_checkpoints(self.model, self.memblock_mapping)
+        self.assertEqual(len(checkpoints), 13)
+        self.assertEqual(
+            self.memblock_mapping.expression_blocks,
+            ("ensures", "establishes", "invariant"),
+        )
+        self.assertEqual(
+            {item.milestone for item in checkpoints},
+            {
+                "memblock_ready",
+                "memblock_memory_online",
+                "memblock_reserved_online",
+                "memblock_online",
+            },
+        )
+        self.assertEqual(
+            sum(".Establishes." in item.canonical_id for item in checkpoints), 2
+        )
+        self.assertEqual(
+            self.memblock_mapping.sibling_integrated.commit,
+            "acb69c4c4d9a3eb63cab13eeaf47bf118b969ccb",
+        )
+
+    def test_memblock_renderers_include_range_protocol(self) -> None:
+        checkpoints = build_checkpoints(self.model, self.memblock_mapping)
+        rust = render_rust(checkpoints, self.memblock_mapping, "debugcon")
+        linux = render_linux_include(checkpoints, self.memblock_mapping)
+        self.assertIn('write_bytes(b"LKMRNG1 kind=")', rust)
+        self.assertIn("MemBlockRangeObservation", rust)
+        self.assertIn("LKM2_CP_RANGE_DIGEST_OFFSET", linux)
+        self.assertIn("result.ranges[i].base <= result.ranges[j - 1].end", linux)
+
+    def test_memblock_sibling_patch_is_incremental_at_setup_bootmem(self) -> None:
+        checkpoints = build_checkpoints(self.model, self.memblock_mapping)
+        include = _memblock_include_append(
+            "legacy-swapper-include\n", checkpoints, self.memblock_mapping
+        )
+        handler = _memblock_handler_append("legacy-swapper-handler\n", checkpoints)
+        init = _modify_init_memblock_incremental(
+            "\tsetup_bootmem();\n\tsetup_vm_final();\n"
+        )
+        self.assertTrue(include.startswith("legacy-swapper-include\n\n"))
+        self.assertIn("lkm2_checkpoint_memory_range", handler)
+        self.assertLess(
+            init.index("lkm2_checkpoint_memblock_ready"),
+            init.index("setup_vm_final"),
+        )
 
     def test_vm_checkpoint_scope_is_frozen(self) -> None:
         self.assertEqual(self.mapping.module, ("objects", "vm"))
@@ -257,6 +321,39 @@ void _start(void) {{ {symbol}(0); }}
             "LKMCP1 id=X hash=0123456789abcdef b=0x0000000000000002 a=0x0000000000000001"
         )
         self.assertEqual(record[2], (("b", 2), ("a", 1)))
+
+    def test_range_parser_and_summary_validation(self) -> None:
+        ranges = ((0x1000, 0x2000), (0x3000, 0x5000))
+        digest = _range_digest(ranges)
+        checkpoints = (
+            (
+                "MemBlockMemory.Online.Invariant.memblock_memory_derived_from_dtb",
+                "0" * 16,
+                (("memory_count", 2), ("memory_digest", digest)),
+            ),
+            (
+                "MemBlockReserved.Online.Invariant.memblock_required_reservations_complete",
+                "1" * 16,
+                (("reserved_count", 1), ("reserved_digest", _range_digest(((0x6000, 0x7000),)))),
+            ),
+        )
+        lines = (
+            "LKMRNG1 kind=memory index=0x0000000000000000 base=0x0000000000001000 end=0x0000000000002000",
+            "LKMRNG1 kind=memory index=0x0000000000000001 base=0x0000000000003000 end=0x0000000000005000",
+            "LKMRNG1 kind=reserved index=0x0000000000000000 base=0x0000000000006000 end=0x0000000000007000",
+        )
+        self.assertEqual(parse_range_record(lines[0]), ("memory", 0, 0x1000, 0x2000))
+        self.assertEqual(validate_range_records(lines, checkpoints)["memory"], ranges)
+
+    def test_range_mismatch_reports_first_index_and_full_sequences(self) -> None:
+        message = _range_mismatch(
+            "reserved",
+            ((0x1000, 0x2000), (0x3000, 0x4000)),
+            ((0x1000, 0x2000), (0x3000, 0x5000)),
+        )
+        self.assertIn("index 1", message)
+        self.assertIn("lkm2 reserved: [[0x", message)
+        self.assertIn("linux reserved: [[0x", message)
 
     def test_self_validation_rejects_missing_record(self) -> None:
         checkpoints = build_checkpoints(self.model, self.mapping)

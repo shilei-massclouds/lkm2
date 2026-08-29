@@ -1,8 +1,9 @@
 # 生成式实现 Checkpoint 契约
 
-Checkpoint 是 Model IR 中已建立函数栈后实际可达的实现观测点。本阶段只为每个
-`ensures` 和 `invariant` 表达式生成 checkpoint；`establishes` 仍由模型推导器执行，
-不生成实现调用，也不改变模型语义。
+Checkpoint 是 Model IR 中已建立函数栈后实际可达的实现观测点。通常只为每个 `ensures`
+和 `invariant` 表达式生成 checkpoint；`establishes` 仍由模型推导器执行，不改变模型语义。
+MemBlock mapping 显式把两个 provenance/completion `establishes` 纳入只读实现观测，因此其
+11 条 invariant 与 2 条 establishes 合计 13 条均有 canonical ID；VM/Swapper 的既有集合不变。
 
 ## 身份、ABI 与完整性
 
@@ -18,9 +19,28 @@ Rust 声明必须使用 `extern "C"` 和 `u64` 参数，C 声明使用 `uint64_t
 
 当前 VM 生命周期固定包含 28 项，执行顺序和六个里程碑由
 `tools/checkpoints/vm.json` 唯一记录；M1 另有独立的 `SwapperPageTable` 9 项
-`swapper_online` 套件，由 `tools/checkpoints/swapper.json` 记录。对象状态等式没有参数；
+`swapper_online` 套件，由 `tools/checkpoints/swapper.json` 记录。MemBlock 的 13 项由
+`tools/checkpoints/memblock.json` 记录，分属四个独立 milestone。旧套件的对象状态等式没有参数；
 其余表达式使用映射中冻结的参数名顺序。观测值必须来自实际 KernelMap、SATP 和页表表项；
 二进制镜像大小、末叶子地址、页表页地址和 root PPN 不属于跨实现协议。
+
+## MemBlock 范围协议
+
+只读观测固定在 `setup_bootmem` 成功返回后、`setup_vm_final` 首次动态分配页表页之前。Memory
+和 Reserved 均先按 base 排序，再合并相邻或重叠的半开区间。相关 canonical checkpoint 携带
+`<kind>_count` 与 `<kind>_digest`；digest 是对每个 `(base, end)` 按大端 u64 字节串依次执行的
+64 位 FNV-1a。debugcon 同时发出 `LKMRNG1` 旁路记录，runner 校验索引连续、序列已规范化且
+count/digest 闭环一致。
+
+Memory 比较完整序列。Reserved 的跨实现序列排除各自 KernelImage 的具体物理长度，因为 Linux
+与 lkm2 二进制大小天然不同，且该大小已明确不属于跨实现协议；KernelImage 已保留由独立
+canonical checkpoint 覆盖。Linux 的 Reserved 投影是 `memblock.reserved` 与带
+`MEMBLOCK_NOMAP` 的 memory region 之并集再减去 vmlinux 区间，从而保留 FDT reserve-map/
+`reserved-memory` 的不可分配语义。lkm2 保留完整内部 Reserved，仅在 checkpoint 投影中减去
+自身 KernelImage。
+
+差分失败时 runner 输出完整双方规范化序列和首个不一致索引。该套件只读；回滚只需移除
+MemBlock mapping、生成模块、四个调用点和增量 sibling patch，旧 37 项 ABI 与 ID 无需改变。
 
 ## VM 与 ArchHead 覆盖边界
 
@@ -41,7 +61,7 @@ hart id、SATP 激活、trap context 和 SoC early init 等事实，只由 model
 ## 生成边界与 handler
 
 独立的 `checkpointgen` 消费 Model IR 和受版本控制映射，生成 canonical manifest、Rust
-声明/定义和六个 wrapper。普通 lkm2 构建只生成 Rust 产物，不读取 sibling。
+声明/定义和 mapping 所列 milestone wrapper。普通 lkm2 构建只生成 Rust 产物，不读取 sibling。
 
 `CHECKPOINT_HANDLER=empty|debugcon` 选择实现，默认 `empty`，未知值必须在构建开始时失败。
 empty handler 与调用位于同一 Rust crate；优化构建不得保留 checkpoint 调用或任何记录
@@ -66,19 +86,25 @@ sibling 固定为相邻 `linux-6.12` 的 `dev` 分支。VM 套件仍使用
 不得暂存、提交、切换提交或自动应用。显式应用必须先运行 `git apply --check`，通过
 reverse-check 识别已应用或已集成状态。
 
+MemBlock 套件使用 `33760df4d924f1d8f6b7c1e03c21bf03f0ac9d0b` →
+`acb69c4c4d9a3eb63cab13eeaf47bf118b969ccb` 锚点，以三文件独立增量追加 include、handler 与
+`setup_bootmem()` 后的四个调用；生成内容由三文件 SHA-256 锚定。
+
 Linux patch 在 `setup_vm` 的同六个语义边界调用生成 wrapper，并以独立 C 文件提供固定
 DBCN handler。它运行在 `sbi_init()` 之前，所以不得调用 Linux SBI 或 logging API，也
 不增加 Kconfig 选择。MMU-off 调用和字符串访问都必须验证为可用的 PC-relative 访问。
 
 差分 runner 固定使用同一 OpenSBI、QEMU virt、128 MiB、单 hart 和默认 CPU，过滤
-`LKMCP1`。Sv57 必须严格比较 28 项 canonical ID 顺序、参数名顺序和所有值；缺失、重复
+`LKMCP1`。Sv57 必须严格比较 50 项 canonical ID 顺序、参数名顺序和所有值，并比较 Memory/
+Reserved 的 `LKMRNG1` 序列；缺失、重复
 或差异均失败。Sv48 通过 CPU 配置禁用 Sv57，Sv39 同时禁用 Sv57/Sv48；后二者只验证
 lkm2 回退与记录自洽。
 
 顶层 `make difftest` 是 Sv57 严格差分的正式入口。runner 对 VM 套件接受 patch base
 上的未暂存 review patch或 VM integrated 提交上的干净工作树；对 M1 套件还接受
 VM integrated 提交上的未暂存增量 patch，或 M1 integrated 提交上的干净工作树。review
-状态都必须位于冻结分支、不得包含暂存修改；M1 状态严格比较全部 37 项记录。
+状态都必须位于冻结分支、不得包含暂存修改；MemBlock review 或 integrated 状态均严格比较
+全部 50 项记录。
 
 缓冲 handler、最终内核页表、Sv48/Sv39 sibling 差分、Linux alternatives/KASLR/
 `pt_ops` 迁移不在本阶段范围；ArchHead 对已观测 early 页表的 SATP 重定位不增加新的

@@ -4,7 +4,7 @@ use core::arch::asm;
 
 use crate::objects::dtb_blob::DtbBlob;
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
-use crate::objects::memblock::{MemBlock, MemBlockMemory};
+use crate::objects::memblock::{MemBlock, MemBlockMemory, RangeCheckpointObservation};
 use crate::objects::printk::EarlyPrintk;
 use crate::objects::{early_dtb_mapping, kernel_image_physical_range, setup_vm_final};
 use crate::systems::sbi::{Ecall, SbiCapability, SbiConsole};
@@ -73,12 +73,34 @@ pub(crate) extern "C" fn start_kernel() -> ! {
     if memblock.memory_region_count() == 0 || memblock.reserved_region_count() == 0 {
         fail_stop();
     }
+    let snapshot = memblock.checkpoint_snapshot();
+    for (index, (base, end)) in memblock.memory_ranges().enumerate() {
+        crate::memblock_checkpoints::memory_range(index as u64, base, end);
+    }
+    for (index, (base, end)) in memblock.checkpoint_reserved_ranges().enumerate() {
+        crate::memblock_checkpoints::reserved_range(index as u64, base, end);
+    }
+    let memory_observation = checkpoint_observation(snapshot.memory());
+    let reserved_observation = checkpoint_observation(snapshot.reserved());
+    crate::memblock_checkpoints::memblock_ready(memory_observation);
+    crate::memblock_checkpoints::memblock_memory_online(memory_observation);
+    crate::memblock_checkpoints::memblock_reserved_online(reserved_observation);
+    crate::memblock_checkpoints::memblock_online(memory_observation, reserved_observation);
     if setup_vm_final(&mut memblock).is_err() {
         fail_stop();
     }
     // M1 deliberately stops here. Scheduler enable and interrupt unmask remain
     // model-only EarlyBoot Enter drives for the next implementation milestone.
     park()
+}
+
+fn checkpoint_observation(
+    observation: RangeCheckpointObservation,
+) -> crate::memblock_checkpoints::MemBlockRangeObservation {
+    crate::memblock_checkpoints::MemBlockRangeObservation {
+        count: observation.count(),
+        digest: observation.digest(),
+    }
 }
 
 fn fail_stop() -> ! {

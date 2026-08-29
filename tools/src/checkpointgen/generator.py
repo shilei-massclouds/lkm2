@@ -25,7 +25,7 @@ class MappingCheckpoint:
 
 @dataclass(frozen=True, slots=True)
 class SiblingRevision:
-    commit: str
+    commit: str | None
     files: tuple[tuple[str, str], ...]
 
 
@@ -34,6 +34,7 @@ class CheckpointMapping:
     module: tuple[str, ...]
     root_object: str
     begins_after: str
+    expression_blocks: tuple[str, ...]
     milestones: tuple[str, ...]
     checkpoints: tuple[MappingCheckpoint, ...]
     sibling_path: str
@@ -72,12 +73,19 @@ def _string_array(value: object, path: str) -> tuple[str, ...]:
     return values
 
 
-def _load_sibling_revision(value: object, path: str) -> SiblingRevision:
+def _load_sibling_revision(
+    value: object, path: str, *, allow_unintegrated: bool = False
+) -> SiblingRevision:
     revision = _require_dict(value, path)
     if set(revision) != {"commit", "files"}:
         raise CheckpointGenerationError(f"{path} has missing or unknown fields")
-    commit = _require_string(revision["commit"], f"{path}.commit")
-    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+    raw_commit = revision["commit"]
+    commit = (
+        None
+        if allow_unintegrated and raw_commit is None
+        else _require_string(raw_commit, f"{path}.commit")
+    )
+    if commit is not None and re.fullmatch(r"[0-9a-f]{40}", commit) is None:
         raise CheckpointGenerationError(
             f"{path}.commit must be a full lowercase Git object ID"
         )
@@ -121,7 +129,10 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         raise CheckpointGenerationError("unsupported checkpoint mapping schema_version")
 
     scope = _require_dict(data["scope"], "scope")
-    if set(scope) != {"module", "root_object", "begins_after"}:
+    if set(scope) not in (
+        {"module", "root_object", "begins_after"},
+        {"module", "root_object", "begins_after", "expression_blocks"},
+    ):
         raise CheckpointGenerationError("scope has missing or unknown fields")
     module_text = _require_string(scope["module"], "scope.module")
     module = tuple(module_text.split("."))
@@ -132,6 +143,16 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         raise CheckpointGenerationError(
             "scope.begins_after must exclude the pre-stack boot region"
         )
+    expression_blocks = (
+        _string_array(scope["expression_blocks"], "scope.expression_blocks")
+        if "expression_blocks" in scope
+        else ("ensures", "invariant")
+    )
+    supported_blocks = {"ensures", "establishes", "invariant"}
+    if set(expression_blocks) - supported_blocks or "invariant" not in expression_blocks:
+        raise CheckpointGenerationError(
+            "scope.expression_blocks must contain invariant and only supported block kinds"
+        )
 
     sibling = _require_dict(data["sibling"], "sibling")
     if set(sibling) != {"path", "branch", "patch_base", "integrated"}:
@@ -140,9 +161,12 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         sibling["patch_base"], "sibling.patch_base"
     )
     sibling_integrated = _load_sibling_revision(
-        sibling["integrated"], "sibling.integrated"
+        sibling["integrated"], "sibling.integrated", allow_unintegrated=True
     )
-    if sibling_patch_base.commit == sibling_integrated.commit:
+    if (
+        sibling_integrated.commit is not None
+        and sibling_patch_base.commit == sibling_integrated.commit
+    ):
         raise CheckpointGenerationError(
             "sibling patch_base and integrated commits must differ"
         )
@@ -183,6 +207,7 @@ def load_mapping(stream: TextIO) -> CheckpointMapping:
         module=module,
         root_object=_require_string(scope["root_object"], "scope.root_object"),
         begins_after=begins_after,
+        expression_blocks=expression_blocks,
         milestones=milestones,
         checkpoints=tuple(checkpoints),
         sibling_path=_require_string(sibling["path"], "sibling.path"),
@@ -207,7 +232,7 @@ def _access_parts(expression: ModelExpression) -> tuple[str, ...] | None:
 
 
 def _expression_label(expression: ModelExpression) -> str:
-    if expression.kind == "call" and len(expression.children) == 1:
+    if expression.kind == "call" and expression.children:
         access = _access_parts(expression.children[0])
         if access is not None:
             return access[-1]
@@ -251,19 +276,21 @@ def extract_canonical_ids(model: ModelIR, mapping: CheckpointMapping) -> tuple[s
             continue
         for state in model_object.states:
             state_name = state.name[-1]
-            for block in state.invariants:
-                for expression in block:
-                    result.append(
-                        f"{object_name}.{state_name}.Invariant.{_expression_label(expression)}"
-                    )
+            if "invariant" in mapping.expression_blocks:
+                for block in state.invariants:
+                    for expression in block:
+                        result.append(
+                            f"{object_name}.{state_name}.Invariant.{_expression_label(expression)}"
+                        )
             for transition in state.transitions:
                 transition_name = transition.signal[-1]
                 for block in transition.blocks:
-                    if block.kind != "ensures":
+                    if block.kind not in mapping.expression_blocks or block.kind == "invariant":
                         continue
+                    block_label = block.kind.title()
                     for expression in block.expressions:
                         result.append(
-                            f"{object_name}.{transition_name}.Ensures.{_expression_label(expression)}"
+                            f"{object_name}.{transition_name}.{block_label}.{_expression_label(expression)}"
                         )
     if len(result) != len(set(result)):
         duplicate = next(item for item in result if result.count(item) > 1)
@@ -402,6 +429,12 @@ pub(crate) struct SwapperObservation {
     pub(crate) tlb_flush_completed: u64,
     pub(crate) late_mode_selected: u64,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) struct MemBlockRangeObservation {
+    pub(crate) count: u64,
+    pub(crate) digest: u64,
+}
 """
 
 
@@ -424,6 +457,14 @@ def _observation_source(checkpoint: Checkpoint, parameter: str) -> str:
         return "satp"
     if tail.startswith("swapper_"):
         return f"swapper.{parameter}"
+    if parameter == "memory_count":
+        return "memory.count"
+    if parameter == "memory_digest":
+        return "memory.digest"
+    if parameter == "reserved_count":
+        return "reserved.count"
+    if parameter == "reserved_digest":
+        return "reserved.digest"
     raise CheckpointGenerationError(
         f"no observation binding for {checkpoint.canonical_id}.{parameter}"
     )
@@ -441,6 +482,12 @@ def _milestone_signature(milestone: str) -> str:
             "early_kernel: EarlyKernelObservation, early_dtb: EarlyDtbObservation, satp: u64"
         ),
         "swapper_online": "swapper: SwapperObservation",
+        "memblock_ready": "memory: MemBlockRangeObservation",
+        "memblock_memory_online": "memory: MemBlockRangeObservation",
+        "memblock_reserved_online": "reserved: MemBlockRangeObservation",
+        "memblock_online": (
+            "memory: MemBlockRangeObservation, reserved: MemBlockRangeObservation"
+        ),
     }
     try:
         return signatures[milestone]
@@ -460,7 +507,9 @@ def _render_declarations(checkpoints: tuple[Checkpoint, ...]) -> str:
     return "\n".join(lines)
 
 
-def _render_empty_handlers(checkpoints: tuple[Checkpoint, ...]) -> str:
+def _render_empty_handlers(
+    checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool
+) -> str:
     lines = ["mod selected_handler {"]
     for index, item in enumerate(checkpoints):
         parameters = ", ".join(
@@ -468,11 +517,21 @@ def _render_empty_handlers(checkpoints: tuple[Checkpoint, ...]) -> str:
         )
         lines.append(f"    #[unsafe(export_name = \"{item.symbol}\")]")
         lines.append(f"    pub(super) extern \"C\" fn checkpoint_{index}({parameters}) {{}}")
+    if include_ranges:
+        lines.extend(
+            [
+                "",
+                "    #[inline(always)]",
+                "    pub(super) fn range(_kind: &[u8], _index: u64, _base: u64, _end: u64) {}",
+            ]
+        )
     lines.append("}")
     return "\n".join(lines)
 
 
-def _render_debugcon_handlers(checkpoints: tuple[Checkpoint, ...]) -> str:
+def _render_debugcon_handlers(
+    checkpoints: tuple[Checkpoint, ...], *, include_ranges: bool
+) -> str:
     lines = [
         "mod selected_handler {",
         "    use core::arch::asm;",
@@ -530,6 +589,23 @@ def _render_debugcon_handlers(checkpoints: tuple[Checkpoint, ...]) -> str:
             lines.append(f"        write_bytes(b\" {parameter}=0x\");")
             lines.append(f"        write_hex(arg{number});")
         lines.extend(["        write_byte(b'\\n');", "    }"])
+    if include_ranges:
+        lines.extend(
+            [
+                "",
+                "    pub(super) fn range(kind: &[u8], index: u64, base: u64, end: u64) {",
+                "        write_bytes(b\"LKMRNG1 kind=\");",
+                "        write_bytes(kind);",
+                "        write_bytes(b\" index=0x\");",
+                "        write_hex(index);",
+                "        write_bytes(b\" base=0x\");",
+                "        write_hex(base);",
+                "        write_bytes(b\" end=0x\");",
+                "        write_hex(end);",
+                "        write_byte(b'\\n');",
+                "    }",
+            ]
+        )
     lines.append("}")
     return "\n".join(lines)
 
@@ -559,6 +635,23 @@ def _render_wrappers(
     return "\n".join(lines)
 
 
+def _render_range_wrappers(mapping: CheckpointMapping) -> str:
+    if mapping.root_object != "MemBlock":
+        return ""
+    return """
+
+#[inline(always)]
+pub(crate) fn memory_range(index: u64, base: u64, end: u64) {
+    selected_handler::range(b"memory", index, base, end);
+}
+
+#[inline(always)]
+pub(crate) fn reserved_range(index: u64, base: u64, end: u64) {
+    selected_handler::range(b"reserved", index, base, end);
+}
+""".rstrip()
+
+
 def render_rust(
     checkpoints: tuple[Checkpoint, ...],
     mapping: CheckpointMapping,
@@ -568,10 +661,11 @@ def render_rust(
         raise CheckpointGenerationError(
             f"unknown CHECKPOINT_HANDLER {handler!r}; expected empty or debugcon"
         )
+    include_ranges = mapping.root_object == "MemBlock"
     handlers = (
-        _render_empty_handlers(checkpoints)
+        _render_empty_handlers(checkpoints, include_ranges=include_ranges)
         if handler == "empty"
-        else _render_debugcon_handlers(checkpoints)
+        else _render_debugcon_handlers(checkpoints, include_ranges=include_ranges)
     )
     return (
         "// @generated by checkpointgen; do not edit.\n"
@@ -584,6 +678,7 @@ def render_rust(
         + handlers
         + "\n"
         + _render_wrappers(checkpoints, mapping.milestones)
+        + _render_range_wrappers(mapping)
         + "\n"
     )
 

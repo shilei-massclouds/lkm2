@@ -60,5 +60,11 @@ MemBlock Online 本身就是早期物理内存分配的状态前提，不增加�
 构造和切换；M1 成功后保持中断屏蔽停驻。Scheduler、Unmask、buddy allocator 和 NUMA 仍留给
 后续里程碑。
 
+实现 checkpoint 现已覆盖 MemBlock 的 11 条 invariant 与 2 条 establishes。Memory/Reserved
+在 `setup_bootmem` 返回且页表动态分配尚未开始的边界生成规范化序列、count 和 FNV-1a digest；
+runner 对摘要和完整旁路序列双重校验，并在失败时报告首个差异。Reserved 差分使用排除各自
+KernelImage 具体长度的不可分配投影，以保持二进制大小不进入跨实现 ABI；Linux 的 NOMAP
+memory region 同时纳入该投影。
+
 NUMA、hotplug、NOMAP、memory limit、动态 `/reserved-memory` 分配、区间裁剪/对齐和实际分配
 策略仍留给后续里程碑；容器容量、排序与合并是 coding/impl 细节，不进入 model。

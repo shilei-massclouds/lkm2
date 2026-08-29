@@ -10,6 +10,8 @@ const FDT_END: u32 = 9;
 
 const MAX_MEMORY_REGIONS: usize = 16;
 const MAX_RESERVED_REGIONS: usize = 64;
+const RANGE_DIGEST_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const RANGE_DIGEST_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MemBlockError {
@@ -108,6 +110,35 @@ impl<const CAPACITY: usize> RegionSet<CAPACITY> {
             .copied()
             .find(|item| item.base < range.end && range.base < item.end)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RangeCheckpointObservation {
+    count: u64,
+    digest: u64,
+}
+
+impl RangeCheckpointObservation {
+    pub(crate) const fn count(self) -> u64 {
+        self.count
+    }
+
+    pub(crate) const fn digest(self) -> u64 {
+        self.digest
+    }
+}
+
+fn observe_ranges(ranges: impl Iterator<Item = (u64, u64)>) -> RangeCheckpointObservation {
+    let mut digest = RANGE_DIGEST_OFFSET;
+    let mut count = 0_u64;
+    for (base, end) in ranges {
+        for byte in base.to_be_bytes().into_iter().chain(end.to_be_bytes()) {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(RANGE_DIGEST_PRIME);
+        }
+        count += 1;
+    }
+    RangeCheckpointObservation { count, digest }
 }
 
 #[derive(Clone, Copy)]
@@ -222,6 +253,10 @@ impl MemBlockMemory {
             next: 0,
         }
     }
+
+    pub(crate) fn checkpoint_observation(&self) -> RangeCheckpointObservation {
+        observe_ranges(self.memory_ranges())
+    }
 }
 
 pub(crate) struct MemoryRangeIter<'a> {
@@ -268,11 +303,51 @@ impl MemBlockReserved {
     pub(crate) const fn region_count(&self) -> usize {
         self.regions.len()
     }
+
+    /// Iterate over the sorted, coalesced, half-open reservation ranges.
+    pub(crate) fn reserved_ranges(&self) -> ReservedRangeIter<'_> {
+        ReservedRangeIter {
+            set: &self.regions,
+            next: 0,
+        }
+    }
+}
+
+pub(crate) struct ReservedRangeIter<'a> {
+    set: &'a RegionSet<MAX_RESERVED_REGIONS>,
+    next: usize,
+}
+
+impl Iterator for ReservedRangeIter<'_> {
+    type Item = (u64, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.set.get(self.next)?;
+        self.next += 1;
+        Some((range.base, range.end))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MemBlockCheckpointSnapshot {
+    memory: RangeCheckpointObservation,
+    reserved: RangeCheckpointObservation,
+}
+
+impl MemBlockCheckpointSnapshot {
+    pub(crate) const fn memory(self) -> RangeCheckpointObservation {
+        self.memory
+    }
+
+    pub(crate) const fn reserved(self) -> RangeCheckpointObservation {
+        self.reserved
+    }
 }
 
 pub(crate) struct MemBlock {
     memory: MemBlockMemory,
     reserved: MemBlockReserved,
+    kernel_image: PhysRange,
 }
 
 impl MemBlock {
@@ -282,9 +357,14 @@ impl MemBlock {
         dtb_physical_address: u64,
         kernel_image: (u64, u64),
     ) -> Result<Self, MemBlockError> {
+        let kernel_image_range = PhysRange::from_base_size(kernel_image.0, kernel_image.1)?;
         let reserved =
             MemBlockReserved::complete(&memory, dtb, dtb_physical_address, kernel_image)?;
-        Ok(Self { memory, reserved })
+        Ok(Self {
+            memory,
+            reserved,
+            kernel_image: kernel_image_range,
+        })
     }
 
     pub(crate) const fn memory_region_count(&self) -> usize {
@@ -297,6 +377,32 @@ impl MemBlock {
 
     pub(crate) fn memory_ranges(&self) -> MemoryRangeIter<'_> {
         self.memory.memory_ranges()
+    }
+
+    pub(crate) fn reserved_ranges(&self) -> ReservedRangeIter<'_> {
+        self.reserved.reserved_ranges()
+    }
+
+    /// Return the cross-implementation reservation projection. Kernel image
+    /// sizes are implementation-specific and are covered by the separate
+    /// KernelImage checkpoint, so this sequence contains every other
+    /// normalized reservation.
+    pub(crate) fn checkpoint_reserved_ranges(&self) -> ReservedCheckpointRangeIter<'_> {
+        ReservedCheckpointRangeIter {
+            ranges: self.reserved_ranges(),
+            excluded: self.kernel_image,
+            pending: None,
+        }
+    }
+
+    /// Capture the initial, normalized Memory/Reserved summaries at the
+    /// setup_bootmem return boundary, before page-table allocation mutates
+    /// Reserved.
+    pub(crate) fn checkpoint_snapshot(&self) -> MemBlockCheckpointSnapshot {
+        MemBlockCheckpointSnapshot {
+            memory: self.memory.checkpoint_observation(),
+            reserved: observe_ranges(self.checkpoint_reserved_ranges()),
+        }
     }
 
     /// Allocate one physically contiguous page from the highest suitable
@@ -347,6 +453,37 @@ impl MemBlock {
             }
         }
         Err(MemBlockError::AllocationExhausted)
+    }
+}
+
+pub(crate) struct ReservedCheckpointRangeIter<'a> {
+    ranges: ReservedRangeIter<'a>,
+    excluded: PhysRange,
+    pending: Option<(u64, u64)>,
+}
+
+impl Iterator for ReservedCheckpointRangeIter<'_> {
+    type Item = (u64, u64);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(range) = self.pending.take() {
+            return Some(range);
+        }
+        loop {
+            let (base, end) = self.ranges.next()?;
+            if end <= self.excluded.base || base >= self.excluded.end {
+                return Some((base, end));
+            }
+            if base < self.excluded.base {
+                if end > self.excluded.end {
+                    self.pending = Some((self.excluded.end, end));
+                }
+                return Some((base, self.excluded.base));
+            }
+            if end > self.excluded.end {
+                return Some((self.excluded.end, end));
+            }
+        }
     }
 }
 
@@ -759,6 +896,30 @@ mod tests {
         assert_eq!(memblock.memory_region_count(), 1);
         assert_eq!(memblock.reserved_region_count(), 4);
         assert_eq!(
+            memblock.memory_ranges().collect::<Vec<_>>(),
+            vec![(0x8000_0000, 0x8800_0000)]
+        );
+        assert_eq!(
+            memblock.reserved_ranges().collect::<Vec<_>>(),
+            vec![
+                (0x8020_0000, 0x8030_0000),
+                (0x8100_0000, 0x8100_1000),
+                (0x8200_0000, 0x8200_2000),
+                (0x8300_0000, 0x8300_0000 + bytes.len() as u64),
+            ]
+        );
+        let snapshot = memblock.checkpoint_snapshot();
+        assert_eq!(snapshot.memory().count(), 1);
+        assert_eq!(snapshot.reserved().count(), 3);
+        assert_eq!(
+            memblock.checkpoint_reserved_ranges().collect::<Vec<_>>(),
+            vec![
+                (0x8100_0000, 0x8100_1000),
+                (0x8200_0000, 0x8200_2000),
+                (0x8300_0000, 0x8300_0000 + bytes.len() as u64),
+            ]
+        );
+        assert_eq!(
             &memblock.reserved.regions.regions[..4],
             &[
                 PhysRange {
@@ -818,6 +979,39 @@ mod tests {
             .unwrap();
         assert_eq!(regions.len(), 1);
         assert_eq!(regions.regions[0], PhysRange { base: 0, end: 30 });
+        let observation = observe_ranges(
+            regions.regions[..regions.len]
+                .iter()
+                .map(|range| (range.base, range.end)),
+        );
+        assert_eq!(observation.count(), 1);
+        assert_eq!(observation.digest(), 0x8820_31b9_60ff_82fb);
+    }
+
+    #[test]
+    fn checkpoint_projection_subtracts_kernel_from_a_merged_reservation() {
+        let mut memory_regions = RegionSet::<MAX_MEMORY_REGIONS>::new();
+        memory_regions
+            .add(PhysRange::from_base_size(0, 100).unwrap())
+            .unwrap();
+        let mut reserved_regions = RegionSet::<MAX_RESERVED_REGIONS>::new();
+        reserved_regions
+            .add(PhysRange::from_base_size(10, 40).unwrap())
+            .unwrap();
+        let memblock = MemBlock {
+            memory: MemBlockMemory {
+                regions: memory_regions,
+            },
+            reserved: MemBlockReserved {
+                regions: reserved_regions,
+            },
+            kernel_image: PhysRange { base: 20, end: 30 },
+        };
+
+        assert_eq!(
+            memblock.checkpoint_reserved_ranges().collect::<Vec<_>>(),
+            vec![(10, 20), (30, 50)]
+        );
     }
 
     #[test]
@@ -836,6 +1030,10 @@ mod tests {
             },
             reserved: MemBlockReserved {
                 regions: reserved_regions,
+            },
+            kernel_image: PhysRange {
+                base: 0x2000,
+                end: 0x3000,
             },
         };
 
@@ -873,6 +1071,10 @@ mod tests {
             },
             reserved: MemBlockReserved {
                 regions: reserved_regions,
+            },
+            kernel_image: PhysRange {
+                base: 0x2000,
+                end: 0x3000,
             },
         };
         assert!(matches!(

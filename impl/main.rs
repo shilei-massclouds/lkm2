@@ -6,6 +6,9 @@
 #[rustfmt::skip]
 #[path = "build/checkpoints.rs"]
 mod checkpoints;
+#[path = "build/memblock_checkpoints.rs"]
+#[rustfmt::skip]
+mod memblock_checkpoints;
 #[path = "build/swapper_checkpoints.rs"]
 #[rustfmt::skip]
 mod swapper_checkpoints;
