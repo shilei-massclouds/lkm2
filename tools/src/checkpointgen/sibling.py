@@ -185,7 +185,15 @@ def validate_incremental_differential_sibling(
         raise CheckpointGenerationError(f"sibling path does not exist: {sibling}")
     _validate_branch(sibling, mapping)
     head = _git(sibling, "rev-parse", "HEAD")
-    if head != mapping.sibling_integrated.commit:
+    if head == mapping.sibling_integrated.commit:
+        status_lines = _git(sibling, "status", "--short").splitlines()
+        if status_lines:
+            raise CheckpointGenerationError(
+                "integrated sibling M1 checkpoint worktree must be clean"
+            )
+        _validate_worktree_files(sibling, mapping.sibling_integrated, "integrated")
+        return "integrated-swapper"
+    if head != mapping.sibling_patch_base.commit:
         return None
     status_lines = _git(sibling, "status", "--short").splitlines()
     if not status_lines:
@@ -203,7 +211,7 @@ def validate_incremental_differential_sibling(
             "sibling must contain exactly the reviewed, unstaged M1 checkpoint patch"
         )
 
-    baseline = mapping.sibling_integrated
+    baseline = mapping.sibling_patch_base
     init_path = "arch/riscv/mm/init.c"
     include_path = "arch/riscv/mm/lkm2_checkpoints.inc"
     handler_path = "arch/riscv/mm/lkm2_checkpoint_handler.c"
@@ -717,7 +725,7 @@ def generate_sibling_patch(
         # The sibling repository is already at the integrated VM checkpoint
         # commit.  M1 is deliberately an incremental patch: preserve the
         # existing 28-record protocol and add only the final observation.
-        baseline = mapping.sibling_integrated
+        baseline = mapping.sibling_patch_base
         init_before = _read_revision_file(sibling, baseline, init_path)
         include_path = "arch/riscv/mm/lkm2_checkpoints.inc"
         handler_path = "arch/riscv/mm/lkm2_checkpoint_handler.c"
@@ -726,6 +734,21 @@ def generate_sibling_patch(
         init_after = _modify_init_swapper_incremental(init_before)
         include_after = _swapper_include_append(include_before, checkpoints, mapping)
         handler_after = _swapper_handler_append(handler_before, checkpoints)
+        generated = {
+            init_path: init_after,
+            include_path: include_after,
+            handler_path: handler_after,
+        }
+        expected_integrated = dict(mapping.sibling_integrated.files)
+        for relative, expected in expected_integrated.items():
+            if relative in generated:
+                content = generated[relative].encode("utf-8")
+            else:
+                content = _read_revision_file(sibling, baseline, relative).encode("utf-8")
+            if _fingerprint(content) != expected:
+                raise CheckpointGenerationError(
+                    f"generated sibling content differs from integrated anchor {relative}"
+                )
         return (
             _diff_file(init_path, init_before, init_after)
             + _diff_file(include_path, include_before, include_after)

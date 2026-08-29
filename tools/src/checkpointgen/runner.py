@@ -304,7 +304,7 @@ def run_diff(
             sibling_state = validate_differential_sibling(sibling, mapping)
     except (OSError, UnicodeError, CheckpointGenerationError) as exc:
         raise CheckpointRunError(f"invalid sibling differential state: {exc}") from exc
-    swapper_enabled = sibling_state == "reviewed-swapper-patch"
+    swapper_enabled = sibling_state in {"reviewed-swapper-patch", "integrated-swapper"}
     manifest = _read_manifest(implementation / "build" / "checkpoints.manifest.json")
     swapper_manifest = _read_manifest(
         implementation / "build" / "swapper_checkpoints.manifest.json"
