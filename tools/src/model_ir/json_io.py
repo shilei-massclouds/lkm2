@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v14."""
+"""Strict JSON loading and canonical JSON output for Model IR v15."""
 
 from __future__ import annotations
 
@@ -143,6 +143,7 @@ def _type(value: object, path: str) -> ModelType:
                 "name",
                 "fields",
                 "base_type",
+                "parent_type",
                 "continuation",
                 "sched_core",
                 "user_runtime",
@@ -164,6 +165,9 @@ def _type(value: object, path: str) -> ModelType:
         base_type=None
         if base_type is None
         else _type_expression(base_type, f"{path}.base_type"),
+        parent_type=None
+        if data["parent_type"] is None
+        else _type_expression(data["parent_type"], f"{path}.parent_type"),
         continuation=data["continuation"],
         initial_state=None
         if initial_state is None
@@ -368,7 +372,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v14 JSON document."""
+    """Load and strictly validate one Model IR schema-v15 JSON document."""
 
     try:
         raw = json.load(
@@ -523,6 +527,9 @@ def _module_data(module: ModelModule) -> dict[str, Any]:
                 "base_type": None
                 if item.base_type is None
                 else _type_expr_data(item.base_type),
+                "parent_type": None
+                if item.parent_type is None
+                else _type_expr_data(item.parent_type),
                 "continuation": item.continuation,
                 "sched_core": item.sched_core,
                 "user_runtime": item.user_runtime,

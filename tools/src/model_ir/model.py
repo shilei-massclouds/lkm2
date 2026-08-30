@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v14."""
+"""Frozen data model and semantic validation for Model IR schema v15."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -262,6 +262,10 @@ class ModelType:
     cpu_core: bool = False
     syscall_exit_flow: bool = False
     event_flow: bool = False
+    # A type-level parent contract.  This is deliberately kept as the source
+    # type expression (rather than an expanded declaration name); object
+    # instantiation binds it to a concrete parent object path.
+    parent_type: ModelTypeExpression | None = None
 
     def __post_init__(self) -> None:
         _validate_qualified_name(self.name, "type.name")
@@ -270,6 +274,12 @@ class ModelType:
         ):
             raise ModelIRValidationError(
                 "type.base_type must be a ModelTypeExpression or null"
+            )
+        if self.parent_type is not None and not isinstance(
+            self.parent_type, ModelTypeExpression
+        ):
+            raise ModelIRValidationError(
+                "type.parent_type must be a ModelTypeExpression or null"
             )
         if type(self.continuation) is not bool:
             raise ModelIRValidationError("type.continuation must be a boolean")
@@ -286,6 +296,10 @@ class ModelType:
         if self.fields is not None:
             _validate_tuple(self.fields, ModelField, "type.fields")
             names = [field.name for field in self.fields]
+            if "parent" in names:
+                raise ModelIRValidationError(
+                    "parent is reserved and cannot be declared as a type field"
+                )
             if len(set(names)) != len(names):
                 raise ModelIRValidationError(f"duplicate field in type {'.'.join(self.name)!r}")
         if self.initial_state is not None:
@@ -802,15 +816,28 @@ class ModelIR:
             item.name: item for module in ordered for item in module.types
         }
 
-        def static_target(expression: ModelExpression) -> tuple[str, ...] | None:
+        def static_target(
+            expression: ModelExpression,
+            *,
+            module: tuple[str, ...] | None = None,
+            allow_members: bool = False,
+        ) -> tuple[str, ...] | None:
             access = _expression_access(expression)
             if access is None or not access[0] or any(
-                operation != "path" for operation in access[1]
+                operation != "path"
+                and not (allow_members and operation == "member")
+                for operation in access[1]
             ):
                 return None
             raw = access[0]
+            if raw[0] == "model":
+                raw = raw[1:]
+                if not raw:
+                    return None
             if raw in object_items:
                 return raw
+            if module is not None and module + raw in object_items:
+                return module + raw
             matches = tuple(
                 name for name in object_items if name[-len(raw) :] == raw
             )
@@ -819,16 +846,155 @@ class ModelIR:
         def resolve_type_name(
             expression: ModelTypeExpression, module: tuple[str, ...]
         ) -> tuple[str, ...] | None:
-            candidates = (expression.name, module + expression.name)
+            name = (
+                expression.name[1:]
+                if expression.name[0] == "model"
+                else expression.name
+            )
+            if not name:
+                return None
+            candidates = (name, module + name)
             for candidate in candidates:
                 if candidate in type_items:
                     return candidate
             matches = tuple(
-                name
-                for name in type_items
-                if name[-len(expression.name) :] == expression.name
+                candidate
+                for candidate in type_items
+                if candidate[-len(name) :] == name
             )
             return matches[0] if len(matches) == 1 else None
+
+        def type_compatible(
+            actual: tuple[str, ...] | None, expected: tuple[str, ...] | None
+        ) -> bool:
+            if actual is None or expected is None:
+                return False
+            cursor = actual
+            seen: set[tuple[str, ...]] = set()
+            while cursor not in seen:
+                if cursor == expected:
+                    return True
+                seen.add(cursor)
+                model_type = type_items.get(cursor)
+                if model_type is None or model_type.base_type is None:
+                    return False
+                cursor = resolve_type_name(model_type.base_type, cursor[:-1])
+                if cursor is None:
+                    return False
+            return False
+
+        # Validate type-level parent contracts and bind object parents to
+        # concrete declarations.  JSON IR is already expanded for nested
+        # objects, so no symbolic ``parent`` may survive on a model object
+        # whose type requires a contract.
+        parent_type_edges: dict[tuple[str, ...], tuple[str, ...]] = {}
+        for model_type in type_items.values():
+            if model_type.base_type is not None:
+                base_name = resolve_type_name(
+                    model_type.base_type, model_type.name[:-1]
+                )
+                base_type = None if base_name is None else type_items.get(base_name)
+                if base_type is not None and base_type.parent_type is not None:
+                    if model_type.parent_type is None:
+                        raise ModelIRValidationError(
+                            f"derived type {'.'.join(model_type.name)!r} "
+                            "must inherit its parent type contract"
+                        )
+                    if model_type.parent_type != base_type.parent_type:
+                        raise ModelIRValidationError(
+                            f"derived type {'.'.join(model_type.name)!r} "
+                            "must not change its inherited parent type contract"
+                        )
+            if model_type.parent_type is None:
+                continue
+            if model_type.parent_type.arguments:
+                raise ModelIRValidationError(
+                    f"parent type contract for {'.'.join(model_type.name)!r} "
+                    "must be non-generic"
+                )
+            parent_type_name = resolve_type_name(
+                model_type.parent_type, model_type.name[:-1]
+            )
+            if parent_type_name is None:
+                raise ModelIRValidationError(
+                    f"parent type {'::'.join(model_type.parent_type.name)!r} is not declared"
+                )
+            parent_type_edges[model_type.name] = parent_type_name
+
+        for start in parent_type_edges:
+            path: list[tuple[str, ...]] = []
+            cursor = start
+            while cursor in parent_type_edges:
+                if cursor in path:
+                    cycle = path[path.index(cursor) :] + [cursor]
+                    raise ModelIRValidationError(
+                        "parent type contract cycle: "
+                        + " -> ".join("::".join(item) for item in cycle)
+                    )
+                path.append(cursor)
+                cursor = parent_type_edges[cursor]
+
+        parent_edges: dict[tuple[str, ...], tuple[str, ...]] = {}
+        for model_object in object_items.values():
+            owner_module = object_modules[model_object.name]
+            parent_name = (
+                None
+                if model_object.parent is None
+                else model_object.name
+                if model_object.parent.kind == "identifier"
+                and model_object.parent.value == "self"
+                else static_target(
+                    model_object.parent,
+                    module=object_modules[model_object.name],
+                    allow_members=True,
+                )
+            )
+            if model_object.parent is not None and parent_name is None:
+                raise ModelIRValidationError(
+                    f"parent of object {'.'.join(model_object.name)!r} must "
+                    "resolve to a declared object"
+                )
+            object_type_name = resolve_type_name(
+                model_object.base_type, owner_module
+            )
+            contract = (
+                None
+                if object_type_name is None
+                else type_items[object_type_name].parent_type
+            )
+            if contract is not None:
+                if parent_name is None:
+                    raise ModelIRValidationError(
+                        f"object {'.'.join(model_object.name)!r} requires a parent object"
+                    )
+                expected = resolve_type_name(contract, object_type_name[:-1])
+                actual_parent_type = resolve_type_name(
+                    object_items[parent_name].base_type,
+                    object_modules[parent_name],
+                )
+                if not type_compatible(actual_parent_type, expected):
+                    raise ModelIRValidationError(
+                        f"parent of object {'.'.join(model_object.name)!r} has incompatible type"
+                    )
+            if parent_name is not None:
+                if parent_name == model_object.name:
+                    raise ModelIRValidationError(
+                        f"object {'.'.join(model_object.name)!r} cannot be its own parent"
+                    )
+                parent_edges[model_object.name] = parent_name
+
+        for start in parent_edges:
+            path: list[tuple[str, ...]] = []
+            cursor = start
+            while cursor in parent_edges:
+                if cursor in path:
+                    cycle = path[path.index(cursor) :] + [cursor]
+                    raise ModelIRValidationError(
+                        "object parent cycle: "
+                        + " -> ".join("::".join(item) for item in cycle)
+                    )
+                path.append(cursor)
+                cursor = parent_edges[cursor]
 
         def object_has_type(model_object: ModelObject, suffix: str) -> bool:
             current = resolve_type_name(
@@ -1568,7 +1734,11 @@ class ModelIR:
                     parent_name = (
                         None
                         if model_object.parent is None
-                        else static_target(model_object.parent)
+                        else static_target(
+                            model_object.parent,
+                            module=object_modules[model_object.name],
+                            allow_members=True,
+                        )
                     )
                     if (
                         parent_name is None
@@ -1921,7 +2091,12 @@ class ModelIR:
                     flow
                     for flow in task_flows
                     if flow.parent is not None
-                    and static_target(flow.parent) == task.name
+                    and static_target(
+                        flow.parent,
+                        module=object_modules[flow.name],
+                        allow_members=True,
+                    )
+                    == task.name
                 )
                 if len(parents) != 1:
                     raise ModelIRValidationError(

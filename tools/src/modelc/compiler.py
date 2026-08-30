@@ -1,4 +1,4 @@
-"""Compilation pipeline from a model-root specification to Model IR v14."""
+"""Compilation pipeline from a model-root specification to Model IR v15."""
 
 from __future__ import annotations
 
@@ -273,7 +273,11 @@ def _signal(
         }
         and operations[:-2] == ["member"]
     )
-    if len(raw_target) == 1 and raw_target[0] in {
+    if len(raw_target) == 1 and raw_target[0] == "parent" and not operations[:-2]:
+        # Keep a type-level parent selector symbolic until object expansion
+        # binds the template to its concrete containing object.
+        target = ModelExpression("identifier", "parent")
+    elif len(raw_target) == 1 and raw_target[0] in {
         *bindings,
         "CurrentTaskRef",
         "CurrentCPU",
@@ -805,6 +809,14 @@ def _model_type(
 ) -> ModelType:
     name = module.name + (str(node.children[0]),)
     items = _type_items(node)
+    parent_nodes = tuple(item for item in items if item.data == "type_parent_property")
+    if len(parent_nodes) > 1:
+        raise _semantic_error(module, parent_nodes[1], "duplicate parent type contract")
+    parent_type = (
+        None
+        if not parent_nodes
+        else _type_expression(parent_nodes[0].children[0])
+    )
     initial_nodes = tuple(
         item for item in items if item.data == "initial_state_property"
     )
@@ -917,6 +929,23 @@ def _model_type(
         for item in items
         if item.data == "state_declaration"
     )
+    if any(
+        parameter.name == "parent"
+        for state in states
+        for handler in (*state.transitions, *state.actions)
+        for parameter in handler.parameters
+    ) or any(
+        block.switches == "parent"
+        or any(binding.name == "parent" for binding in block.bindings)
+        for state in states
+        for handler in (*state.transitions, *state.actions)
+        for block in handler.blocks
+    ):
+        raise _semantic_error(
+            module,
+            node,
+            "parent is reserved in a type body and cannot be shadowed",
+        )
     field_container = Tree("field_container", list(items))
     fields = _fields(field_container)
     return ModelType(
@@ -940,6 +969,7 @@ def _model_type(
         cpu_core=cpu_core,
         syscall_exit_flow=syscall_exit_flow,
         event_flow=event_flow,
+        parent_type=parent_type,
     )
 
 
@@ -1194,6 +1224,10 @@ def _expand_inheritance(
         item.name: item for module in lowered for item in module.predicates
     }
     expanded_types: dict[tuple[str, ...], ModelType] = {}
+    # The expression in a parent contract keeps its source spelling.  Keep
+    # the declaring module alongside it so an inherited contract imported from
+    # another module still resolves in that module's lexical scope.
+    parent_type_scopes: dict[tuple[str, ...], tuple[str, ...]] = {}
     visiting: list[tuple[str, ...]] = []
 
     def resolve_base(
@@ -1226,6 +1260,19 @@ def _expand_inheritance(
                     f"base type {'::'.join(raw.base_type.name)!r} is not declared",
                 )
             base = expand_type(base_name)
+        # A parent contract is inherited monotonically.  Once a base type has
+        # one, a derived declaration may not repeat or replace it; a contract
+        # may only be introduced on a type whose ancestry has none.
+        if (
+            base is not None
+            and base.parent_type is not None
+            and raw.parent_type is not None
+        ):
+            raise _semantic_error(
+                module,
+                node,
+                "derived type must not redeclare its inherited parent type contract",
+            )
         fields = _merge_fields(None if base is None else base.fields, raw.fields)
         states = _merge_states(
             module,
@@ -1258,7 +1305,16 @@ def _expand_inheritance(
             cpu_core,
             syscall_exit_flow,
             event_flow,
+            raw.parent_type if raw.parent_type is not None else (
+                None if base is None else base.parent_type
+            ),
         )
+        if expanded.parent_type is not None:
+            parent_type_scopes[name] = (
+                name[:-1]
+                if raw.parent_type is not None
+                else parent_type_scopes.get(base.name, base.name[:-1])
+            )
         state_names = {state.name for state in states}
         if initial_state is not None and initial_state not in state_names:
             raise _semantic_error(
@@ -1283,6 +1339,51 @@ def _expand_inheritance(
 
     for name in raw_types:
         expand_type(name)
+
+    # Validate the type-level parent graph separately from ordinary type
+    # inheritance.  Parent contracts name declarations (not objects), and a
+    # cycle would make every conforming object impossible to instantiate.
+    parent_contract_visiting: list[tuple[str, ...]] = []
+    parent_contract_done: set[tuple[str, ...]] = set()
+
+    def validate_parent_contract(name: tuple[str, ...]) -> None:
+        if name in parent_contract_done:
+            return
+        if name in parent_contract_visiting:
+            cycle = (
+                parent_contract_visiting[parent_contract_visiting.index(name) :]
+                + [name]
+            )
+            raise _semantic_error(
+                loaded[name[:-1]],
+                type_nodes[name],
+                "parent type contract cycle: "
+                + " -> ".join("::".join(item) for item in cycle),
+            )
+        parent_contract_visiting.append(name)
+        parent_type = expanded_types[name].parent_type
+        if parent_type is not None:
+            if parent_type.arguments:
+                raise _semantic_error(
+                    loaded[name[:-1]],
+                    type_nodes[name],
+                    "parent type contract must name a non-generic declared type",
+                )
+            parent_name = resolve_base(
+                parent_type, parent_type_scopes.get(name, name[:-1])
+            )
+            if parent_name not in raw_types:
+                raise _semantic_error(
+                    loaded[name[:-1]],
+                    type_nodes[name],
+                    f"parent type {'::'.join(parent_type.name)!r} is not declared",
+                )
+            validate_parent_contract(parent_name)
+        parent_contract_visiting.pop()
+        parent_contract_done.add(name)
+
+    for name in raw_types:
+        validate_parent_contract(name)
 
     declared_templates: dict[
         tuple[str, ...], tuple[tuple[str, ModelObject, Tree], ...]
@@ -1391,11 +1492,41 @@ def _expand_inheritance(
             )
         base_name = resolve_base(raw.base_type, module_name)
         base = expanded_types.get(base_name)
+        parent_expression = raw.parent
+        parent_binding = parent_expression
+        if parent_expression is not None:
+            parent_access = _flatten_access(parent_expression)
+            if parent_access is not None and all(
+                operation in {"path", "member"} for operation in parent_access[1]
+            ):
+                parent_binding = _object_expression(
+                    _resolve_target(
+                        tuple(parent_access[0]),
+                        module_name,
+                        imports[module_name],
+                    )
+                )
+        inherited_states = (
+            ()
+            if base is None
+            else _substitute_parent(base.states, parent_binding)
+            if parent_binding is not None
+            else base.states
+        )
+        inherited_fields = (
+            None
+            if base is None or base.fields is None
+            else _substitute_parent(base.fields, parent_binding)
+            if parent_binding is not None
+            else base.fields
+        )
         states = _merge_states(
             module,
             node,
-            () if base is None else base.states,
-            raw.states,
+            inherited_states,
+            _substitute_parent(raw.states, parent_binding)
+            if parent_binding is not None
+            else raw.states,
         )
         initial_state = raw.initial_state
         if initial_state is None and base is not None:
@@ -1404,7 +1535,7 @@ def _expand_inheritance(
             initial_state = ("State", "Base")
         continuation = False if base is None else base.continuation
         states = _rebind_states(states, object_name)
-        fields = _merge_fields(None if base is None else base.fields, raw.attrs)
+        fields = _merge_fields(inherited_fields, raw.attrs)
         abstract = tuple(
             (state.name, handler.signal)
             for state in states
@@ -1584,12 +1715,14 @@ def _expand_inheritance(
     def resolve_object_expression(
         expression: ModelExpression,
         module_name: tuple[str, ...],
+        *,
+        allow_members: bool = False,
     ) -> tuple[str, ...] | None:
         access = _flatten_access(expression)
         if access is None:
             return None
         segments, operations = access
-        if any(operation == "member" for operation in operations):
+        if not allow_members and any(operation == "member" for operation in operations):
             return None
         candidate = _resolve_target(tuple(segments), module_name, imports[module_name])
         if candidate in object_names:
@@ -1737,6 +1870,81 @@ def _expand_inheritance(
             if arguments:
                 return False
         return False
+
+    # Bind and validate every object parent.  A type contract requires an
+    # explicit (ordinary object) or synthesized (nested object) parent; all
+    # supplied parent expressions must nevertheless resolve to an object.  The
+    # resulting graph is checked for self-reference and longer cycles.
+    parent_edges: dict[tuple[str, ...], tuple[str, ...]] = {}
+    for name, model_object in expanded_objects.items():
+        module_name = object_module(name)
+        actual_type = object_type(name)
+        declared_parent_type = (
+            expanded_types[actual_type[0]].parent_type
+            if actual_type[0] in expanded_types
+            else None
+        )
+        parent_name = (
+            None
+            if model_object.parent is None
+            else name
+            if model_object.parent.kind == "identifier"
+            and model_object.parent.value == "self"
+            else resolve_object_expression(
+                model_object.parent, module_name, allow_members=True
+            )
+        )
+        if model_object.parent is not None and parent_name is None:
+            raise _semantic_error(
+                loaded[module_name],
+                object_nodes[name],
+                f"parent of object {'::'.join(name)!r} must resolve to a declared object",
+            )
+        if declared_parent_type is not None:
+            if parent_name is None:
+                raise _semantic_error(
+                    loaded[module_name],
+                    object_nodes[name],
+                    f"object {'::'.join(name)!r} requires a parent object",
+                )
+            expected_parent = resolve_type(
+                declared_parent_type,
+                parent_type_scopes.get(actual_type[0], actual_type[0][:-1]),
+            )
+            if not compatible(object_type(parent_name), expected_parent):
+                raise _semantic_error(
+                    loaded[module_name],
+                    object_nodes[name],
+                    f"parent of object {'::'.join(name)!r} has incompatible type",
+                )
+        if parent_name is not None:
+            if parent_name == name:
+                raise _semantic_error(
+                    loaded[module_name],
+                    object_nodes[name],
+                    f"object {'::'.join(name)!r} cannot be its own parent",
+                )
+            parent_edges[name] = parent_name
+
+    checked_parent_paths: set[tuple[str, ...]] = set()
+    for start in parent_edges:
+        path: list[tuple[str, ...]] = []
+        cursor = start
+        while cursor in parent_edges:
+            if cursor in path:
+                cycle = path[path.index(cursor) :] + [cursor]
+                anchor = cycle[0]
+                raise _semantic_error(
+                    loaded[object_module(anchor)],
+                    object_nodes[anchor],
+                    "object parent cycle: "
+                    + " -> ".join("::".join(item) for item in cycle),
+                )
+            if cursor in checked_parent_paths:
+                break
+            path.append(cursor)
+            cursor = parent_edges[cursor]
+        checked_parent_paths.update(path)
 
     for type_name, model_type in expanded_types.items():
         for field in model_type.fields or ():
@@ -2333,7 +2541,7 @@ def _expand_inheritance(
                 None
                 if model_object.parent is None
                 else resolve_object_expression(
-                    model_object.parent, object_module(name)
+                    model_object.parent, object_module(name), allow_members=True
                 )
             )
             if parent is None or not is_cpu_core_object(parent):
@@ -2427,7 +2635,7 @@ def _expand_inheritance(
                 if is_task_flow_object(name)
                 and candidate.parent is not None
                 and resolve_object_expression(
-                    candidate.parent, object_module(name)
+                    candidate.parent, object_module(name), allow_members=True
                 )
                 == task
             )
@@ -2556,7 +2764,13 @@ def _expand_inheritance(
             return (("bool",), ())
         access = _flatten_access(expression)
         if access in task_owned_selectors:
-            if source is None or not is_task_object(source):
+            if source is None or (
+                source in expanded_types
+                and not is_task_type(source)
+            ) or (
+                source not in expanded_types
+                and not is_task_object(source)
+            ):
                 raise _semantic_error(
                     loaded[module_name],
                     loaded[module_name].tree,
@@ -2617,7 +2831,21 @@ def _expand_inheritance(
             identifier = str(expression.value)
             if identifier in parameters:
                 return parameters[identifier]
+            if identifier == "parent" and source in expanded_types:
+                parent_contract = expanded_types[source].parent_type
+                if parent_contract is None:
+                    raise _semantic_error(
+                        loaded[module_name],
+                        type_nodes[source],
+                        "parent is only available in a type with a parent contract",
+                    )
+                return resolve_type(
+                    parent_contract,
+                    parent_type_scopes.get(source, source[:-1]),
+                )
             if identifier == "self" and source is not None:
+                if source in expanded_types:
+                    return (source, ())
                 return object_type(source)
             if identifier == "CurrentTaskRef":
                 if len(task_types) != 1:
@@ -2645,10 +2873,22 @@ def _expand_inheritance(
             return (
                 None
                 if field is None
-                else resolve_type(field.type, object_module(source))
+                else resolve_type(
+                    field.type,
+                    source[:-1] if source in expanded_types else object_module(source),
+                )
             )
         object_name = resolve_object_expression(expression, module_name)
-        return None if object_name is None else object_type(object_name)
+        if object_name is not None:
+            return object_type(object_name)
+        if expression.kind in {"member", "path"}:
+            # Resolve the base first even though the compact type system does
+            # not assign a distinct type to arbitrary members (for example,
+            # ``parent.state``).  This makes use of the parent builtin obey its
+            # declaration contract instead of silently becoming an unknown
+            # expression.
+            expression_type(expression.children[0], module_name, source, parameters, fields)
+        return None
 
     def binding_type_expression(value: TypeKey) -> ModelTypeExpression:
         name, arguments = value
@@ -2712,7 +2952,7 @@ def _expand_inheritance(
         blocks = tuple(rewritten.get(id(block), block) for block in handler.blocks)
         return replace(handler, blocks=blocks)
 
-    # Binding types are part of schema-v14 IR, so infer and freeze them before
+    # Binding types are part of schema-v15 IR, so infer and freeze them before
     # the ordinary handler expression/signature validation below.
     for name, model_object in tuple(expanded_objects.items()):
         states = tuple(
@@ -2776,7 +3016,7 @@ def _expand_inheritance(
                         "binding right-hand side must match Relation.unique_value or Map.lookup",
                     )
                 inferred = expression_type(
-                    expression, module_name, None, environment, fields
+                    expression, module_name, model_type.name, environment, fields
                 )
                 assert inferred is not None
                 values.append(replace(binding, type=binding_type_expression(inferred)))
@@ -2803,6 +3043,52 @@ def _expand_inheritance(
             for state in model_type.states
         )
         expanded_types[name] = replace(model_type, states=states)
+
+    # Type declarations are checked in their template scope as well as after
+    # object expansion.  In particular, the ``parent`` builtin is resolved to
+    # the declared parent type here, so an ill-typed predicate argument cannot
+    # hide until a concrete object happens to instantiate the type.
+    for name, model_type in expanded_types.items():
+        module_name = name[:-1]
+        fields = {field.name: field for field in model_type.fields or ()}
+        for state in model_type.states:
+            for invariant_block in state.invariants:
+                for expression in invariant_block:
+                    expression_type(expression, module_name, name, {}, fields)
+            for handler in (*state.transitions, *state.actions):
+                environment = {
+                    parameter.name: resolve_type(parameter.type, module_name)
+                    for parameter in handler.parameters
+                }
+                for block in handler.blocks:
+                    for expression in block.expressions:
+                        expression_type(
+                            expression, module_name, name, environment, fields
+                        )
+                    for signal in block.signals:
+                        expression_type(
+                            signal.target, module_name, name, environment, fields
+                        )
+                        for argument in signal.arguments:
+                            expression_type(
+                                argument, module_name, name, environment, fields
+                            )
+                    for update in block.updates:
+                        expression_type(
+                            update.value, module_name, name, environment, fields
+                        )
+        for field in fields.values():
+            if field.default is not None:
+                actual = expression_type(
+                    field.default, module_name, name, {}, fields
+                )
+                expected = resolve_type(field.type, module_name)
+                if actual is None or not compatible(actual, expected):
+                    raise _semantic_error(
+                        loaded[module_name],
+                        type_nodes[name],
+                        f"default value for field {field.name!r} has incompatible type",
+                    )
 
     signatures: dict[
         tuple[tuple[str, ...], tuple[str, ...]], tuple[ModelParameter, ...]

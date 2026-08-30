@@ -22,6 +22,7 @@ type_declaration: "type" IDENTIFIER type_base? type_tail
 type_base: ":" type_expression
 ?type_tail: ";" | "{" type_item* "}"
 ?type_item: field_declaration
+          | type_parent_property
           | object_declaration
           | continuation_property
           | sched_core_property
@@ -34,6 +35,7 @@ type_base: ":" type_expression
 field_declaration: mutable_marker? IDENTIFIER ":" type_expression field_default? ";"
 mutable_marker: "mutable"
 field_default: "=" expression
+type_parent_property: "parent" ":" type_expression ";"
 
 object_declaration: "object" IDENTIFIER ":" type_expression "{" object_item* "}"
 ?object_item: initial_state_property

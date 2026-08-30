@@ -55,6 +55,12 @@ def _target_name(expression: ModelExpression) -> tuple[str, ...]:
     return tuple(reversed(parts))
 
 
+def _walk_expression(expression: ModelExpression):
+    yield expression
+    for child in expression.children:
+        yield from _walk_expression(child)
+
+
 def _block(kind: str, *signals: ModelSignal) -> ModelHandlerBlock:
     return ModelHandlerBlock(kind, signals=signals)
 
@@ -517,7 +523,7 @@ boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
 EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.spec"))(
-    schema_version=14,
+    schema_version=15,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -1705,6 +1711,86 @@ object Probe: T {}
             ("root", "Parent0"),
         )
 
+    def test_type_parent_contract_binds_templates_and_inherits_lifecycle(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    type Parent {}
+                    predicate bound_to_parent(value: Parent) -> bool;
+                    type Child {
+                        parent: Parent;
+                        initial_state: State::Ready;
+                        state State::Ready {
+                            transitions {
+                                on Transition::Enable -> State::Online {
+                                    depends_on { bound_to_parent(parent); }
+                                }
+                            }
+                        }
+                        state State::Online { invariant { bound_to_parent(parent); } }
+                    }
+                    type Container: Parent { object ChildObject: Child {} }
+                    object Parent0: Parent {}
+                    object Container0: Container {}
+                    object Direct: Child { parent: Parent0; }
+                """
+            }
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        child_type = next(
+            item for item in model.modules[0].types if item.name[-1] == "Child"
+        )
+        self.assertEqual(child_type.parent_type.name, ("Parent",))
+        direct = next(item for item in model.objects if item.name[-1] == "Direct")
+        nested = next(item for item in model.objects if item.name[-1] == "ChildObject")
+        self.assertEqual(_target_name(direct.parent), ("Parent0",))
+        self.assertEqual(_target_name(nested.parent), ("root", "Container0"))
+        for child in (direct, nested):
+            expressions = tuple(
+                expression
+                for state in child.states
+                for block in state.invariants
+                for expression in block
+            )
+            expressions += tuple(
+                expression
+                for state in child.states
+                for transition in state.transitions
+                for block in transition.blocks
+                for expression in block.expressions
+            )
+            self.assertFalse(
+                any(
+                    node.kind == "identifier" and node.value == "parent"
+                    for expression in expressions
+                    for node in _walk_expression(expression)
+                )
+            )
+
+    def test_type_parent_contract_and_object_parent_diagnostics(self) -> None:
+        cases = (
+            ("type Child { parent: Missing; }", "parent type 'Missing' is not declared"),
+            (
+                "type Parent {} type Child { parent: Parent; } object Child0: Child {}",
+                "requires a parent object",
+            ),
+            (
+                "type Parent {} type Other {} type Child { parent: Parent; } object P: Parent {} object O: Other {} object Child0: Child { parent: O; }",
+                "incompatible type",
+            ),
+            (
+                "type Parent {} type Child: Parent { parent: Parent; } object Child0: Child { parent: Child0; }",
+                "cannot be its own parent",
+            ),
+        )
+        for source, message in cases:
+            with self.subTest(message=message):
+                with model_tree({"root.spec": source}) as (_, entry_path):
+                    with self.assertRaises(CompilationError) as caught:
+                        compile_spec(entry_path)
+                self.assertIn(message, caught.exception.diagnostic.message)
+
     def test_imported_type_nested_object_stays_below_the_instance(self) -> None:
         with model_tree(
             {
@@ -2496,6 +2582,11 @@ class ModelIRJSONTests(unittest.TestCase):
             "value": "NormalZone",
             "children": [],
         }
+        missing_parent_type = json.loads(EXPECTED_JSON)
+        first_typed_module = next(
+            module for module in missing_parent_type["modules"] if module["types"]
+        )
+        del first_typed_module["types"][0]["parent_type"]
         legacy_selects_field = EXPECTED_JSON.replace(
             '"switches": "next_task_ref"',
             '"selects": "next_task_ref"',
@@ -2510,10 +2601,11 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
             json.dumps(invalid_nested_parent),
+            json.dumps(missing_parent_type),
             legacy_selects_field,
-            EXPECTED_JSON.replace('"schema_version": 14', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 15', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":14,"schema_version":14}',
+            '{"schema_version":15,"schema_version":15}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -2522,7 +2614,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=14,
+            schema_version=15,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -2530,14 +2622,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=14,
+                schema_version=15,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=14,
+                schema_version=15,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

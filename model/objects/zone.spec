@@ -63,16 +63,44 @@ predicate free_area_excludes_reserved_and_unavailable(
 ) -> bool;
 
 type FreeAreaType {
+    parent: Zone;
     initial_state: State::Ready;
 
     state State::Ready {
         transitions {
             on Transition::Enable -> State::Online {
+                depends_on {
+                    parent.state == State::Online;
+                    zone_bound_to_unique_memory_node(
+                        parent,
+                        MemoryNode,
+                    );
+                }
+
+                establishes {
+                    free_area_bound_to_zone(self, parent);
+                    free_area_excludes_reserved_and_unavailable(
+                        self,
+                        parent,
+                    );
+                }
             }
         }
     }
 
     state State::Online {
+        invariant {
+            parent.state == State::Online;
+            zone_bound_to_unique_memory_node(
+                parent,
+                MemoryNode,
+            );
+            free_area_bound_to_zone(self, parent);
+            free_area_excludes_reserved_and_unavailable(
+                self,
+                parent,
+            );
+        }
     }
 }
 
@@ -83,44 +111,7 @@ type Zone {
      * A FreeArea is a possibly-empty ownership envelope. Its implementation
      * structure (orders, bitmaps, lists, and Pages) is deliberately deferred.
      */
-    object FreeArea: FreeAreaType {
-        state State::Ready {
-            transitions {
-                override on Transition::Enable -> State::Online {
-                    depends_on {
-                        parent.state == State::Online;
-                        zone_bound_to_unique_memory_node(
-                            parent,
-                            MemoryNode,
-                        );
-                    }
-
-                    establishes {
-                        free_area_bound_to_zone(self, parent);
-                        free_area_excludes_reserved_and_unavailable(
-                            self,
-                            parent,
-                        );
-                    }
-                }
-            }
-        }
-
-        state State::Online {
-            invariant {
-                parent.state == State::Online;
-                zone_bound_to_unique_memory_node(
-                    parent,
-                    MemoryNode,
-                );
-                free_area_bound_to_zone(self, parent);
-                free_area_excludes_reserved_and_unavailable(
-                    self,
-                    parent,
-                );
-            }
-        }
-    }
+    object FreeArea: FreeAreaType {}
 
     state State::Ready {
         transitions {
