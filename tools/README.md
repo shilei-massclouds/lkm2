@@ -8,30 +8,35 @@
 当前工具链处理流程为：
 
 ```text
-model/main.spec → entry AST → recursive module graph → Model IR v13 → canonical JSON
+model/main.spec → entry AST → recursive module graph → Model IR v14 → canonical JSON
 entry external signals → tools/build/derive/main.sequence.json
-Model IR v13 + external-root sequence v3 → derive → result JSON v12 / human stdout
+Model IR v14 + external-root sequence v3 → derive → result JSON v12 / human stdout
 ```
 
 有状态对象可以省略 `initial_state`；modelc 会将其规范化为
 `State::Base`。因此这类对象必须声明 `state State::Base`。显式指定的初始状态保持
-不变，无状态对象仍没有初始状态。Model IR v13 的严格 JSON schema 中：
+不变，无状态对象仍没有初始状态。Model IR v14 的严格 JSON schema 中：
 `initial_state` 字段始终必需，有状态对象的默认值会明确写成
 `["State", "Base"]`，无状态对象写成 `null`。
 
 入口接受一条或多条简单的 `spec IDENT;`，然后是一条点分
 `origin <qualified-name>;`。每条入口 `spec` 都声明一个并列根模块；第一条是
-Model IR v13 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
+Model IR v14 `entry.spec` 中的主根。当前模型由 `systems`、`objects`、
 `phases`、`flows` 四个并列根模块组成。`spec` 与 Rust 的 `mod` 类似：入口根
 声明 `spec systems;` 装载同目录的 `systems.spec`，其中的
 `spec human;` 再装载 `systems/human.spec`。只有显式声明会进入模块图，
 不自动发现目录，也不使用 `<module>/main.spec`。
 
 模块文件必须完整符合 [`module_grammar.lark`](src/modelc/module_grammar.lark)
-定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v13 lowering
+定义的语法；未知关键字、未知声明和错误语法都会报错。Model IR v14 lowering
 保留 predicate、type、object、external、state、handler、deferred 和通用表达式树。
 绝对 `use` 路径使用 `model::`，相对路径使用 `self::` 或连续的
 `super::`；不带根关键字的裸路径也从 model root 开始。`crate::` 不再受支持。
+
+类型体可以声明相对命名的子对象模板：
+`type Parent { object Child: ChildType { ... } }`。modelc 会为每个 `Parent` 实例生成稳定路径
+`<ParentObject>.Child`；模板内置的 `parent` 标识符会静态替换为当前父实例，生成
+对象的 `parent` 属性也自动指向该实例。层级对象仍保存在父对象所属模块中。
 `use` 只导入名字，不触发文件装载。当前会验证
 模块前缀和重复本地导入名，但不会验证路径末端对象是否存在。
 
@@ -158,7 +163,7 @@ continuation Action 的同步 drives、yields 和断点恢复。Action/Transitio
 原子提交；mutable 对象引用字段和内建唯一 FIFO `Collection<T>.Action::Enqueue(T)`
 可直接执行。
 
-Model IR v13 还提供内建 `String`、`Relation<K,V>`、`Map<K,V>` 和一个有序
+Model IR v14 还提供内建 `String`、`Relation<K,V>`、`Map<K,V>` 和一个有序
 `binds` block。Relation/Map 对象必须与其它有状态对象一样显式声明生命周期；
 `establishes Owner.contains(k, v)` 单调建立 tuple，普通条件中的 `contains` 和
 `has_key` 只读查询。Relation 的 `unique_value` 与 Map 的 `lookup` 只能作为
@@ -227,7 +232,7 @@ idle Task，始终位于 runq 之外；Kernel 首次 Resume 使其进入 OnCpu�
 送达由 `cpu_ref` 解析出的 `BootCPU`；CPU 创建 fresh `SyscallExitFlow0`，再驱动
 `KernelInitTask.Action::Exit(0)`。统一 EventFlow 不调用 Scheduler、不改变 Task `OnCpu`
 状态或 runq；PID 1 保护最终以 `Attempted to kill init!` panic，CLI 返回 1。Model IR
-schema 为 v13。InterruptFlow 受每 CPU `Unknown/Masked/Unmasked` gate 控制，masked 输入
+schema 为 v14。InterruptFlow 受每 CPU `Unknown/Masked/Unmasked` gate 控制，masked 输入
 进入 FIFO pending；`ClearPending` 独立丢弃，`Unmask` 顺序投递。ExceptionFlow 绕过 mask
 但限本地 CPU；Interrupt/Exception 返回原 TaskFlow/UserAppRuntime 坐标，SyscallExit
 保持本地 terminal，嵌套 EventFlow 明确失败。
@@ -244,7 +249,7 @@ schema 为 v13。InterruptFlow 受每 CPU `Unknown/Masked/Unmasked` gate 控制�
 - `derive.load_derivation_result()`
 - `derive.render_derivation_result()`
 
-AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v13
+AST 保留一基、末端排他的源码范围；Model IR 不保存路径和源码位置。schema v14
 loader 严格拒绝旧版本、未知字段、重复声明、无效状态引用、重复 handler 和未知
 信号目标，并规范排序模块和声明。
 Derivation Result schema v12 同样严格拒绝旧 `selections`、Scheduler `current_task`

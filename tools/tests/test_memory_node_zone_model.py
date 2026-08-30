@@ -20,6 +20,8 @@ ZONE_PREDICATES = {
     "movable_zone_empty_or_tail_of_highest_populated_base_zone",
     "node_zone_effective_ranges_are_pairwise_disjoint",
     "node_zone_boundary_envelopes_cover_memory",
+    "free_area_bound_to_zone",
+    "free_area_excludes_reserved_and_unavailable",
 }
 
 
@@ -86,6 +88,12 @@ def _predicate_calls(expressions):
     )
 
 
+def _walk_expression(expression):
+    yield expression
+    for child in expression.children:
+        yield from _walk_expression(child)
+
+
 class MemoryNodeZoneModelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -97,6 +105,12 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
             model_object.name[-1]: model_object
             for module in (cls.memory_node_module, cls.zone_module)
             for model_object in module.objects
+            if len(model_object.name) == len(module.name) + 1
+        }
+        cls.free_areas = {
+            model_object.name[-2]: model_object
+            for model_object in cls.zone_module.objects
+            if model_object.name[-1] == "FreeArea"
         }
 
     def test_model_has_one_memory_node_and_exactly_three_zones(self) -> None:
@@ -110,11 +124,23 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
         )
         self.assertEqual(
             {item.name[-1] for item in self.zone_module.types},
-            {"Zone"},
+            {"FreeAreaType", "Zone"},
         )
         self.assertEqual(
-            {item.name[-1] for item in self.zone_module.objects},
+            {
+                item.name[-1]
+                for item in self.zone_module.objects
+                if len(item.name) == len(self.zone_module.name) + 1
+            },
             {"DMA32Zone", "NormalZone", "MovableZone"},
+        )
+        self.assertEqual(
+            {item.name for item in self.free_areas.values()},
+            {
+                ("objects", "zone", "DMA32Zone", "FreeArea"),
+                ("objects", "zone", "NormalZone", "FreeArea"),
+                ("objects", "zone", "MovableZone", "FreeArea"),
+            },
         )
 
         memory_node = self.objects["MemoryNode"]
@@ -163,9 +189,48 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
             *self.zone_module.types,
         ):
             self.assertEqual(model_type.fields, ())
-        for model_object in self.objects.values():
+        for model_object in (*self.objects.values(), *self.free_areas.values()):
             self.assertEqual(model_object.attrs, ())
             self.assertEqual(model_object.base_type.arguments, ())
+
+    def test_each_zone_gets_one_bound_empty_capable_free_area(self) -> None:
+        for zone_name, free_area in self.free_areas.items():
+            with self.subTest(zone=zone_name):
+                self.assertEqual(free_area.base_type.name, ("FreeAreaType",))
+                self.assertEqual(
+                    _target_name(free_area.parent),
+                    ("objects", "zone", zone_name),
+                )
+                depends_on = _block(_enable(free_area), "depends_on").expressions
+                self.assertEqual(_state_dependencies(depends_on), (zone_name,))
+                self.assertEqual(
+                    set(_predicate_calls(depends_on)),
+                    {"zone_bound_to_unique_memory_node"},
+                )
+                established = set(
+                    _predicate_calls(
+                        _block(_enable(free_area), "establishes").expressions
+                    )
+                )
+                self.assertEqual(
+                    established,
+                    {
+                        "free_area_bound_to_zone",
+                        "free_area_excludes_reserved_and_unavailable",
+                    },
+                )
+                invariants = _invariant_expressions(free_area)
+                self.assertEqual(_state_dependencies(invariants), (zone_name,))
+                self.assertTrue(established.issubset(_predicate_calls(invariants)))
+                self.assertNotIn(
+                    "parent",
+                    {
+                        str(node.value)
+                        for expression in (*depends_on, *invariants)
+                        for node in _walk_expression(expression)
+                        if node.kind == "identifier"
+                    },
+                )
 
     def test_online_dependencies_follow_the_boundary_fact_chain(self) -> None:
         expected_state_dependencies = {
@@ -298,6 +363,11 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
                     "Zone",
                     "Zone",
                 ),
+                "free_area_bound_to_zone": ("FreeAreaType", "Zone"),
+                "free_area_excludes_reserved_and_unavailable": (
+                    "FreeAreaType",
+                    "Zone",
+                ),
             },
         )
 
@@ -331,8 +401,9 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
             "pagecount",
             "node_id",
             "nodeid",
-            "free_area",
             "zonelist",
+            "bitmap",
+            "order",
         )
         for declaration in (
             *self.memory_node_module.types,

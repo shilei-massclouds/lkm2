@@ -1,4 +1,4 @@
-"""Frozen data model and semantic validation for Model IR schema v13."""
+"""Frozen data model and semantic validation for Model IR schema v14."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import re
 from typing import ClassVar
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _EXPRESSION_KINDS = frozenset(
     {"identifier", "integer", "string", "unary", "binary", "member", "path", "index", "call"}
@@ -715,7 +715,14 @@ class ModelModule:
             _validate_tuple(values, item_type, f"module.{field_name}")
             ordered = tuple(sorted(values, key=lambda item: item.name))
             for item in ordered:
-                if item.name[:-1] != self.name:
+                in_module = (
+                    item.name[: len(self.name)] == self.name
+                    and len(item.name) > len(self.name)
+                )
+                direct_declaration = item.name[:-1] == self.name
+                if not in_module or (
+                    field_name != "objects" and not direct_declaration
+                ):
                     raise ModelIRValidationError(
                         f"declaration {'.'.join(item.name)!r} is not in module {'.'.join(self.name)!r}"
                     )
@@ -724,6 +731,29 @@ class ModelModule:
         if len(set(all_names)) != len(all_names):
             duplicate = next(name for name in all_names if all_names.count(name) > 1)
             raise ModelIRValidationError(f"duplicate declaration {'.'.join(duplicate)!r}")
+        object_names = {item.name for item in self.objects}
+        for model_object in self.objects:
+            if len(model_object.name) == len(self.name) + 1:
+                continue
+            expected_parent = model_object.name[:-1]
+            if expected_parent not in object_names:
+                raise ModelIRValidationError(
+                    f"nested object {'.'.join(model_object.name)!r} is missing "
+                    f"parent object {'.'.join(expected_parent)!r}"
+                )
+            parent_access = (
+                None
+                if model_object.parent is None
+                else _expression_access(model_object.parent)
+            )
+            if parent_access != (
+                expected_parent,
+                ("path",) * (len(expected_parent) - 1),
+            ):
+                raise ModelIRValidationError(
+                    f"nested object {'.'.join(model_object.name)!r} parent must "
+                    "reference its containing object"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -762,6 +792,11 @@ class ModelIR:
         object_items = {
             item.name: item for module in ordered for item in module.objects
         }
+        object_modules = {
+            item.name: module.name
+            for module in ordered
+            for item in module.objects
+        }
         objects = set(object_items)
         type_items = {
             item.name: item for module in ordered for item in module.types
@@ -797,7 +832,7 @@ class ModelIR:
 
         def object_has_type(model_object: ModelObject, suffix: str) -> bool:
             current = resolve_type_name(
-                model_object.base_type, model_object.name[:-1]
+                model_object.base_type, object_modules[model_object.name]
             )
             seen: set[tuple[str, ...]] = set()
             while current is not None and current not in seen:
@@ -814,7 +849,7 @@ class ModelIR:
 
         def object_is_sched_core(model_object: ModelObject) -> bool:
             current = resolve_type_name(
-                model_object.base_type, model_object.name[:-1]
+                model_object.base_type, object_modules[model_object.name]
             )
             seen: set[tuple[str, ...]] = set()
             while current is not None and current not in seen:
@@ -831,7 +866,7 @@ class ModelIR:
 
         def object_is_user_runtime(model_object: ModelObject) -> bool:
             current = resolve_type_name(
-                model_object.base_type, model_object.name[:-1]
+                model_object.base_type, object_modules[model_object.name]
             )
             seen: set[tuple[str, ...]] = set()
             while current is not None and current not in seen:
@@ -848,7 +883,7 @@ class ModelIR:
 
         def object_is_cpu_core(model_object: ModelObject) -> bool:
             current = resolve_type_name(
-                model_object.base_type, model_object.name[:-1]
+                model_object.base_type, object_modules[model_object.name]
             )
             seen: set[tuple[str, ...]] = set()
             while current is not None and current not in seen:
@@ -865,7 +900,7 @@ class ModelIR:
 
         def object_is_syscall_exit_flow(model_object: ModelObject) -> bool:
             current = resolve_type_name(
-                model_object.base_type, model_object.name[:-1]
+                model_object.base_type, object_modules[model_object.name]
             )
             seen: set[tuple[str, ...]] = set()
             while current is not None and current not in seen:
@@ -882,7 +917,7 @@ class ModelIR:
 
         def object_is_event_flow(model_object: ModelObject) -> bool:
             current = resolve_type_name(
-                model_object.base_type, model_object.name[:-1]
+                model_object.base_type, object_modules[model_object.name]
             )
             seen: set[tuple[str, ...]] = set()
             while current is not None and current not in seen:

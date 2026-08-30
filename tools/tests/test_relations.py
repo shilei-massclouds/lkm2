@@ -53,7 +53,7 @@ class FiniteRelationTests(unittest.TestCase):
 
     def test_early_console_success_ir_and_result_round_trip(self) -> None:
         model = self._compile()
-        self.assertEqual(model.schema_version, 13)
+        self.assertEqual(model.schema_version, 14)
         ir = StringIO()
         dump_model_ir(model, ir)
         self.assertEqual(load_model_ir(StringIO(ir.getvalue())), model)

@@ -1,8 +1,8 @@
-"""Compilation pipeline from a model-root specification to Model IR v13."""
+"""Compilation pipeline from a model-root specification to Model IR v14."""
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields as dataclass_fields, is_dataclass, replace
 import json
 from pathlib import Path
 
@@ -680,11 +680,24 @@ def _state(
 
 
 def _object(
-    module: LoadedModule, node: Tree, imports: dict[str, tuple[str, ...]]
+    module: LoadedModule,
+    node: Tree,
+    imports: dict[str, tuple[str, ...]],
+    *,
+    name: tuple[str, ...] | None = None,
+    nested: bool = False,
 ) -> ModelObject:
-    name = module.name + (str(node.children[0]),)
+    name = module.name + (str(node.children[0]),) if name is None else name
     initial_node = _only(module, node, "initial_state_property", "initial_state")
     parent_node = _only(module, node, "parent_property", "parent")
+    if nested and parent_node is not None:
+        parent_expression = _lower_expression(parent_node.children[0])
+        if parent_expression != ModelExpression("identifier", "parent"):
+            raise _semantic_error(
+                module,
+                parent_node,
+                "nested object parent must reference the current template parent",
+            )
     source_node = _only(module, node, "source_property", "source")
     idle_task_node = _only(module, node, "idle_task_property", "idle_task")
     logical_id_node = _only(module, node, "logical_id_property", "logical_id")
@@ -731,7 +744,13 @@ def _object(
         name=name,
         base_type=_type_expression(node.children[1]),
         initial_state=initial_state,
-        parent=None if parent_node is None else _lower_expression(parent_node.children[0]),
+        parent=(
+            ModelExpression("identifier", "parent")
+            if nested
+            else None
+            if parent_node is None
+            else _lower_expression(parent_node.children[0])
+        ),
         source=None if source_node is None else _lower_expression(source_node.children[0]),
         attrs=None if not declared_fields else declared_fields,
         states=states,
@@ -1121,6 +1140,31 @@ def _rebind_states(
     )
 
 
+def _substitute_parent(value: object, parent: ModelExpression) -> object:
+    """Replace the nested-template ``parent`` builtin throughout a frozen IR value."""
+
+    if isinstance(value, ModelExpression):
+        if value.kind == "identifier" and value.value == "parent":
+            return parent
+        return replace(
+            value,
+            children=tuple(
+                _substitute_parent(child, parent) for child in value.children
+            ),
+        )
+    if isinstance(value, tuple):
+        return tuple(_substitute_parent(item, parent) for item in value)
+    if is_dataclass(value):
+        return replace(
+            value,
+            **{
+                field.name: _substitute_parent(getattr(value, field.name), parent)
+                for field in dataclass_fields(value)
+            },
+        )
+    return value
+
+
 def _expand_inheritance(
     lowered: tuple[ModelModule, ...],
     modules: tuple[LoadedModule, ...],
@@ -1145,6 +1189,9 @@ def _expand_inheritance(
 
     raw_types = {
         item.name: item for module in lowered for item in module.types
+    }
+    predicates = {
+        item.name: item for module in lowered for item in module.predicates
     }
     expanded_types: dict[tuple[str, ...], ModelType] = {}
     visiting: list[tuple[str, ...]] = []
@@ -1237,127 +1284,283 @@ def _expand_inheritance(
     for name in raw_types:
         expand_type(name)
 
-    expanded_objects: dict[tuple[str, ...], ModelObject] = {}
-    for source_module in lowered:
-        module = loaded[source_module.name]
-        for raw in source_module.objects:
-            node = object_nodes[raw.name]
-            if raw.name[-1] in {
-                "CurrentTaskRef",
-                "CurrentCPU",
-                "TaskFlowRef",
-                "ResumeTargetRef",
-                "InterruptFlowRef",
-                "ExceptionFlowRef",
-                "SyscallExitFlowRef",
-                "InterruptControlRef",
-            }:
+    declared_templates: dict[
+        tuple[str, ...], tuple[tuple[str, ModelObject, Tree], ...]
+    ] = {}
+    for type_name, type_node in type_nodes.items():
+        module_name = type_name[:-1]
+        module = loaded[module_name]
+        values: list[tuple[str, ModelObject, Tree]] = []
+        seen: set[str] = set()
+        for item in _type_items(type_node):
+            if item.data != "object_declaration":
+                continue
+            relative_name = str(item.children[0])
+            if relative_name in seen:
                 raise _semantic_error(
                     module,
-                    node,
-                    f"{raw.name[-1]} is a reserved runtime selector and must not be "
-                    "declared as an object",
+                    item,
+                    f"duplicate nested object {relative_name!r}",
                 )
-            base_name = resolve_base(raw.base_type, source_module.name)
-            base = expanded_types.get(base_name)
-            states = _merge_states(
+            seen.add(relative_name)
+            template_name = type_name + (relative_name,)
+            template = _object(
+                module,
+                item,
+                imports[module_name],
+                name=template_name,
+                nested=True,
+            )
+            if any(field.name == "parent" for field in template.attrs or ()) or any(
+                parameter.name == "parent"
+                for state in template.states
+                for handler in (*state.transitions, *state.actions)
+                for parameter in handler.parameters
+            ) or any(
+                block.switches == "parent"
+                or any(binding.name == "parent" for binding in block.bindings)
+                for state in template.states
+                for handler in (*state.transitions, *state.actions)
+                for block in handler.blocks
+            ):
+                raise _semantic_error(
+                    module,
+                    item,
+                    "nested object declarations must not shadow the parent builtin",
+                )
+            values.append((relative_name, template, item))
+        declared_templates[type_name] = tuple(values)
+
+    effective_template_cache: dict[
+        tuple[str, ...], tuple[tuple[str, ModelObject, Tree], ...]
+    ] = {}
+
+    def effective_templates(
+        type_name: tuple[str, ...],
+    ) -> tuple[tuple[str, ModelObject, Tree], ...]:
+        cached = effective_template_cache.get(type_name)
+        if cached is not None:
+            return cached
+        inherited: tuple[tuple[str, ModelObject, Tree], ...] = ()
+        raw_type = raw_types[type_name]
+        if raw_type.base_type is not None:
+            base_name = resolve_base(raw_type.base_type, type_name[:-1])
+            if base_name in raw_types:
+                inherited = effective_templates(base_name)
+        result = list(inherited)
+        names = {relative for relative, _, _ in result}
+        for relative, template, node in declared_templates[type_name]:
+            if relative in names:
+                raise _semantic_error(
+                    loaded[type_name[:-1]],
+                    node,
+                    f"duplicate inherited nested object {relative!r}",
+                )
+            names.add(relative)
+            result.append((relative, template, node))
+        effective_template_cache[type_name] = tuple(result)
+        return effective_template_cache[type_name]
+
+    expanded_objects: dict[tuple[str, ...], ModelObject] = {}
+    object_modules: dict[tuple[str, ...], tuple[str, ...]] = {}
+    object_scopes: dict[tuple[str, ...], tuple[str, ...]] = {}
+    raw_objects: dict[tuple[str, ...], ModelObject] = {}
+
+    def instantiate_object(
+        raw: ModelObject,
+        module_name: tuple[str, ...],
+        node: Tree,
+        object_name: tuple[str, ...],
+    ) -> ModelObject:
+        module = loaded[module_name]
+        if object_name[-1] in {
+            "CurrentTaskRef",
+            "CurrentCPU",
+            "TaskFlowRef",
+            "ResumeTargetRef",
+            "InterruptFlowRef",
+            "ExceptionFlowRef",
+            "SyscallExitFlowRef",
+            "InterruptControlRef",
+        }:
+            raise _semantic_error(
                 module,
                 node,
-                () if base is None else base.states,
-                raw.states,
+                f"{object_name[-1]} is a reserved runtime selector and must not be "
+                "declared as an object",
             )
-            initial_state = raw.initial_state
-            if initial_state is None and base is not None:
-                initial_state = base.initial_state
-            if initial_state is None and states:
-                initial_state = ("State", "Base")
-            continuation = False if base is None else base.continuation
-            states = _rebind_states(states, raw.name)
-            fields = _merge_fields(None if base is None else base.fields, raw.attrs)
-            abstract = tuple(
-                (state.name, handler.signal)
-                for state in states
-                for handler in (*state.transitions, *state.actions)
-                if handler.abstract
+        base_name = resolve_base(raw.base_type, module_name)
+        base = expanded_types.get(base_name)
+        states = _merge_states(
+            module,
+            node,
+            () if base is None else base.states,
+            raw.states,
+        )
+        initial_state = raw.initial_state
+        if initial_state is None and base is not None:
+            initial_state = base.initial_state
+        if initial_state is None and states:
+            initial_state = ("State", "Base")
+        continuation = False if base is None else base.continuation
+        states = _rebind_states(states, object_name)
+        fields = _merge_fields(None if base is None else base.fields, raw.attrs)
+        abstract = tuple(
+            (state.name, handler.signal)
+            for state in states
+            for handler in (*state.transitions, *state.actions)
+            if handler.abstract
+        )
+        user_runtime = base is not None and base.user_runtime
+        event_flow = base is not None and base.event_flow
+        if abstract and not user_runtime:
+            state_name, signal = abstract[0]
+            raise _semantic_error(
+                module,
+                node,
+                f"object {'::'.join(object_name)!r} does not implement abstract handler "
+                f"{'::'.join(state_name)} + {'::'.join(signal)}",
             )
-            user_runtime = base is not None and base.user_runtime
-            syscall_exit_flow = base is not None and base.syscall_exit_flow
-            event_flow = base is not None and base.event_flow
-            if abstract and not user_runtime:
-                state_name, signal = abstract[0]
+        if continuation:
+            state_names = tuple(state.name for state in states)
+            if (
+                initial_state != ("State", "Online")
+                or state_names != (("State", "Online"),)
+                or states[0].transitions
+            ):
                 raise _semantic_error(
                     module,
                     node,
-                    f"object {'::'.join(raw.name)!r} does not implement abstract handler "
-                    f"{'::'.join(state_name)} + {'::'.join(signal)}",
+                    "continuation object must have exactly initial_state State::Online, "
+                    "one State::Online, and no transitions",
                 )
-            if continuation:
-                state_names = tuple(state.name for state in states)
-                if (
-                    initial_state != ("State", "Online")
-                    or state_names != (("State", "Online"),)
-                    or states[0].transitions
-                ):
+            if not any(
+                action.signal == ("Action", "Enter")
+                for action in states[0].actions
+            ):
+                raise _semantic_error(
+                    module, node, "continuation object requires Action::Enter"
+                )
+        if user_runtime:
+            raise _semantic_error(
+                module,
+                node,
+                "user_runtime instances are inference-owned Task children and must not be declared as model objects",
+            )
+        if event_flow:
+            raise _semantic_error(
+                module,
+                node,
+                "event_flow instances are inference-owned CPU children and must not be declared as model objects",
+            )
+        for state in states:
+            for transition in state.transitions:
+                if transition.target_state not in {item.name for item in states}:
+                    assert transition.target_state is not None
                     raise _semantic_error(
                         module,
                         node,
-                        "continuation object must have exactly initial_state State::Online, "
-                        "one State::Online, and no transitions",
+                        f"transition targets unknown state "
+                        f"{'::'.join(transition.target_state)!r}",
                     )
-                if not any(
-                    action.signal == ("Action", "Enter")
-                    for action in states[0].actions
-                ):
-                    raise _semantic_error(
-                        module, node, "continuation object requires Action::Enter"
-                    )
-            if user_runtime:
-                raise _semantic_error(
-                    module,
-                    node,
-                    "user_runtime instances are inference-owned Task children and must not be declared as model objects",
-                )
-            if event_flow:
-                raise _semantic_error(
-                    module,
-                    node,
-                    "event_flow instances are inference-owned CPU children and must not be declared as model objects",
-                )
-            for state in states:
-                for transition in state.transitions:
-                    if transition.target_state not in {item.name for item in states}:
-                        assert transition.target_state is not None
+            for handler in (*state.transitions, *state.actions):
+                for block in handler.blocks:
+                    if block.kind == "yields" and (
+                        not continuation or not isinstance(handler, ModelAction)
+                    ):
                         raise _semantic_error(
                             module,
                             node,
-                            f"transition targets unknown state "
-                            f"{'::'.join(transition.target_state)!r}",
+                            "yields is only allowed in an Action handler of a "
+                            "continuation object",
                         )
-                for handler in (*state.transitions, *state.actions):
-                    for block in handler.blocks:
-                        if block.kind == "yields" and (
-                            not continuation
-                            or not isinstance(handler, ModelAction)
-                        ):
-                            raise _semantic_error(
-                                module,
-                                node,
-                                "yields is only allowed in an Action handler of a "
-                                "continuation object",
-                            )
-            expanded_objects[raw.name] = ModelObject(
-                raw.name,
-                raw.base_type,
-                initial_state,
-                raw.parent,
-                raw.source,
-                fields,
-                states,
-                raw.references,
-                continuation,
-                raw.idle_task,
-                raw.logical_id,
+        return ModelObject(
+            object_name,
+            raw.base_type,
+            initial_state,
+            raw.parent,
+            raw.source,
+            fields,
+            states,
+            raw.references,
+            continuation,
+            raw.idle_task,
+            raw.logical_id,
+        )
+
+    for source_module in lowered:
+        for raw in source_module.objects:
+            node = object_nodes[raw.name]
+            expanded_objects[raw.name] = instantiate_object(
+                raw, source_module.name, node, raw.name
             )
+            object_modules[raw.name] = source_module.name
+            object_scopes[raw.name] = source_module.name
+            raw_objects[raw.name] = raw
+
+    def expand_nested_objects(
+        parent_name: tuple[str, ...],
+        parent_type: tuple[str, ...],
+        ancestry: tuple[tuple[str, ...], ...],
+    ) -> None:
+        if parent_type not in raw_types:
+            return
+        for relative, template, node in effective_templates(parent_type):
+            child_name = parent_name + (relative,)
+            template_scope = template.name[:-2]
+            child_type = resolve_base(template.base_type, template_scope)
+            if child_type in ancestry:
+                cycle = (*ancestry, child_type)
+                raise _semantic_error(
+                    loaded[template_scope],
+                    node,
+                    "nested object parent cycle: "
+                    + " -> ".join("::".join(item) for item in cycle),
+                )
+            if child_name in expanded_objects:
+                raise _semantic_error(
+                    loaded[template_scope],
+                    node,
+                    f"duplicate expanded nested object {'::'.join(child_name)!r}",
+                )
+            parent_expression = _object_expression(parent_name)
+            instantiated_raw = _substitute_parent(template, parent_expression)
+            assert isinstance(instantiated_raw, ModelObject)
+            instantiated_raw = replace(
+                instantiated_raw,
+                name=child_name,
+                parent=parent_expression,
+            )
+            child = instantiate_object(
+                instantiated_raw, template_scope, node, child_name
+            )
+            if (
+                child_type in raw_types
+                and object_modules[parent_name] != template_scope
+            ):
+                child = replace(
+                    child,
+                    base_type=replace(child.base_type, name=child_type),
+                )
+            expanded_objects[child_name] = child
+            object_modules[child_name] = object_modules[parent_name]
+            object_scopes[child_name] = template_scope
+            object_nodes[child_name] = node
+            raw_objects[child_name] = instantiated_raw
+            expand_nested_objects(
+                child_name, child_type, (*ancestry, child_type)
+            )
+
+    for name, raw in tuple(raw_objects.items()):
+        module_name = object_modules[name]
+        expand_nested_objects(
+            name,
+            resolve_base(raw.base_type, module_name),
+            (resolve_base(raw.base_type, module_name),),
+        )
+
+    def object_module(name: tuple[str, ...]) -> tuple[str, ...]:
+        return object_scopes[name]
 
     continuation_names = {
         name for name, model_object in expanded_objects.items() if model_object.continuation
@@ -1511,7 +1714,7 @@ def _expand_inheritance(
 
     def object_type(name: tuple[str, ...]) -> TypeKey:
         model_object = expanded_objects[name]
-        return resolve_type(model_object.base_type, name[:-1])
+        return resolve_type(model_object.base_type, object_module(name))
 
     def compatible(actual: TypeKey, expected: TypeKey) -> bool:
         if actual == expected:
@@ -1828,7 +2031,9 @@ def _expand_inheritance(
         for scheduler_name, scheduler in expanded_objects.items()
         if is_sched_core_object(scheduler_name) and scheduler.idle_task is not None
         for idle in (
-            resolve_object_expression(scheduler.idle_task, scheduler_name[:-1]),
+            resolve_object_expression(
+                scheduler.idle_task, object_module(scheduler_name)
+            ),
         )
         if idle is not None
     }
@@ -2057,7 +2262,7 @@ def _expand_inheritance(
             for reference in model_object.references
         ):
             raise _semantic_error(
-                loaded[name[:-1]],
+                loaded[object_module(name)],
                 owner,
                 "TaskFlowRef and ResumeTargetRef are reserved read-only Task selectors and cannot be declared",
             )
@@ -2092,7 +2297,7 @@ def _expand_inheritance(
             for assignment in reference.assignments
         ):
             raise _semantic_error(
-                loaded[name[:-1]],
+                loaded[object_module(name)],
                 owner,
                 "runtime selectors are read-only and cannot be assigned",
             )
@@ -2106,58 +2311,60 @@ def _expand_inheritance(
                         or transition.target_state != ("State", "OnCpu")
                     ):
                         raise _semantic_error(
-                            loaded[name[:-1]],
+                            loaded[object_module(name)],
                             owner,
                             "Task Transition::Resume is only allowed from State::Online "
                             "to State::OnCpu",
                         )
         if cpu_core and model_object.logical_id is None:
             raise _semantic_error(
-                loaded[name[:-1]], owner, "cpu_core object requires logical_id"
+                loaded[object_module(name)], owner, "cpu_core object requires logical_id"
             )
         if not cpu_core and model_object.logical_id is not None:
             raise _semantic_error(
-                loaded[name[:-1]], owner, "logical_id is only allowed on cpu_core objects"
+                loaded[object_module(name)], owner, "logical_id is only allowed on cpu_core objects"
             )
         if sched_core and model_object.idle_task is None:
             raise _semantic_error(
-                loaded[name[:-1]], owner, "sched_core object requires idle_task"
+                loaded[object_module(name)], owner, "sched_core object requires idle_task"
             )
         if sched_core and cpu_core_types:
             parent = (
                 None
                 if model_object.parent is None
-                else resolve_object_expression(model_object.parent, name[:-1])
+                else resolve_object_expression(
+                    model_object.parent, object_module(name)
+                )
             )
             if parent is None or not is_cpu_core_object(parent):
                 raise _semantic_error(
-                    loaded[name[:-1]],
+                    loaded[object_module(name)],
                     owner,
                     "sched_core object must be owned by a cpu_core parent",
                 )
         if not sched_core and model_object.idle_task is not None:
             raise _semantic_error(
-                loaded[name[:-1]], owner, "idle_task is only allowed on sched_core objects"
+                loaded[object_module(name)], owner, "idle_task is only allowed on sched_core objects"
             )
         if sched_core and any(
             action.signal in core_actions
-            for state in next(
-                raw for module in lowered for raw in module.objects if raw.name == name
-            ).states
+            for state in raw_objects[name].states
             for action in state.actions
         ):
             raise _semantic_error(
-                loaded[name[:-1]],
+                loaded[object_module(name)],
                 owner,
                 "sched_core objects must not declare or override Action::Enqueue or Action::Dequeue",
             )
         if not sched_core:
             continue
         assert model_object.idle_task is not None
-        idle = resolve_object_expression(model_object.idle_task, name[:-1])
+        idle = resolve_object_expression(
+            model_object.idle_task, object_module(name)
+        )
         if idle is None or not is_task_object(idle):
             raise _semantic_error(
-                loaded[name[:-1]], owner, "idle_task must reference a Task object"
+                loaded[object_module(name)], owner, "idle_task must reference a Task object"
             )
         online = next(
             (state for state in model_object.states if state.name == ("State", "Online")),
@@ -2165,7 +2372,7 @@ def _expand_inheritance(
         )
         if online is None:
             raise _semantic_error(
-                loaded[name[:-1]], owner, "sched_core object requires State::Online"
+                loaded[object_module(name)], owner, "sched_core object requires State::Online"
             )
 
     for name, model_object in expanded_objects.items():
@@ -2179,7 +2386,7 @@ def _expand_inheritance(
                     or action.parameters
                 ):
                     raise _semantic_error(
-                        loaded[name[:-1]],
+                        loaded[object_module(name)],
                         object_nodes[name],
                         "Action::ResetCurrent may only be declared by BootTask in State::OnCpu",
                     )
@@ -2197,7 +2404,7 @@ def _expand_inheritance(
             if is_cpu_core_object(name) and item.logical_id == duplicate
         )
         raise _semantic_error(
-            loaded[name[:-1]],
+            loaded[object_module(name)],
             object_nodes[name],
             f"duplicate CPU logical_id {duplicate}",
         )
@@ -2209,7 +2416,7 @@ def _expand_inheritance(
         if len(task_types) != 1 or len(task_flow_types) != 1:
             anchor_name = concrete_tasks[0]
             raise _semantic_error(
-                loaded[anchor_name[:-1]],
+                loaded[object_module(anchor_name)],
                 object_nodes[anchor_name],
                 "Task scheduling requires exactly one Task type and one TaskFlow type",
             )
@@ -2219,11 +2426,14 @@ def _expand_inheritance(
                 for name, candidate in expanded_objects.items()
                 if is_task_flow_object(name)
                 and candidate.parent is not None
-                and resolve_object_expression(candidate.parent, name[:-1]) == task
+                and resolve_object_expression(
+                    candidate.parent, object_module(name)
+                )
+                == task
             )
             if len(flows) != 1:
                 raise _semantic_error(
-                    loaded[task[:-1]],
+                    loaded[object_module(task)],
                     object_nodes[task],
                     f"Task object {'::'.join(task)!r} requires exactly one parent TaskFlow; got {len(flows)}",
                 )
@@ -2282,6 +2492,61 @@ def _expand_inheritance(
                             if method in {"unique_value", "lookup"}
                             else (("bool",), ())
                         )
+            predicate_access = _flatten_access(callee)
+            if predicate_access is not None and all(
+                operation == "path" for operation in predicate_access[1]
+            ):
+                raw_name = tuple(predicate_access[0])
+                predicate_name = _resolve_target(
+                    raw_name, module_name, imports[module_name]
+                )
+                predicate = predicates.get(predicate_name)
+                if predicate is None:
+                    matches = tuple(
+                        name
+                        for name in predicates
+                        if name[-len(raw_name) :] == raw_name
+                    )
+                    if len(matches) == 1:
+                        predicate = predicates[matches[0]]
+                        predicate_name = matches[0]
+                if predicate is not None:
+                    arguments = expression.children[1:]
+                    if len(arguments) != len(predicate.parameters):
+                        raise _semantic_error(
+                            loaded[module_name],
+                            object_nodes[source]
+                            if source in object_nodes
+                            else loaded[module_name].tree,
+                            f"predicate {'::'.join(predicate_name)!r} expects "
+                            f"{len(predicate.parameters)} argument(s), got {len(arguments)}",
+                        )
+                    for index, (argument, parameter) in enumerate(
+                        zip(arguments, predicate.parameters, strict=True)
+                    ):
+                        actual = expression_type(
+                            argument, module_name, source, parameters, fields
+                        )
+                        if (
+                            parameter.type.name in {
+                                (name,) for name in predicate.generic_parameters
+                            }
+                            or actual is None
+                        ):
+                            continue
+                        expected = resolve_type(
+                            parameter.type, predicate_name[:-1]
+                        )
+                        if not compatible(actual, expected):
+                            raise _semantic_error(
+                                loaded[module_name],
+                                object_nodes[source]
+                                if source in object_nodes
+                                else loaded[module_name].tree,
+                                f"predicate {'::'.join(predicate_name)!r} argument "
+                                f"{index + 1} has incompatible object type",
+                            )
+                    return (("bool",), ())
         if expression.kind == "unary" and expression.value == "!":
             expression_type(expression.children[0], module_name, source, parameters, fields)
             return (("bool",), ())
@@ -2377,7 +2642,11 @@ def _expand_inheritance(
             and access[1] == ["member"]
         ):
             field = fields.get(access[0][1])
-            return None if field is None else resolve_type(field.type, source[:-1])
+            return (
+                None
+                if field is None
+                else resolve_type(field.type, object_module(source))
+            )
         object_name = resolve_object_expression(expression, module_name)
         return None if object_name is None else object_type(object_name)
 
@@ -2391,7 +2660,7 @@ def _expand_inheritance(
     def rewrite_handler_bindings(
         model_object: ModelObject, handler: ModelTransition | ModelAction
     ) -> ModelTransition | ModelAction:
-        module_name = model_object.name[:-1]
+        module_name = object_module(model_object.name)
         fields = {field.name: field for field in model_object.attrs or ()}
         environment = {
             parameter.name: resolve_type(parameter.type, module_name)
@@ -2443,7 +2712,7 @@ def _expand_inheritance(
         blocks = tuple(rewritten.get(id(block), block) for block in handler.blocks)
         return replace(handler, blocks=blocks)
 
-    # Binding types are part of schema-v13 IR, so infer and freeze them before
+    # Binding types are part of schema-v14 IR, so infer and freeze them before
     # the ordinary handler expression/signature validation below.
     for name, model_object in tuple(expanded_objects.items()):
         states = tuple(
@@ -2556,7 +2825,7 @@ def _expand_inheritance(
                 prior = signatures.get(key)
                 if prior is not None and prior != handler.parameters:
                     raise _semantic_error(
-                        loaded[name[:-1]],
+                        loaded[object_module(name)],
                         object_nodes[name],
                         f"handler {'::'.join(handler.signal)!r} has inconsistent "
                         "parameter signatures across states",
@@ -2646,7 +2915,7 @@ def _expand_inheritance(
             actual = expression_type(
                 argument, module_name, source, environment, fields
             )
-            expected = resolve_type(parameter.type, target_name[:-1])
+            expected = resolve_type(parameter.type, object_module(target_name))
             if actual is None:
                 raise _semantic_error(
                     loaded[module_name],
@@ -2662,7 +2931,7 @@ def _expand_inheritance(
 
     for name, model_object in expanded_objects.items():
         owner = object_nodes[name]
-        module_name = name[:-1]
+        module_name = object_module(name)
         fields = {field.name: field for field in model_object.attrs or ()}
         for invariant in (
             expression
@@ -2688,7 +2957,7 @@ def _expand_inheritance(
                         owner,
                         "unique_value and lookup may only appear in a binds block",
                     )
-                expression_type(nested, module_name, name, {}, fields)
+            expression_type(invariant, module_name, name, {}, fields)
         for field in fields.values():
             declared_type = resolve_type(field.type, module_name)
             if field.mutable and declared_type == (("String",), ()):
@@ -2756,6 +3025,13 @@ def _expand_inheritance(
                                 environment,
                                 fields,
                             )
+                        expression_type(
+                            expression,
+                            module_name,
+                            name,
+                            environment,
+                            fields,
+                        )
                     if block.kind == "switches":
                         switch_count += 1
                         if (
@@ -3023,7 +3299,11 @@ def _expand_inheritance(
             module.name,
             module.predicates,
             tuple(expanded_types[item.name] for item in module.types),
-            tuple(expanded_objects[item.name] for item in module.objects),
+            tuple(
+                model_object
+                for name, model_object in expanded_objects.items()
+                if object_modules[name] == module.name
+            ),
             module.externals,
         )
         for module in lowered

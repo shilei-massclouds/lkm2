@@ -217,6 +217,11 @@ class _Context:
     def __init__(self, model: ModelIR) -> None:
         self.model = model
         self.objects = {item.name: item for item in model.objects}
+        self.object_modules = {
+            item.name: module.name
+            for module in model.modules
+            for item in module.objects
+        }
         self.types = {
             item.name: item for module in model.modules for item in module.types
         }
@@ -256,8 +261,8 @@ class _Context:
             key_type, value_type = model_object.base_type.arguments
             self.containers[model_object.name] = (
                 model_object.base_type.name[0],
-                self.canonical_type(key_type, model_object.name[:-1]),
-                self.canonical_type(value_type, model_object.name[:-1]),
+                self.canonical_type(key_type, self.object_module(model_object.name)),
+                self.canonical_type(value_type, self.object_module(model_object.name)),
             )
         self.tuples: set[DerivationTuple] = set()
         self.query_tuples: set[DerivationTuple] = self.tuples
@@ -274,6 +279,13 @@ class _Context:
             )
         return resolved
 
+    def object_module(self, name: tuple[str, ...]) -> tuple[str, ...]:
+        # Inference-owned runtime children are created after Model IR loading
+        # and intentionally have no declaring module entry. Preserve their
+        # historical relative scope while using the recorded module for every
+        # declared (including type-expanded nested) object.
+        return self.object_modules.get(name, name[:-1])
+
     def _type_name(
         self, raw: tuple[str, ...], module: tuple[str, ...]
     ) -> tuple[str, ...] | None:
@@ -286,7 +298,9 @@ class _Context:
 
     def object_has_type(self, name: tuple[str, ...], suffix: str) -> bool:
         model_object = self.objects[name]
-        current = self._type_name(model_object.base_type.name, name[:-1])
+        current = self._type_name(
+            model_object.base_type.name, self.object_module(name)
+        )
         seen: set[tuple[str, ...]] = set()
         while current is not None and current not in seen:
             seen.add(current)
@@ -302,7 +316,9 @@ class _Context:
 
     def object_type_flag(self, name: tuple[str, ...], flag: str) -> bool:
         model_object = self.objects[name]
-        current = self._type_name(model_object.base_type.name, name[:-1])
+        current = self._type_name(
+            model_object.base_type.name, self.object_module(name)
+        )
         seen: set[tuple[str, ...]] = set()
         while current is not None and current not in seen:
             seen.add(current)
@@ -807,7 +823,8 @@ class _Execution:
             if model_object.idle_task is None:
                 continue
             idle = self.context.object_reference(
-                model_object.idle_task, model_object.name[:-1]
+                model_object.idle_task,
+                self.context.object_module(model_object.name),
             )
             if idle is None:
                 raise RuntimeError("compiled scheduler idle_task is unresolved")
@@ -827,7 +844,7 @@ class _Execution:
                     continue
                 value = self.context.resolve_value(
                     model_field.default,
-                    model_object.name[:-1],
+                    self.context.object_module(model_object.name),
                     model_object.name,
                     {},
                     self.values,
@@ -857,7 +874,8 @@ class _Execution:
             ):
                 continue
             parent = self.context.object_reference(
-                model_object.parent, model_object.name[:-1]
+                model_object.parent,
+                self.context.object_module(model_object.name),
             )
             if parent is not None and parent in self.context.objects:
                 parent_object = self.context.objects[parent]
@@ -880,7 +898,8 @@ class _Execution:
             if scheduler_object.parent is None:
                 continue
             parent = self.context.object_reference(
-                scheduler_object.parent, scheduler_name[:-1]
+                scheduler_object.parent,
+                self.context.object_module(scheduler_name),
             )
             if parent in self.cpus:
                 self.cpus[parent].scheduler = scheduler_name
@@ -1758,7 +1777,7 @@ class _Execution:
                     raise RuntimeError("compiled update target is invalid")
                 value = self.context.resolve_value(
                     update.value,
-                    model_object.name[:-1],
+                    self.context.object_module(model_object.name),
                     model_object.name,
                     bindings,
                     candidate,
@@ -1778,7 +1797,9 @@ class _Execution:
         model_object = self.context.objects[value]
         return DerivationTerm(
             "object",
-            self.context.canonical_type(model_object.base_type, value[:-1]),
+            self.context.canonical_type(
+                model_object.base_type, self.context.object_module(value)
+            ),
             value,
         )
 
@@ -1811,7 +1832,7 @@ class _Execution:
         results: list[DerivationBindingResult],
         path: str,
     ) -> DerivationFailure | None:
-        module = model_object.name[:-1]
+        module = self.context.object_module(model_object.name)
         for index, binding in enumerate(self._handler_bindings(handler)):
             relation = self.context.relation_call(binding.expression, module)
             if relation is None:
@@ -1900,7 +1921,7 @@ class _Execution:
     ) -> tuple[set[DerivationTuple], DerivationFailure | None]:
         staged: set[DerivationTuple] = set()
         parsed: list[DerivationTuple] = []
-        module = model_object.name[:-1]
+        module = self.context.object_module(model_object.name)
         for expression in (
             expression
             for block in handler.blocks
@@ -2259,7 +2280,7 @@ class _Execution:
             handler = next(
                 action for action in state.actions if action.signal == frame.handler
             )
-            module = model_object.name[:-1]
+            module = self.context.object_module(model_object.name)
 
             if not frame.entered:
                 depends = tuple(
@@ -3318,7 +3339,7 @@ class _Execution:
                 failure=failure,
             )
 
-        module = model_object.name[:-1]
+        module = self.context.object_module(model_object.name)
         try:
             bindings = self._bind_handler(event, handler)
         except _UnsupportedExpression as exc:

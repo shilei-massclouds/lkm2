@@ -22,6 +22,7 @@ type_declaration: "type" IDENTIFIER type_base? type_tail
 type_base: ":" type_expression
 ?type_tail: ";" | "{" type_item* "}"
 ?type_item: field_declaration
+          | object_declaration
           | continuation_property
           | sched_core_property
           | user_runtime_property

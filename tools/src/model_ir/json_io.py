@@ -1,4 +1,4 @@
-"""Strict JSON loading and canonical JSON output for Model IR v13."""
+"""Strict JSON loading and canonical JSON output for Model IR v14."""
 
 from __future__ import annotations
 
@@ -368,7 +368,7 @@ def _reject_constant(value: str) -> None:
 
 
 def load_model_ir(stream: TextIO) -> ModelIR:
-    """Load and strictly validate one Model IR schema-v13 JSON document."""
+    """Load and strictly validate one Model IR schema-v14 JSON document."""
 
     try:
         raw = json.load(

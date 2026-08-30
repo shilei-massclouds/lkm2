@@ -517,7 +517,7 @@ boot_idle_path = ("phases", "start_kernel", "boot_idle", "BootIdle")
 scheduler_type_path = ("objects", "scheduler", "Scheduler")
 cpu0_scheduler_path = ("objects", "scheduler", "Cpu0Scheduler")
 EXPECTED_MODEL = (lambda **_ignored: compile_spec(REPOSITORY / "model" / "main.spec"))(
-    schema_version=13,
+    schema_version=14,
     entry=ModelEntry(
         origin=("systems", "human", "Human"), spec=("systems",)
     ),
@@ -1680,6 +1680,138 @@ object Probe: T {}
                         compile_spec(entry_path)
                 self.assertIn(message, caught.exception.diagnostic.message)
 
+    def test_type_nested_object_expands_with_a_stable_parent_path(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    type Child;
+                    type Parent {
+                        object ChildObject: Child {}
+                    }
+                    object Parent0: Parent {}
+                """
+            }
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        self.assertEqual(
+            tuple(model_object.name for model_object in model.objects),
+            (("root", "Parent0"), ("root", "Parent0", "ChildObject")),
+        )
+        child = model.objects[1]
+        self.assertEqual(child.base_type.name, ("Child",))
+        self.assertEqual(
+            _target_name(child.parent),
+            ("root", "Parent0"),
+        )
+
+    def test_imported_type_nested_object_stays_below_the_instance(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    spec definitions;
+                    use self::definitions::Parent;
+                    object Parent0: Parent {}
+                """,
+                "root/definitions.spec": """
+                    type Child;
+                    type Parent {
+                        object ChildObject: Child {}
+                    }
+                """,
+            }
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        root_module = next(
+            module for module in model.modules if module.name == ("root",)
+        )
+        self.assertEqual(
+            tuple(model_object.name for model_object in root_module.objects),
+            (("root", "Parent0"), ("root", "Parent0", "ChildObject")),
+        )
+        self.assertEqual(
+            root_module.objects[1].base_type.name,
+            ("root", "definitions", "Child"),
+        )
+
+    def test_nested_object_declaration_diagnostics_are_strict(self) -> None:
+        cases = (
+            (
+                """
+                    type Child;
+                    type Parent {
+                        object ChildObject: Child {}
+                        object ChildObject: Child {}
+                    }
+                    object Parent0: Parent {}
+                """,
+                "duplicate nested object",
+            ),
+            (
+                """
+                    type Child;
+                    type Parent {
+                        object ChildObject: Child { parent: Parent0; }
+                    }
+                    object Parent0: Parent {}
+                """,
+                "nested object parent must reference the current template parent",
+            ),
+            (
+                """
+                    type Child {
+                        initial_state: State::Ready;
+                        state State::Ready {}
+                    }
+                    type Other;
+                    predicate child_has_other_parent(
+                        child: Child,
+                        owner: Other,
+                    ) -> bool;
+                    type Parent {
+                        object ChildObject: Child {
+                            state State::Ready {
+                                invariant {
+                                    child_has_other_parent(self, parent);
+                                }
+                            }
+                        }
+                    }
+                    object Parent0: Parent {}
+                """,
+                "predicate 'root::child_has_other_parent' argument 2 has incompatible object type",
+            ),
+            (
+                """
+                    type Parent {
+                        object RecursiveChild: Parent {}
+                    }
+                    object Parent0: Parent {}
+                """,
+                "nested object parent cycle",
+            ),
+            (
+                """
+                    type Child;
+                    type Parent {
+                        object ChildObject: Child {}
+                    }
+                    type Derived: Parent {
+                        object ChildObject: Child {}
+                    }
+                    object Parent0: Derived {}
+                """,
+                "duplicate inherited nested object",
+            ),
+        )
+        for source, message in cases:
+            with self.subTest(message=message):
+                with model_tree({"root.spec": source}) as (_, entry_path):
+                    with self.assertRaises(CompilationError) as caught:
+                        compile_spec(entry_path)
+                self.assertIn(message, caught.exception.diagnostic.message)
+
     def test_phase_type_requires_an_enable_override(self) -> None:
         with model_tree(
             {
@@ -2352,6 +2484,18 @@ class ModelIRJSONTests(unittest.TestCase):
         invalid_signal_prefix = json.loads(EXPECTED_JSON)
         human = _json_module(invalid_signal_prefix, "systems", "human")
         human["externals"][0]["signals"][0]["signal"] = ["Effect", "Preset"]
+        invalid_nested_parent = json.loads(EXPECTED_JSON)
+        zone = _json_module(invalid_nested_parent, "objects", "zone")
+        free_area = next(
+            model_object
+            for model_object in zone["objects"]
+            if model_object["name"][-2:] == ["DMA32Zone", "FreeArea"]
+        )
+        free_area["parent"] = {
+            "kind": "identifier",
+            "value": "NormalZone",
+            "children": [],
+        }
         legacy_selects_field = EXPECTED_JSON.replace(
             '"switches": "next_task_ref"',
             '"selects": "next_task_ref"',
@@ -2365,10 +2509,11 @@ class ModelIRJSONTests(unittest.TestCase):
             json.dumps(duplicate_declaration),
             json.dumps(unknown_signal_target),
             json.dumps(invalid_signal_prefix),
+            json.dumps(invalid_nested_parent),
             legacy_selects_field,
-            EXPECTED_JSON.replace('"schema_version": 13', '"schema_version": true'),
+            EXPECTED_JSON.replace('"schema_version": 14', '"schema_version": true'),
             EXPECTED_JSON.replace('"modules": [', '"modules": "bad", "discard": ['),
-            '{"schema_version":13,"schema_version":13}',
+            '{"schema_version":14,"schema_version":14}',
         ]
         for document in invalid_documents:
             with self.subTest(document=document):
@@ -2377,7 +2522,7 @@ class ModelIRJSONTests(unittest.TestCase):
 
     def test_in_memory_ir_is_strict_and_sorted(self) -> None:
         model = ModelIR(
-            schema_version=13,
+            schema_version=14,
             entry=EXPECTED_MODEL.entry,
             modules=tuple(reversed(EXPECTED_MODEL.modules)),
         )
@@ -2385,14 +2530,14 @@ class ModelIRJSONTests(unittest.TestCase):
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=13,
+                schema_version=14,
                 entry=EXPECTED_MODEL.entry,
                 modules=EXPECTED_MODEL.modules + (EXPECTED_MODEL.modules[0],),
             )
 
         with self.assertRaises(ModelIRValidationError):
             ModelIR(
-                schema_version=13,
+                schema_version=14,
                 entry=ModelEntry(
                     origin=EXPECTED_MODEL.entry.origin,
                     spec=("missing",),

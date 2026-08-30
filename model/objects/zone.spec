@@ -53,9 +53,74 @@ predicate node_zone_boundary_envelopes_cover_memory(
     normal_zone: Zone,
     movable_zone: Zone,
 ) -> bool;
+predicate free_area_bound_to_zone(
+    free_area: FreeAreaType,
+    zone: Zone,
+) -> bool;
+predicate free_area_excludes_reserved_and_unavailable(
+    free_area: FreeAreaType,
+    zone: Zone,
+) -> bool;
+
+type FreeAreaType {
+    initial_state: State::Ready;
+
+    state State::Ready {
+        transitions {
+            on Transition::Enable -> State::Online {
+            }
+        }
+    }
+
+    state State::Online {
+    }
+}
 
 type Zone {
     initial_state: State::Ready;
+
+    /*
+     * A FreeArea is a possibly-empty ownership envelope. Its implementation
+     * structure (orders, bitmaps, lists, and Pages) is deliberately deferred.
+     */
+    object FreeArea: FreeAreaType {
+        state State::Ready {
+            transitions {
+                override on Transition::Enable -> State::Online {
+                    depends_on {
+                        parent.state == State::Online;
+                        zone_bound_to_unique_memory_node(
+                            parent,
+                            MemoryNode,
+                        );
+                    }
+
+                    establishes {
+                        free_area_bound_to_zone(self, parent);
+                        free_area_excludes_reserved_and_unavailable(
+                            self,
+                            parent,
+                        );
+                    }
+                }
+            }
+        }
+
+        state State::Online {
+            invariant {
+                parent.state == State::Online;
+                zone_bound_to_unique_memory_node(
+                    parent,
+                    MemoryNode,
+                );
+                free_area_bound_to_zone(self, parent);
+                free_area_excludes_reserved_and_unavailable(
+                    self,
+                    parent,
+                );
+            }
+        }
+    }
 
     state State::Ready {
         transitions {
