@@ -8,6 +8,8 @@ spec boot_stack;
 spec printk;
 spec dtb_blob;
 spec memblock;
+spec memory_node;
+spec zone;
 spec early_console;
 spec user_app_runtime;
 spec vm;
