@@ -22,6 +22,10 @@ ZONE_PREDICATES = {
     "node_zone_boundary_envelopes_cover_memory",
     "free_area_bound_to_zone",
     "free_area_excludes_reserved_and_unavailable",
+    "zone_lists_bound_to_unique_memory_node",
+    "zone_lists_is_single_fallback",
+    "zone_lists_orders_populated_zones_descending",
+    "zone_lists_excludes_empty_zones",
 }
 
 
@@ -103,13 +107,13 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
         cls.zone_module = cls.modules[("objects", "zone")]
         cls.objects = {
             model_object.name[-1]: model_object
-            for module in (cls.memory_node_module, cls.zone_module)
-            for model_object in module.objects
-            if len(model_object.name) == len(module.name) + 1
+            for model_object in cls.memory_node_module.objects
+            if model_object.name[-1]
+            in {"MemoryNode", "DMA32Zone", "NormalZone", "MovableZone", "ZoneLists"}
         }
         cls.free_areas = {
             model_object.name[-2]: model_object
-            for model_object in cls.zone_module.objects
+            for model_object in cls.memory_node_module.objects
             if model_object.name[-1] == "FreeArea"
         }
 
@@ -120,26 +124,42 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(item.name[-1] for item in self.memory_node_module.objects),
-            ("MemoryNode",),
+            (
+                "MemoryNode",
+                "DMA32Zone",
+                "FreeArea",
+                "MovableZone",
+                "FreeArea",
+                "NormalZone",
+                "FreeArea",
+                "ZoneLists",
+            ),
         )
         self.assertEqual(
             {item.name[-1] for item in self.zone_module.types},
-            {"FreeAreaType", "Zone"},
+            {
+                "DMA32ZoneType",
+                "FreeAreaType",
+                "MovableZoneType",
+                "NormalZoneType",
+                "Zone",
+                "ZoneListsType",
+            },
         )
         self.assertEqual(
             {
                 item.name[-1]
-                for item in self.zone_module.objects
-                if len(item.name) == len(self.zone_module.name) + 1
+                for item in self.memory_node_module.objects
+                if len(item.name) == len(self.memory_node_module.name) + 2
             },
-            {"DMA32Zone", "NormalZone", "MovableZone"},
+            {"DMA32Zone", "NormalZone", "MovableZone", "ZoneLists"},
         )
         self.assertEqual(
             {item.name for item in self.free_areas.values()},
             {
-                ("objects", "zone", "DMA32Zone", "FreeArea"),
-                ("objects", "zone", "NormalZone", "FreeArea"),
-                ("objects", "zone", "MovableZone", "FreeArea"),
+                ("objects", "memory_node", "MemoryNode", "DMA32Zone", "FreeArea"),
+                ("objects", "memory_node", "MemoryNode", "NormalZone", "FreeArea"),
+                ("objects", "memory_node", "MemoryNode", "MovableZone", "FreeArea"),
             },
         )
 
@@ -148,8 +168,30 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
         for name in ("DMA32Zone", "NormalZone", "MovableZone"):
             with self.subTest(zone=name):
                 zone = self.objects[name]
-                self.assertEqual(zone.base_type.name, ("Zone",))
-                self.assertEqual(zone.parent.value, "MemoryNode")
+                self.assertEqual(zone.base_type.name, (name + "Type",))
+                self.assertEqual(
+                    _target_name(zone.parent),
+                    ("objects", "memory_node", "MemoryNode"),
+                )
+        zone_lists = self.objects["ZoneLists"]
+        self.assertEqual(zone_lists.base_type.name, ("ZoneListsType",))
+        self.assertEqual(
+            _target_name(zone_lists.parent),
+            ("objects", "memory_node", "MemoryNode"),
+        )
+        for name in ("DMA32ZoneType", "NormalZoneType", "MovableZoneType"):
+            model_type = next(item for item in self.zone_module.types if item.name[-1] == name)
+            self.assertEqual(model_type.base_type.name, ("Zone",))
+            self.assertEqual(model_type.parent_type.name, ("MemoryNodeType",))
+
+        zone_source = (REPOSITORY / "model/objects/zone.spec").read_text(encoding="utf-8")
+        for name in ("DMA32ZoneType", "NormalZoneType", "MovableZoneType"):
+            declaration = zone_source.split(f"type {name}: Zone", 1)[1]
+            declaration = declaration.split("\n}\n", 1)[0]
+            self.assertNotRegex(declaration, r"(?m)^\s*parent\s*:(?!:)")
+        self.assertNotIn("object DMA32Zone:", zone_source)
+        self.assertNotIn("object NormalZone:", zone_source)
+        self.assertNotIn("object MovableZone:", zone_source)
 
         all_object_names = {
             item.name[-1]
@@ -157,6 +199,8 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
             for item in module.objects
         }
         self.assertNotIn("BootMemoryNode", all_object_names)
+        self.assertNotIn("DMAZone", all_object_names)
+        self.assertNotIn("ThisNode", all_object_names)
         self.assertFalse(
             any("Numa" in name or "NUMA" in name for name in all_object_names)
         )
@@ -196,10 +240,13 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
     def test_each_zone_gets_one_bound_empty_capable_free_area(self) -> None:
         for zone_name, free_area in self.free_areas.items():
             with self.subTest(zone=zone_name):
-                self.assertEqual(free_area.base_type.name, ("FreeAreaType",))
+                self.assertEqual(
+                    free_area.base_type.name,
+                    ("objects", "zone", "FreeAreaType"),
+                )
                 self.assertEqual(
                     _target_name(free_area.parent),
-                    ("objects", "zone", zone_name),
+                    ("objects", "memory_node", "MemoryNode", zone_name),
                 )
                 depends_on = _block(_enable(free_area), "depends_on").expressions
                 self.assertEqual(_state_dependencies(depends_on), (zone_name,))
@@ -238,6 +285,12 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
             "DMA32Zone": ("MemoryNode",),
             "NormalZone": ("DMA32Zone",),
             "MovableZone": ("DMA32Zone", "NormalZone"),
+            "ZoneLists": (
+                "MemoryNode",
+                "DMA32Zone",
+                "NormalZone",
+                "MovableZone",
+            ),
         }
         for name, expected in expected_state_dependencies.items():
             with self.subTest(object=name):
@@ -301,6 +354,12 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
                 "movable_zone_empty_or_tail_of_highest_populated_base_zone",
                 "node_zone_effective_ranges_are_pairwise_disjoint",
                 "node_zone_boundary_envelopes_cover_memory",
+            },
+            "ZoneLists": {
+                "zone_lists_bound_to_unique_memory_node",
+                "zone_lists_is_single_fallback",
+                "zone_lists_orders_populated_zones_descending",
+                "zone_lists_excludes_empty_zones",
             },
         }
         for name, expected in expected_established.items():
@@ -368,6 +427,23 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
                     "FreeAreaType",
                     "Zone",
                 ),
+                "zone_lists_bound_to_unique_memory_node": (
+                    "ZoneListsType",
+                    "MemoryNodeType",
+                ),
+                "zone_lists_is_single_fallback": ("ZoneListsType",),
+                "zone_lists_orders_populated_zones_descending": (
+                    "ZoneListsType",
+                    "Zone",
+                    "Zone",
+                    "Zone",
+                ),
+                "zone_lists_excludes_empty_zones": (
+                    "ZoneListsType",
+                    "Zone",
+                    "Zone",
+                    "Zone",
+                ),
             },
         )
 
@@ -412,6 +488,8 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
             *self.zone_module.objects,
         ):
             name = declaration.name[-1].lower()
+            if name in {"zonelists", "zoneliststype"}:
+                continue
             for fragment in forbidden_fragments:
                 self.assertNotIn(fragment, name)
 
@@ -420,6 +498,46 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
                 _block(_enable(self.objects[name]), "establishes").expressions
             )
             self.assertFalse(any("nonempty" in predicate for predicate in established))
+
+    def test_zone_lists_is_one_fallback_with_descending_populated_projection(self) -> None:
+        zone_lists = self.objects["ZoneLists"]
+        transition = _enable(zone_lists)
+        depends_on = _block(transition, "depends_on").expressions
+        self.assertEqual(
+            _state_dependencies(depends_on),
+            ("MemoryNode", "DMA32Zone", "NormalZone", "MovableZone"),
+        )
+        self.assertEqual(
+            set(_predicate_calls(depends_on)),
+            {
+                "zone_bound_to_unique_memory_node",
+                "memory_node_covers_memblock_memory",
+                "dma32_zone_bounded_by_32bit_dma_limit",
+                "normal_zone_base_bounds_follow_dma32_and_node_limit",
+                "movable_zone_empty_or_tail_of_highest_populated_base_zone",
+                "node_zone_effective_ranges_are_pairwise_disjoint",
+                "node_zone_boundary_envelopes_cover_memory",
+            },
+        )
+        established = _predicate_calls(_block(transition, "establishes").expressions)
+        self.assertEqual(
+            established,
+            (
+                "zone_lists_bound_to_unique_memory_node",
+                "zone_lists_is_single_fallback",
+                "zone_lists_orders_populated_zones_descending",
+                "zone_lists_excludes_empty_zones",
+            ),
+        )
+        order_call = next(
+            expression
+            for expression in _block(transition, "establishes").expressions
+            if expression.children[0].value == "zone_lists_orders_populated_zones_descending"
+        )
+        self.assertEqual(
+            tuple(_target_name(argument)[-1] for argument in order_call.children[2:]),
+            ("MovableZone", "NormalZone", "DMA32Zone"),
+        )
 
     def test_downstream_allocator_drafts_are_not_in_the_production_model(self) -> None:
         module_names = {module.name for module in self.model.modules}

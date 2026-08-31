@@ -2571,7 +2571,7 @@ class ModelIRJSONTests(unittest.TestCase):
         human = _json_module(invalid_signal_prefix, "systems", "human")
         human["externals"][0]["signals"][0]["signal"] = ["Effect", "Preset"]
         invalid_nested_parent = json.loads(EXPECTED_JSON)
-        zone = _json_module(invalid_nested_parent, "objects", "zone")
+        zone = _json_module(invalid_nested_parent, "objects", "memory_node")
         free_area = next(
             model_object
             for model_object in zone["objects"]

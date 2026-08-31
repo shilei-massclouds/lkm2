@@ -105,6 +105,8 @@ type FreeAreaType {
 }
 
 type Zone {
+    /* Every Zone is owned by exactly one physical-memory node. */
+    parent: MemoryNodeType;
     initial_state: State::Ready;
 
     /*
@@ -124,25 +126,24 @@ type Zone {
     }
 }
 
-object DMA32Zone: Zone {
-    parent: MemoryNode;
+type DMA32ZoneType: Zone {
 
     state State::Ready {
         transitions {
             override on Transition::Enable -> State::Online {
                 depends_on {
-                    MemoryNode.state == State::Online;
+                    parent.state == State::Online;
                     memory_node_covers_memblock_memory(
-                        MemoryNode,
+                        parent,
                         MemBlockMemory,
                     );
                 }
 
                 establishes {
-                    zone_bound_to_unique_memory_node(self, MemoryNode);
+                    zone_bound_to_unique_memory_node(self, parent);
                     dma32_zone_bounded_by_32bit_dma_limit(
                         self,
-                        MemoryNode,
+                        parent,
                     );
                 }
             }
@@ -151,44 +152,42 @@ object DMA32Zone: Zone {
 
     state State::Online {
         invariant {
-            MemoryNode.state == State::Online;
+            parent.state == State::Online;
             memory_node_covers_memblock_memory(
-                MemoryNode,
+                parent,
                 MemBlockMemory,
             );
-            zone_bound_to_unique_memory_node(self, MemoryNode);
+            zone_bound_to_unique_memory_node(self, parent);
             dma32_zone_bounded_by_32bit_dma_limit(
                 self,
-                MemoryNode,
+                parent,
             );
         }
     }
 }
 
-object NormalZone: Zone {
-    parent: MemoryNode;
-
+type NormalZoneType: Zone {
     state State::Ready {
         transitions {
             override on Transition::Enable -> State::Online {
                 depends_on {
-                    DMA32Zone.state == State::Online;
+                    parent::DMA32Zone.state == State::Online;
                     zone_bound_to_unique_memory_node(
-                        DMA32Zone,
-                        MemoryNode,
+                        parent::DMA32Zone,
+                        parent,
                     );
                     dma32_zone_bounded_by_32bit_dma_limit(
-                        DMA32Zone,
-                        MemoryNode,
+                        parent::DMA32Zone,
+                        parent,
                     );
                 }
 
                 establishes {
-                    zone_bound_to_unique_memory_node(self, MemoryNode);
+                    zone_bound_to_unique_memory_node(self, parent);
                     normal_zone_base_bounds_follow_dma32_and_node_limit(
                         self,
-                        DMA32Zone,
-                        MemoryNode,
+                        parent::DMA32Zone,
+                        parent,
                     );
                 }
             }
@@ -197,75 +196,73 @@ object NormalZone: Zone {
 
     state State::Online {
         invariant {
-            DMA32Zone.state == State::Online;
+            parent::DMA32Zone.state == State::Online;
             zone_bound_to_unique_memory_node(
-                DMA32Zone,
-                MemoryNode,
+                parent::DMA32Zone,
+                parent,
             );
             dma32_zone_bounded_by_32bit_dma_limit(
-                DMA32Zone,
-                MemoryNode,
+                parent::DMA32Zone,
+                parent,
             );
-            zone_bound_to_unique_memory_node(self, MemoryNode);
+            zone_bound_to_unique_memory_node(self, parent);
             normal_zone_base_bounds_follow_dma32_and_node_limit(
                 self,
-                DMA32Zone,
-                MemoryNode,
+                parent::DMA32Zone,
+                parent,
             );
         }
     }
 }
 
-object MovableZone: Zone {
-    parent: MemoryNode;
-
+type MovableZoneType: Zone {
     state State::Ready {
         transitions {
             override on Transition::Enable -> State::Online {
                 depends_on {
-                    DMA32Zone.state == State::Online;
-                    NormalZone.state == State::Online;
+                    parent::DMA32Zone.state == State::Online;
+                    parent::NormalZone.state == State::Online;
                     memory_node_covers_memblock_memory(
-                        MemoryNode,
+                        parent,
                         MemBlockMemory,
                     );
                     zone_bound_to_unique_memory_node(
-                        DMA32Zone,
-                        MemoryNode,
+                        parent::DMA32Zone,
+                        parent,
                     );
                     zone_bound_to_unique_memory_node(
-                        NormalZone,
-                        MemoryNode,
+                        parent::NormalZone,
+                        parent,
                     );
                     dma32_zone_bounded_by_32bit_dma_limit(
-                        DMA32Zone,
-                        MemoryNode,
+                        parent::DMA32Zone,
+                        parent,
                     );
                     normal_zone_base_bounds_follow_dma32_and_node_limit(
-                        NormalZone,
-                        DMA32Zone,
-                        MemoryNode,
+                        parent::NormalZone,
+                        parent::DMA32Zone,
+                        parent,
                     );
                 }
 
                 establishes {
-                    zone_bound_to_unique_memory_node(self, MemoryNode);
+                    zone_bound_to_unique_memory_node(self, parent);
                     movable_zone_empty_or_tail_of_highest_populated_base_zone(
                         self,
-                        DMA32Zone,
-                        NormalZone,
+                        parent::DMA32Zone,
+                        parent::NormalZone,
                     );
                     node_zone_effective_ranges_are_pairwise_disjoint(
-                        MemoryNode,
-                        DMA32Zone,
-                        NormalZone,
+                        parent,
+                        parent::DMA32Zone,
+                        parent::NormalZone,
                         self,
                     );
                     node_zone_boundary_envelopes_cover_memory(
-                        MemoryNode,
+                        parent,
                         MemBlockMemory,
-                        DMA32Zone,
-                        NormalZone,
+                        parent::DMA32Zone,
+                        parent::NormalZone,
                         self,
                     );
                 }
@@ -275,47 +272,219 @@ object MovableZone: Zone {
 
     state State::Online {
         invariant {
-            DMA32Zone.state == State::Online;
-            NormalZone.state == State::Online;
+            parent::DMA32Zone.state == State::Online;
+            parent::NormalZone.state == State::Online;
             memory_node_covers_memblock_memory(
-                MemoryNode,
+                parent,
                 MemBlockMemory,
             );
             zone_bound_to_unique_memory_node(
-                DMA32Zone,
-                MemoryNode,
+                parent::DMA32Zone,
+                parent,
             );
             zone_bound_to_unique_memory_node(
-                NormalZone,
-                MemoryNode,
+                parent::NormalZone,
+                parent,
             );
             dma32_zone_bounded_by_32bit_dma_limit(
-                DMA32Zone,
-                MemoryNode,
+                parent::DMA32Zone,
+                parent,
             );
             normal_zone_base_bounds_follow_dma32_and_node_limit(
-                NormalZone,
-                DMA32Zone,
-                MemoryNode,
+                parent::NormalZone,
+                parent::DMA32Zone,
+                parent,
             );
-            zone_bound_to_unique_memory_node(self, MemoryNode);
+            zone_bound_to_unique_memory_node(self, parent);
             movable_zone_empty_or_tail_of_highest_populated_base_zone(
                 self,
-                DMA32Zone,
-                NormalZone,
+                parent::DMA32Zone,
+                parent::NormalZone,
             );
             node_zone_effective_ranges_are_pairwise_disjoint(
-                MemoryNode,
-                DMA32Zone,
-                NormalZone,
+                parent,
+                parent::DMA32Zone,
+                parent::NormalZone,
                 self,
             );
             node_zone_boundary_envelopes_cover_memory(
-                MemoryNode,
+                parent,
                 MemBlockMemory,
-                DMA32Zone,
-                NormalZone,
+                parent::DMA32Zone,
+                parent::NormalZone,
                 self,
+            );
+        }
+    }
+}
+
+/*
+ * ZoneLists models the one ZONELIST_FALLBACK projection for this
+ * non-NUMA configuration.  These predicates intentionally hide the list
+ * representation: no zoneref array, page metadata, PFNs, or allocator state
+ * is introduced here.  The argument order of the priority predicate is the
+ * zone-index descending order used by build_zonerefs_node():
+ * Movable, Normal, DMA32.  Empty zones are filtered by the final predicate.
+ */
+predicate zone_lists_bound_to_unique_memory_node(
+    zone_lists: ZoneListsType,
+    node: MemoryNodeType,
+) -> bool;
+predicate zone_lists_is_single_fallback(
+    zone_lists: ZoneListsType,
+) -> bool;
+predicate zone_lists_orders_populated_zones_descending(
+    zone_lists: ZoneListsType,
+    movable_zone: Zone,
+    normal_zone: Zone,
+    dma32_zone: Zone,
+) -> bool;
+predicate zone_lists_excludes_empty_zones(
+    zone_lists: ZoneListsType,
+    movable_zone: Zone,
+    normal_zone: Zone,
+    dma32_zone: Zone,
+) -> bool;
+
+type ZoneListsType {
+    parent: MemoryNodeType;
+    initial_state: State::Ready;
+
+    state State::Ready {
+        transitions {
+            on Transition::Enable -> State::Online {
+                depends_on {
+                    parent.state == State::Online;
+                    parent::DMA32Zone.state == State::Online;
+                    parent::NormalZone.state == State::Online;
+                    parent::MovableZone.state == State::Online;
+                    memory_node_covers_memblock_memory(
+                        parent,
+                        MemBlockMemory,
+                    );
+                    zone_bound_to_unique_memory_node(
+                        parent::DMA32Zone,
+                        parent,
+                    );
+                    zone_bound_to_unique_memory_node(
+                        parent::NormalZone,
+                        parent,
+                    );
+                    zone_bound_to_unique_memory_node(
+                        parent::MovableZone,
+                        parent,
+                    );
+                    dma32_zone_bounded_by_32bit_dma_limit(
+                        parent::DMA32Zone,
+                        parent,
+                    );
+                    normal_zone_base_bounds_follow_dma32_and_node_limit(
+                        parent::NormalZone,
+                        parent::DMA32Zone,
+                        parent,
+                    );
+                    movable_zone_empty_or_tail_of_highest_populated_base_zone(
+                        parent::MovableZone,
+                        parent::DMA32Zone,
+                        parent::NormalZone,
+                    );
+                    node_zone_effective_ranges_are_pairwise_disjoint(
+                        parent,
+                        parent::DMA32Zone,
+                        parent::NormalZone,
+                        parent::MovableZone,
+                    );
+                    node_zone_boundary_envelopes_cover_memory(
+                        parent,
+                        MemBlockMemory,
+                        parent::DMA32Zone,
+                        parent::NormalZone,
+                        parent::MovableZone,
+                    );
+                }
+
+                establishes {
+                    zone_lists_bound_to_unique_memory_node(self, parent);
+                    zone_lists_is_single_fallback(self);
+                    zone_lists_orders_populated_zones_descending(
+                        self,
+                        parent::MovableZone,
+                        parent::NormalZone,
+                        parent::DMA32Zone,
+                    );
+                    zone_lists_excludes_empty_zones(
+                        self,
+                        parent::MovableZone,
+                        parent::NormalZone,
+                        parent::DMA32Zone,
+                    );
+                }
+            }
+        }
+    }
+
+    state State::Online {
+        invariant {
+            parent.state == State::Online;
+            parent::DMA32Zone.state == State::Online;
+            parent::NormalZone.state == State::Online;
+            parent::MovableZone.state == State::Online;
+            memory_node_covers_memblock_memory(
+                parent,
+                MemBlockMemory,
+            );
+            zone_bound_to_unique_memory_node(
+                parent::DMA32Zone,
+                parent,
+            );
+            zone_bound_to_unique_memory_node(
+                parent::NormalZone,
+                parent,
+            );
+            zone_bound_to_unique_memory_node(
+                parent::MovableZone,
+                parent,
+            );
+            dma32_zone_bounded_by_32bit_dma_limit(
+                parent::DMA32Zone,
+                parent,
+            );
+            normal_zone_base_bounds_follow_dma32_and_node_limit(
+                parent::NormalZone,
+                parent::DMA32Zone,
+                parent,
+            );
+            movable_zone_empty_or_tail_of_highest_populated_base_zone(
+                parent::MovableZone,
+                parent::DMA32Zone,
+                parent::NormalZone,
+            );
+            node_zone_effective_ranges_are_pairwise_disjoint(
+                parent,
+                parent::DMA32Zone,
+                parent::NormalZone,
+                parent::MovableZone,
+            );
+            node_zone_boundary_envelopes_cover_memory(
+                parent,
+                MemBlockMemory,
+                parent::DMA32Zone,
+                parent::NormalZone,
+                parent::MovableZone,
+            );
+            zone_lists_bound_to_unique_memory_node(self, parent);
+            zone_lists_is_single_fallback(self);
+            zone_lists_orders_populated_zones_descending(
+                self,
+                parent::MovableZone,
+                parent::NormalZone,
+                parent::DMA32Zone,
+            );
+            zone_lists_excludes_empty_zones(
+                self,
+                parent::MovableZone,
+                parent::NormalZone,
+                parent::DMA32Zone,
             );
         }
     }

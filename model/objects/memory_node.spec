@@ -11,6 +11,10 @@ use model::systems::kernel::Kernel;
 use model::objects::memblock::MemBlock;
 use model::objects::memblock::MemBlockMemory;
 use model::objects::memblock::MemBlockMemoryType;
+use model::objects::zone::DMA32ZoneType;
+use model::objects::zone::NormalZoneType;
+use model::objects::zone::MovableZoneType;
+use model::objects::zone::ZoneListsType;
 
 predicate memory_node_covers_memblock_memory(
     node: MemoryNodeType,
@@ -19,6 +23,12 @@ predicate memory_node_covers_memblock_memory(
 
 type MemoryNodeType {
     initial_state: State::Ready;
+
+    /* Per-node zone ownership; the current configuration has one node. */
+    object DMA32Zone: DMA32ZoneType {}
+    object NormalZone: NormalZoneType {}
+    object MovableZone: MovableZoneType {}
+    object ZoneLists: ZoneListsType {}
 
     state State::Ready {
         transitions {
