@@ -1811,10 +1811,10 @@ class ModelIR:
                         )
                 for state in model_object.states:
                     for handler in (*state.transitions, *state.actions):
-                        if handler.abstract:
+                        if isinstance(handler, ModelTransition) and handler.abstract:
                             raise ModelIRValidationError(
                                 f"object {'.'.join(model_object.name)!r} contains an "
-                                f"abstract {'transition' if isinstance(handler, ModelTransition) else 'action'} handler"
+                                "abstract transition handler"
                             )
                         if (
                             isinstance(handler, ModelTransition)

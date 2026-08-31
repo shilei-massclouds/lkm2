@@ -11,6 +11,7 @@ spec memblock;
 spec memory_node;
 spec mem_map;
 spec zone;
+spec page_allocator;
 spec early_console;
 spec user_app_runtime;
 spec vm;

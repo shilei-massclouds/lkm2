@@ -2015,6 +2015,27 @@ object Probe: T {}
                 compile_spec(entry_path)
         self.assertIn("must declare at least one block", caught.exception.diagnostic.message)
 
+    def test_object_can_declare_an_abstract_action_interface(self) -> None:
+        with model_tree(
+            {
+                "root.spec": """
+                    object Interface: T {
+                        initial_state: State::Online;
+                        state State::Online {
+                            actions { on Action::Request; }
+                        }
+                    }
+                """
+            }
+        ) as (_, entry_path):
+            model = compile_spec(entry_path)
+
+        request = model.objects[0].states[0].actions[0]
+        self.assertEqual(request.signal, ("Action", "Request"))
+        self.assertEqual(request.parameters, ())
+        self.assertEqual(request.blocks, ())
+        self.assertTrue(request.abstract)
+
     def test_invalid_entry_root_and_origin_are_rejected(self) -> None:
         with model_tree(
             {"root.spec": ""},
@@ -2523,6 +2544,7 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("objects", "mem_map"),
                 ("objects", "memblock"),
                 ("objects", "memory_node"),
+                ("objects", "page_allocator"),
                 ("objects", "printk"),
                 ("objects", "scheduler"),
                 ("objects", "task"),

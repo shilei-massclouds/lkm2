@@ -1536,11 +1536,18 @@ def _expand_inheritance(
         continuation = False if base is None else base.continuation
         states = _rebind_states(states, object_name)
         fields = _merge_fields(inherited_fields, raw.attrs)
+        declared_abstract_actions = {
+            (state.name, handler.signal)
+            for state in raw.states
+            for handler in state.actions
+            if handler.abstract
+        }
         abstract = tuple(
             (state.name, handler.signal)
             for state in states
             for handler in (*state.transitions, *state.actions)
             if handler.abstract
+            and (state.name, handler.signal) not in declared_abstract_actions
         )
         user_runtime = base is not None and base.user_runtime
         event_flow = base is not None and base.event_flow
