@@ -2520,6 +2520,7 @@ class ModelIRJSONTests(unittest.TestCase):
                 ("objects", "dtb_blob"),
                 ("objects", "early_console"),
                 ("objects", "kernel_image"),
+                ("objects", "mem_map"),
                 ("objects", "memblock"),
                 ("objects", "memory_node"),
                 ("objects", "printk"),

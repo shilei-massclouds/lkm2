@@ -28,6 +28,13 @@ ZONE_PREDICATES = {
     "zone_lists_excludes_empty_zones",
 }
 
+MEM_MAP_PREDICATES = {
+    "mem_map_bound_to_unique_memory_node",
+    "mem_map_covers_populated_memory",
+    "mem_map_preserves_nonallocatable_status",
+    "mem_map_zone_ownership_consistent",
+}
+
 
 def _target_name(expression):
     parts = []
@@ -104,6 +111,7 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
         cls.model = compile_spec(REPOSITORY / "model/main.spec")
         cls.modules = {module.name: module for module in cls.model.modules}
         cls.memory_node_module = cls.modules[("objects", "memory_node")]
+        cls.mem_map_module = cls.modules[("objects", "mem_map")]
         cls.zone_module = cls.modules[("objects", "zone")]
         cls.objects = {
             model_object.name[-1]: model_object
@@ -128,6 +136,7 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
                 "MemoryNode",
                 "DMA32Zone",
                 "FreeArea",
+                "MemMap",
                 "MovableZone",
                 "FreeArea",
                 "NormalZone",
@@ -152,7 +161,13 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
                 for item in self.memory_node_module.objects
                 if len(item.name) == len(self.memory_node_module.name) + 2
             },
-            {"DMA32Zone", "NormalZone", "MovableZone", "ZoneLists"},
+            {
+                "DMA32Zone",
+                "NormalZone",
+                "MovableZone",
+                "ZoneLists",
+                "MemMap",
+            },
         )
         self.assertEqual(
             {item.name for item in self.free_areas.values()},
@@ -236,6 +251,203 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
         for model_object in (*self.objects.values(), *self.free_areas.values()):
             self.assertEqual(model_object.attrs, ())
             self.assertEqual(model_object.base_type.arguments, ())
+
+    def test_node_mem_map_has_memory_node_parent_and_complete_lifecycle(self) -> None:
+        mem_map = next(
+            model_object
+            for model_object in self.memory_node_module.objects
+            if model_object.name[-1] == "MemMap"
+        )
+        self.assertEqual(
+            mem_map.name,
+            ("objects", "memory_node", "MemoryNode", "MemMap"),
+        )
+        self.assertEqual(mem_map.base_type.name, ("MemMapType",))
+        self.assertEqual(
+            _target_name(mem_map.parent),
+            ("objects", "memory_node", "MemoryNode"),
+        )
+        mem_map_type = next(
+            item
+            for item in self.mem_map_module.types
+            if item.name[-1] == "MemMapType"
+        )
+        self.assertEqual(mem_map_type.parent_type.name, ("MemoryNodeType",))
+        self.assertEqual(mem_map_type.fields, ())
+        self.assertEqual(mem_map.attrs, ())
+        self.assertEqual(mem_map.base_type.arguments, ())
+        self.assertEqual(
+            _state_dependencies(
+                _block(_enable(mem_map), "depends_on").expressions
+            ),
+            (
+                "MemoryNode",
+                "MemBlockMemory",
+                "MemBlockReserved",
+                "DMA32Zone",
+                "NormalZone",
+                "MovableZone",
+            ),
+        )
+        self.assertEqual(
+            _state_dependencies(_invariant_expressions(mem_map)),
+            (
+                "MemoryNode",
+                "MemBlockMemory",
+                "MemBlockReserved",
+                "DMA32Zone",
+                "NormalZone",
+                "MovableZone",
+            ),
+        )
+
+    def test_node_mem_map_preserves_population_reservation_and_zone_facts(self) -> None:
+        mem_map = next(
+            model_object
+            for model_object in self.memory_node_module.objects
+            if model_object.name[-1] == "MemMap"
+        )
+        transition = _enable(mem_map)
+        depends_on = set(
+            _predicate_calls(_block(transition, "depends_on").expressions)
+        )
+        self.assertEqual(
+            depends_on,
+            {
+                "memory_node_covers_memblock_memory",
+                "zone_bound_to_unique_memory_node",
+                "dma32_zone_bounded_by_32bit_dma_limit",
+                "normal_zone_base_bounds_follow_dma32_and_node_limit",
+                "movable_zone_empty_or_tail_of_highest_populated_base_zone",
+                "node_zone_effective_ranges_are_pairwise_disjoint",
+                "node_zone_boundary_envelopes_cover_memory",
+            },
+        )
+        self.assertEqual(
+            _predicate_calls(_block(transition, "establishes").expressions),
+            (
+                "mem_map_bound_to_unique_memory_node",
+                "mem_map_covers_populated_memory",
+                "mem_map_preserves_nonallocatable_status",
+                "mem_map_zone_ownership_consistent",
+            ),
+        )
+        self.assertTrue(
+            set(MEM_MAP_PREDICATES).issubset(
+                set(_predicate_calls(_invariant_expressions(mem_map)))
+            )
+        )
+
+        signatures = {
+            predicate.name[-1]: tuple(
+                parameter.type.name[-1] for parameter in predicate.parameters
+            )
+            for predicate in self.mem_map_module.predicates
+            if predicate.name[-1] in MEM_MAP_PREDICATES
+        }
+        self.assertEqual(
+            signatures,
+            {
+                "mem_map_bound_to_unique_memory_node": (
+                    "MemMapType",
+                    "MemoryNodeType",
+                ),
+                "mem_map_covers_populated_memory": (
+                    "MemMapType",
+                    "MemBlockMemoryType",
+                ),
+                "mem_map_preserves_nonallocatable_status": (
+                    "MemMapType",
+                    "MemBlockReservedType",
+                ),
+                "mem_map_zone_ownership_consistent": (
+                    "MemMapType",
+                    "Zone",
+                    "Zone",
+                    "Zone",
+                ),
+            },
+        )
+
+    def test_global_mem_map_is_one_kernel_alias_of_node_map(self) -> None:
+        globals_ = [
+            model_object
+            for model_object in self.mem_map_module.objects
+            if model_object.name[-1] == "GlobalMemMap"
+        ]
+        self.assertEqual(len(globals_), 1)
+        global_mem_map = globals_[0]
+        self.assertEqual(global_mem_map.name, ("objects", "mem_map", "GlobalMemMap"))
+        self.assertEqual(global_mem_map.base_type.name, ("GlobalMemMapType",))
+        self.assertEqual(global_mem_map.parent.value, "Kernel")
+        global_type = next(
+            item
+            for item in self.mem_map_module.types
+            if item.name[-1] == "GlobalMemMapType"
+        )
+        self.assertEqual(global_type.parent_type.name, ("KernelType",))
+        transition = _enable(global_mem_map)
+        self.assertEqual(
+            _state_dependencies(_block(transition, "depends_on").expressions),
+            ("MemMap",),
+        )
+        self.assertEqual(
+            _predicate_calls(_block(transition, "establishes").expressions),
+            ("global_mem_map_aliases_node_mem_map",),
+        )
+        alias = next(
+            expression
+            for expression in _block(transition, "establishes").expressions
+            if expression.kind == "call"
+        )
+        self.assertEqual(_target_name(alias.children[1]), ("GlobalMemMap",))
+        self.assertEqual(
+            _target_name(alias.children[2])[-2:],
+            ("MemoryNode", "MemMap"),
+        )
+        self.assertEqual(
+            tuple(
+                predicate.name[-1]
+                for predicate in self.mem_map_module.predicates
+                if predicate.name[-1].startswith("global_mem_map")
+            ),
+            ("global_mem_map_aliases_node_mem_map",),
+        )
+
+    def test_mem_map_model_has_no_page_or_allocator_layout(self) -> None:
+        forbidden = (
+            "page",
+            "pfn",
+            "range",
+            "bitmap",
+            "free_area",
+            "buddy",
+            "allocator",
+            "order",
+        )
+        for declaration in (
+            *self.mem_map_module.types,
+            *self.mem_map_module.objects,
+        ):
+            name = declaration.name[-1].lower()
+            for fragment in forbidden:
+                self.assertNotIn(fragment, name)
+        self.assertEqual(
+            [
+                field.name
+                for model_type in self.mem_map_module.types
+                for field in model_type.fields or ()
+            ],
+            [],
+        )
+        self.assertEqual(
+            [
+                field.name
+                for model_object in self.mem_map_module.objects
+                for field in model_object.attrs or ()
+            ],
+            [],
+        )
 
     def test_each_zone_gets_one_bound_empty_capable_free_area(self) -> None:
         for zone_name, free_area in self.free_areas.items():
@@ -541,7 +753,7 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
 
     def test_downstream_allocator_drafts_are_not_in_the_production_model(self) -> None:
         module_names = {module.name for module in self.model.modules}
-        for name in ("mem_map", "free_area", "zone_lists", "buddy_system"):
+        for name in ("free_area", "zone_lists", "buddy_system"):
             with self.subTest(module=name):
                 self.assertNotIn(("objects", name), module_names)
                 self.assertFalse((REPOSITORY / "model/objects" / f"{name}.spec").exists())

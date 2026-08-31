@@ -9,6 +9,7 @@ spec printk;
 spec dtb_blob;
 spec memblock;
 spec memory_node;
+spec mem_map;
 spec zone;
 spec early_console;
 spec user_app_runtime;

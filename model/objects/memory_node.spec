@@ -4,7 +4,7 @@
  * Online means that the node's memory envelope is fixed and covers memblock
  * memory. It does not imply that every address in the envelope is usable:
  * DRAM holes, reservations, and unavailable pages are deliberately left for
- * the later page-metadata model.
+ * the MemMap metadata semantics.
  */
 
 use model::systems::kernel::Kernel;
@@ -15,6 +15,7 @@ use model::objects::zone::DMA32ZoneType;
 use model::objects::zone::NormalZoneType;
 use model::objects::zone::MovableZoneType;
 use model::objects::zone::ZoneListsType;
+use model::objects::mem_map::MemMapType;
 
 predicate memory_node_covers_memblock_memory(
     node: MemoryNodeType,
@@ -29,6 +30,7 @@ type MemoryNodeType {
     object NormalZone: NormalZoneType {}
     object MovableZone: MovableZoneType {}
     object ZoneLists: ZoneListsType {}
+    object MemMap: MemMapType {}
 
     state State::Ready {
         transitions {
