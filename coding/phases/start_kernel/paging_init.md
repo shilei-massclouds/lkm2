@@ -10,5 +10,6 @@
 之后。
 
 成功后当前可执行前缀在 `SwapperPageTable` Online 处以 WFI 循环停驻；失败路径使用独立的
-spin fail-stop。Scheduler Enable、Unmask 与 BootSetup 仍只有正式模型定义，前两者在模型的
-EarlyBoot Enter 中位于 SwapperPageTable 之后。
+spin fail-stop。PageAllocator handoff、Scheduler Enable、Unmask 与 BootSetup 按正式模型顺序
+定义；PageAllocator 在 MemoryNode/SwapperPageTable 之后完成 MemBlock ownership transfer，
+随后才进入 Scheduler 与 Unmask。

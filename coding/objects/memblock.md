@@ -42,3 +42,12 @@ memory 裁剪和更高层 allocator 策略均未实现。实现提供
 `allocate_phys(size, alignment)`（高地址优先、连续且避开并写入 Reserved）以及
 `free_phys(base, size)`（支持裁剪、拆分和跨 reservation 释放）；这两个 API 属于实现级
 能力，不写入 Model IR，也不改变现有差分 checkpoint ABI。
+
+## PageAllocator handoff
+
+`PageAllocator.Enable` 在调用 `memblock_free_all` 前，必须通过同一分配路径预留并记录
+MemMap/page-state backing 与 Buddy block-record backing。两类区间均继续留在 Reserved 投影中，
+并可由 `metadata_ranges()` 按 `MetadataKind` 观测。`memblock_free_all_completed` 是独立的
+handoff 事实；MemBlock 保持 Online，但 handoff 后 `allocate_phys`/`free_phys` 拒绝改变其
+Reserved 集合。未保留且落在 node/zone envelope 内的完整页由 PageAllocator 依据最大对齐块
+种入 FreeArea，metadata、洞和 envelope 外地址不会被释放。

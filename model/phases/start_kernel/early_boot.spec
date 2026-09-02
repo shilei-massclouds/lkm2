@@ -22,7 +22,9 @@ use model::objects::vm::swapper_satp_switched;
 use model::objects::vm::swapper_tlb_flush_completed;
 use model::objects::vm::swapper_late_paging_mode_selected;
 use model::objects::memblock::MemBlock;
+use model::objects::memblock::memblock_free_all_completed;
 use model::objects::memory_node::MemoryNode;
+use model::objects::page_allocator::PageAllocator;
 use model::phases::phase::PhaseType;
 use super::arch_head_interrupts_masked;
 
@@ -48,6 +50,7 @@ object EarlyBoot: PhaseType {
                     MemBlock.Transition::Enable;
                     SwapperPageTable.Transition::Enable;
                     MemoryNode.Transition::Enable;
+                    PageAllocator.Transition::Enable;
                     Cpu0Scheduler.Transition::Enable;
                     CurrentCPU.InterruptControlRef.Action::Unmask;
                 }
@@ -64,6 +67,7 @@ object EarlyBoot: PhaseType {
                     MemBlock.state == State::Online;
                     SwapperPageTable.state == State::Online;
                     MemoryNode.state == State::Online;
+                    PageAllocator.state == State::Online;
                     Cpu0Scheduler.state == State::Online;
                     early_console_bound_from_registry(EarlyConsole, SbiConsole);
                     printk_console_registered(Printk, EarlyConsole);
@@ -75,6 +79,7 @@ object EarlyBoot: PhaseType {
                     swapper_satp_switched();
                     swapper_tlb_flush_completed();
                     swapper_late_paging_mode_selected();
+                    memblock_free_all_completed();
                 }
 
                 establishes {

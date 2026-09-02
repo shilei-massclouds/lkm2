@@ -191,17 +191,21 @@ class PageAllocatorModelTests(unittest.TestCase):
         self.assertEqual(enable.target_state, ("State", "Online"))
 
         dependencies = _block(enable, "depends_on").expressions
-        self.assertEqual(_state_dependency_paths(dependencies), BACKEND_STATE_PATHS)
+        self.assertEqual(
+            _state_dependency_paths(dependencies), BACKEND_STATE_PATHS + (("MemBlock",),)
+        )
         self.assertEqual(
             tuple(_call_name(call) for call in _predicate_calls(dependencies)),
             BACKEND_PREDICATES,
         )
 
         invariants = _invariant_expressions(self.allocator)
-        self.assertEqual(_state_dependency_paths(invariants), BACKEND_STATE_PATHS)
+        self.assertEqual(
+            _state_dependency_paths(invariants), BACKEND_STATE_PATHS + (("MemBlock",),)
+        )
         self.assertEqual(
             tuple(_call_name(call) for call in _predicate_calls(invariants)),
-            BACKEND_PREDICATES + WIRING_PREDICATES,
+            ("memblock_free_all_completed",) + BACKEND_PREDICATES + WIRING_PREDICATES,
         )
 
     def test_establishes_the_four_typed_backend_wirings(self) -> None:
@@ -246,7 +250,7 @@ class PageAllocatorModelTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(_call_name(call) for call in established),
-            WIRING_PREDICATES,
+            WIRING_PREDICATES + ("memblock_free_all_completed",),
         )
         arguments = {
             _call_name(call): tuple(
@@ -278,6 +282,7 @@ class PageAllocatorModelTests(unittest.TestCase):
                     ("MemoryNode", "NormalZone", "FreeArea"),
                     ("MemoryNode", "MovableZone", "FreeArea"),
                 ),
+                "memblock_free_all_completed": (),
             },
         )
 
@@ -306,17 +311,31 @@ class PageAllocatorModelTests(unittest.TestCase):
                 owned_paths,
             )
 
-    def test_online_exposes_only_two_parameterless_abstract_actions(self) -> None:
+    def test_online_exposes_two_order_based_abstract_actions(self) -> None:
         self.assertEqual(_state(self.allocator, "Ready").actions, ())
         actions = _state(self.allocator, "Online").actions
         self.assertEqual(
             tuple(action.signal for action in actions),
             (("Action", "AllocPages"), ("Action", "FreePages")),
         )
-        for action in actions:
-            self.assertTrue(action.abstract)
-            self.assertEqual(action.parameters, ())
-            self.assertEqual(action.blocks, ())
+        self.assertTrue(all(action.abstract for action in actions))
+        self.assertEqual(
+            tuple(
+                (
+                    action.signal,
+                    tuple(
+                        (parameter.name, parameter.type.name[-1])
+                        for parameter in action.parameters
+                    ),
+                    action.blocks,
+                )
+                for action in actions
+            ),
+            (
+                (("Action", "AllocPages"), (("order", "i32"),), ()),
+                (("Action", "FreePages"), (("block", "Ref"), ("order", "i32")), ()),
+            ),
+        )
 
     def test_does_not_introduce_allocator_storage_or_buddy_objects(self) -> None:
         self.assertEqual(
@@ -347,25 +366,33 @@ class PageAllocatorModelTests(unittest.TestCase):
             1,
         )
 
-    def test_no_phase_or_external_signal_drives_the_allocator(self) -> None:
-        self.assertFalse(
-            any(
-                "PageAllocator" in _target_name(signal.target)
-                for signal in _all_signals(self.model)
-            )
+    def test_early_boot_drives_allocator_after_memory_node(self) -> None:
+        early_boot = next(
+            item
+            for module in self.model.modules
+            for item in module.objects
+            if item.name[-1] == "EarlyBoot"
         )
-        for module in self.model.modules:
-            if module.name[:1] == ("phases",):
-                source = (
-                    REPOSITORY / "model" / Path(*module.name)
-                ).with_suffix(".spec")
-                if source.exists():
-                    self.assertNotIn(
-                        "PageAllocator",
-                        source.read_text(encoding="utf-8"),
-                    )
+        enter = next(
+            action
+            for state in early_boot.states
+            for action in state.actions
+            if action.signal == ("Action", "Enter")
+        )
+        drives = next(block for block in enter.blocks if block.kind == "drives")
+        allocator_index = next(
+            index
+            for index, signal in enumerate(drives.signals)
+            if _target_name(signal.target)[-1] == "PageAllocator"
+        )
+        memory_node_index = next(
+            index
+            for index, signal in enumerate(drives.signals)
+            if _target_name(signal.target)[-1] == "MemoryNode"
+        )
+        self.assertEqual(allocator_index, memory_node_index + 1)
 
-    def test_default_derivation_leaves_allocator_ready(self) -> None:
+    def test_default_derivation_enables_allocator_after_handoff(self) -> None:
         with (REPOSITORY / "tools/signals/parked.signals").open(
             encoding="utf-8"
         ) as stream:
@@ -376,7 +403,7 @@ class PageAllocatorModelTests(unittest.TestCase):
             user_runtime_signals=signals,
         ).paths[0]
         states = {item.object: item.state for item in path.final_state}
-        self.assertEqual(states[self.allocator.name], ("State", "Ready"))
+        self.assertEqual(states[self.allocator.name], ("State", "Online"))
 
 
 def _walk_expression(expression):

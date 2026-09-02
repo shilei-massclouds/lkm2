@@ -7,6 +7,8 @@ use model::objects::memory_node::MemoryNodeType;
 use model::objects::memory_node::memory_node_covers_memblock_memory;
 use model::objects::memblock::MemBlockMemory;
 use model::objects::memblock::MemBlockReserved;
+use model::objects::memblock::MemBlock;
+use model::objects::memblock::memblock_free_all_completed;
 use model::objects::zone::Zone;
 use model::objects::zone::FreeAreaType;
 use model::objects::zone::ZoneListsType;
@@ -67,6 +69,8 @@ type PageAllocatorType {
                     MemoryNode::MovableZone::FreeArea.state == State::Online;
                     MemoryNode::MemMap.state == State::Online;
                     MemoryNode::ZoneLists.state == State::Online;
+
+                    MemBlock.state == State::Online;
 
                     memory_node_covers_memblock_memory(
                         MemoryNode,
@@ -174,6 +178,10 @@ type PageAllocatorType {
                     );
                 }
 
+                drives {
+                    MemBlock.Action::FreeAll;
+                }
+
                 establishes {
                     page_allocator_uses_node_zones(
                         self,
@@ -196,6 +204,7 @@ type PageAllocatorType {
                         MemoryNode::NormalZone::FreeArea,
                         MemoryNode::MovableZone::FreeArea,
                     );
+                    memblock_free_all_completed();
                 }
             }
         }
@@ -212,6 +221,9 @@ type PageAllocatorType {
             MemoryNode::MovableZone::FreeArea.state == State::Online;
             MemoryNode::MemMap.state == State::Online;
             MemoryNode::ZoneLists.state == State::Online;
+            MemBlock.state == State::Online;
+
+            memblock_free_all_completed();
 
             memory_node_covers_memblock_memory(
                 MemoryNode,
@@ -348,8 +360,8 @@ object PageAllocator: PageAllocatorType {
 
     state State::Online {
         actions {
-            on Action::AllocPages;
-            on Action::FreePages;
+            on Action::AllocPages(order: i32);
+            on Action::FreePages(block: Ref, order: i32);
         }
     }
 }

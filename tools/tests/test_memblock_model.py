@@ -146,6 +146,7 @@ class MemBlockModelTests(unittest.TestCase):
             {
                 "memblock_memory_derived_from_dtb",
                 "memblock_required_reservations_complete",
+                "memblock_free_all_completed",
             },
         )
         self.assertFalse(
@@ -198,6 +199,7 @@ class MemBlockModelTests(unittest.TestCase):
                 "MemBlock",
                 "SwapperPageTable",
                 "MemoryNode",
+                "PageAllocator",
                 "Cpu0Scheduler",
                 "InterruptControl",
             ),

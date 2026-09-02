@@ -163,6 +163,12 @@ OpenSBI -> Kernel: emits Transition::Enable
         current state: State::Ready
         commit state: State::Online
       commit state: State::Online
+    EarlyBoot -> PageAllocator: drives Transition::Enable
+      current state: State::Ready
+      PageAllocator -> MemBlock: drives Action::FreeAll
+        current state: State::Online
+        commit state: unchanged
+      commit state: State::Online
     EarlyBoot -> Cpu0Scheduler: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online

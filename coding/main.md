@@ -10,6 +10,7 @@ impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
                                       -> impl/phases/start_kernel.rs
                                           -> impl/objects/dtb_blob.rs
                                           -> impl/objects/memblock.rs
+                                          -> impl/objects/page_allocator.rs
                                           -> impl/objects/early_console.rs
                                           -> impl/systems/sbi.rs
                                           -> impl/objects/printk.rs
@@ -26,6 +27,8 @@ impl/main.rs -> impl/phases.rs -> impl/phases/arch_head.rs
 - [`objects/dtb_blob.md`](objects/dtb_blob.md)：DTB 只读输入、FDT 校验和 chosen bootargs
   生产边界；
 - [`objects/memblock.md`](objects/memblock.md)：DTB Memory 扫描、固定容量区间集和强制保留；
+- [`objects/page_allocator.md`](objects/page_allocator.md)：MemBlock 到 Buddy 的 handoff、
+  持久化 FreeArea 和 order-based 分配/释放契约；
 - [`phases/start_kernel/paging_init.md`](phases/start_kernel/paging_init.md)：
   EarlyBoot Enter 的 MemBlock、SwapperPageTable 和 M1 停驻边界；
 - [`objects/printk.md`](objects/printk.md)：Printk 静态可用性、Console 注册与 Banner

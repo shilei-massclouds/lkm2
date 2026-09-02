@@ -18,6 +18,8 @@ predicate memblock_required_reservations_complete(
     kernel_image: KernelImageType,
     blob: DtbBlobType,
 ) -> bool;
+/* The allocator has taken ownership of all unreserved managed pages. */
+predicate memblock_free_all_completed() -> bool;
 
 type MemBlockType {
     initial_state: State::Ready;
@@ -30,6 +32,9 @@ type MemBlockType {
     }
 
     state State::Online {
+        actions {
+            on Action::FreeAll;
+        }
     }
 }
 
@@ -79,6 +84,14 @@ object MemBlock: MemBlockType {
         invariant {
             MemBlockMemory.state == State::Online;
             MemBlockReserved.state == State::Online;
+        }
+
+        actions {
+            override on Action::FreeAll {
+                establishes {
+                    memblock_free_all_completed();
+                }
+            }
         }
     }
 }
@@ -148,5 +161,6 @@ object MemBlockReserved: MemBlockReservedType {
                 DtbBlob,
             );
         }
+
     }
 }

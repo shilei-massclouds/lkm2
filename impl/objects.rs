@@ -3,6 +3,7 @@ pub(crate) mod dtb_blob;
 pub(crate) mod early_console;
 pub(crate) mod memblock;
 pub(crate) mod memory_node;
+pub(crate) mod page_allocator;
 pub(crate) mod printk;
 mod ptrace;
 mod task;

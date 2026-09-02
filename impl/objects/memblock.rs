@@ -1,5 +1,7 @@
 //! Fixed-capacity early physical-memory discovery and required reservations.
 
+#![allow(dead_code)]
+
 use super::dtb_blob::DtbBlob;
 
 const FDT_BEGIN_NODE: u32 = 1;
@@ -10,6 +12,7 @@ const FDT_END: u32 = 9;
 
 const MAX_MEMORY_REGIONS: usize = 16;
 const MAX_RESERVED_REGIONS: usize = 64;
+const MAX_METADATA_REGIONS: usize = 8;
 const RANGE_DIGEST_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 const RANGE_DIGEST_PRIME: u64 = 0x0000_0100_0000_01b3;
 
@@ -25,6 +28,10 @@ pub(crate) enum MemBlockError {
     AddressOverflow,
     InvalidAllocationAlignment,
     AllocationExhausted,
+    MetadataCapacityExceeded,
+    HandoffComplete,
+    AlreadyFreedToBuddy,
+    MetadataReserved,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -395,6 +402,8 @@ pub(crate) struct MemBlock {
     memory: MemBlockMemory,
     reserved: MemBlockReserved,
     kernel_image: PhysRange,
+    metadata: MetadataSet,
+    free_all_completed: bool,
 }
 
 impl MemBlock {
@@ -411,6 +420,8 @@ impl MemBlock {
             memory,
             reserved,
             kernel_image: kernel_image_range,
+            metadata: MetadataSet::new(),
+            free_all_completed: false,
         })
     }
 
@@ -428,6 +439,22 @@ impl MemBlock {
 
     pub(crate) fn reserved_ranges(&self) -> ReservedRangeIter<'_> {
         self.reserved.reserved_ranges()
+    }
+
+    pub(crate) fn metadata_ranges(&self) -> MetadataRangeIter {
+        self.metadata.iter()
+    }
+
+    pub(crate) const fn metadata_region_count(&self) -> usize {
+        self.metadata.len()
+    }
+
+    pub(crate) const fn free_all_completed(&self) -> bool {
+        self.free_all_completed
+    }
+
+    pub(crate) fn handoff_complete(&self) -> bool {
+        self.free_all_completed()
     }
 
     /// Return the cross-implementation reservation projection. Kernel image
@@ -459,6 +486,9 @@ impl MemBlock {
         size: u64,
         alignment: u64,
     ) -> Result<u64, MemBlockError> {
+        if self.free_all_completed() {
+            return Err(MemBlockError::HandoffComplete);
+        }
         if size == 0 || alignment == 0 || !alignment.is_power_of_two() {
             return Err(MemBlockError::InvalidAllocationAlignment);
         }
@@ -521,8 +551,107 @@ impl MemBlock {
     /// intersection is a successful no-op.
     #[allow(dead_code)]
     pub(crate) fn free_phys(&mut self, base: u64, size: u64) -> Result<(), MemBlockError> {
+        if self.free_all_completed() {
+            return Err(MemBlockError::HandoffComplete);
+        }
         let range = PhysRange::from_base_size(base, size)?;
+        if self.metadata_ranges().any(|metadata| {
+            let (metadata_start, metadata_end) = metadata.range();
+            metadata_start < range.end && range.base < metadata_end
+        }) {
+            return Err(MemBlockError::MetadataReserved);
+        }
         self.reserved.regions.remove(range)
+    }
+
+    /// Reserve backing storage that must survive the handoff to the page
+    /// allocator.  The allocation is made through the same highest-address
+    /// MemBlock path used by page tables, so it cannot overlap memory,
+    /// firmware, kernel, DTB, or an earlier metadata reservation.
+    pub(crate) fn reserve_metadata(
+        &mut self,
+        size: u64,
+        alignment: u64,
+    ) -> Result<u64, MemBlockError> {
+        self.reserve_metadata_kind(size, alignment, MetadataKind::Other)
+    }
+
+    fn reserve_metadata_kind(
+        &mut self,
+        size: u64,
+        alignment: u64,
+        kind: MetadataKind,
+    ) -> Result<u64, MemBlockError> {
+        if self.free_all_completed() {
+            return Err(MemBlockError::HandoffComplete);
+        }
+        let base = self.allocate_phys(size, alignment)?;
+        let end = base
+            .checked_add(size)
+            .ok_or(MemBlockError::AddressOverflow)?;
+        let metadata_result = self.metadata.push(MetadataRange { base, end, kind });
+        if let Err(error) = metadata_result {
+            // Keep the operation transactional if the metadata side table is
+            // full.  The allocation is still present in Reserved, so remove
+            // it before returning the capacity error.
+            let _ = self.reserved.regions.remove(PhysRange { base, end });
+            return Err(error);
+        }
+        Ok(base)
+    }
+
+    pub(crate) fn reserve_mem_map_metadata(
+        &mut self,
+        size: u64,
+        alignment: u64,
+    ) -> Result<u64, MemBlockError> {
+        self.reserve_metadata_kind(size, alignment, MetadataKind::MemMap)
+    }
+
+    pub(crate) fn reserve_buddy_metadata(
+        &mut self,
+        size: u64,
+        alignment: u64,
+    ) -> Result<u64, MemBlockError> {
+        self.reserve_metadata_kind(size, alignment, MetadataKind::Buddy)
+    }
+
+    /// Undo a metadata reservation while a compound early-boot setup is still
+    /// being assembled.  This is intentionally narrower than `free_phys`:
+    /// only an exact, most-recent metadata interval may be rolled back, and
+    /// the handoff must not have started.
+    pub(crate) fn rollback_metadata(&mut self, base: u64, size: u64) -> Result<(), MemBlockError> {
+        if self.free_all_completed() {
+            return Err(MemBlockError::HandoffComplete);
+        }
+        let range = PhysRange::from_base_size(base, size)?;
+        let Some(index) = self.metadata.ranges[..self.metadata.len]
+            .iter()
+            .position(|metadata| metadata.range() == (range.base, range.end))
+        else {
+            return Err(MemBlockError::MetadataReserved);
+        };
+        if index + 1 != self.metadata.len {
+            return Err(MemBlockError::MetadataReserved);
+        }
+        self.metadata.len -= 1;
+        self.reserved.regions.remove(range)
+    }
+
+    /// Complete the ownership transfer performed by Linux's
+    /// `memblock_free_all()`.  The actual block seeding is performed by the
+    /// PageAllocator backend; this fact is deliberately kept on MemBlock so
+    /// callers cannot allocate from MemBlock after the transfer.
+    pub(crate) fn memblock_free_all(&mut self) -> Result<(), MemBlockError> {
+        if self.free_all_completed() {
+            return Err(MemBlockError::AlreadyFreedToBuddy);
+        }
+        self.free_all_completed = true;
+        Ok(())
+    }
+
+    pub(crate) fn free_all(&mut self) -> Result<(), MemBlockError> {
+        self.memblock_free_all()
     }
 }
 
@@ -553,6 +682,89 @@ impl Iterator for ReservedCheckpointRangeIter<'_> {
             if end > self.excluded.end {
                 return Some((self.excluded.end, end));
             }
+        }
+    }
+}
+
+/// A MemBlock allocation retained specifically for a later page allocator
+/// backend.  Metadata remains part of the normal reserved projection until
+/// the allocator handoff is complete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MetadataKind {
+    MemMap,
+    Buddy,
+    Other,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MetadataRange {
+    base: u64,
+    end: u64,
+    kind: MetadataKind,
+}
+
+impl MetadataRange {
+    pub(crate) const fn range(self) -> (u64, u64) {
+        (self.base, self.end)
+    }
+
+    pub(crate) const fn kind(self) -> MetadataKind {
+        self.kind
+    }
+}
+
+#[derive(Clone, Copy)]
+struct MetadataSet {
+    ranges: [MetadataRange; MAX_METADATA_REGIONS],
+    len: usize,
+}
+
+impl MetadataSet {
+    const fn new() -> Self {
+        Self {
+            ranges: [MetadataRange {
+                base: 0,
+                end: 0,
+                kind: MetadataKind::Other,
+            }; MAX_METADATA_REGIONS],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, range: MetadataRange) -> Result<(), MemBlockError> {
+        if self.len == MAX_METADATA_REGIONS {
+            return Err(MemBlockError::MetadataCapacityExceeded);
+        }
+        self.ranges[self.len] = range;
+        self.len += 1;
+        Ok(())
+    }
+
+    const fn len(self) -> usize {
+        self.len
+    }
+
+    fn iter(self) -> MetadataRangeIter {
+        MetadataRangeIter { set: self, next: 0 }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MetadataRangeIter {
+    set: MetadataSet,
+    next: usize,
+}
+
+impl Iterator for MetadataRangeIter {
+    type Item = MetadataRange;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let result = self.set.ranges.get(self.next).copied();
+        if result.is_some() && self.next < self.set.len {
+            self.next += 1;
+            result
+        } else {
+            None
         }
     }
 }
@@ -1076,6 +1288,8 @@ mod tests {
                 regions: reserved_regions,
             },
             kernel_image: PhysRange { base: 20, end: 30 },
+            metadata: MetadataSet::new(),
+            free_all_completed: false,
         };
 
         assert_eq!(
@@ -1105,6 +1319,8 @@ mod tests {
                 base: 0x2000,
                 end: 0x3000,
             },
+            metadata: MetadataSet::new(),
+            free_all_completed: false,
         };
 
         let page = memblock.allocate_page_table_page(0x1000, 0x1000).unwrap();
@@ -1146,6 +1362,8 @@ mod tests {
                 base: 0x2000,
                 end: 0x3000,
             },
+            metadata: MetadataSet::new(),
+            free_all_completed: false,
         };
         assert!(matches!(
             memblock.allocate_page_table_page(0x1000, 0x1000),
@@ -1172,6 +1390,8 @@ mod tests {
                 regions: reserved_regions,
             },
             kernel_image: PhysRange { base: 0, end: 0 },
+            metadata: MetadataSet::new(),
+            free_all_completed: false,
         }
     }
 

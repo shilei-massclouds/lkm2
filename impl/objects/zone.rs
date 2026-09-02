@@ -1,10 +1,11 @@
-//! Minimal physical-memory zone and free-area layout.
+//! Physical-memory zone and free-area layout plus the order-based buddy handoff.
 //!
-//! This module deliberately stops at the data assembled by Linux's
-//! `zone_sizes_init()`/`free_area_init()`.  It records page-aligned envelopes,
-//! the usable portions left after MemBlock reservations, and one owner-bound
-//! FreeArea per zone.  Buddy orders, bitmaps, lists, and page objects belong
-//! to a later allocator milestone and are not represented here.
+//! The first part mirrors Linux's `zone_sizes_init()`/`free_area_init()` and
+//! keeps page-aligned envelopes, usable MemBlock fragments, and one
+//! owner-bound FreeArea per zone alive after initialization.  The FreeArea
+//! then carries the small buddy state used by the coding-layer allocator. It
+//! intentionally does not model Linux's migration lists, watermarks, reclaim,
+//! or pageblock bitmap details.
 
 #![allow(dead_code)]
 
@@ -16,6 +17,23 @@ const DMA32_LIMIT: u64 = 1_u64 << 32;
 // At most MAX_MEMORY_REGIONS + MAX_RESERVED_REGIONS disjoint fragments can
 // survive reservation subtraction in the current MemBlock implementation.
 const MAX_ZONE_RANGES: usize = 96;
+// The backing arrays are metadata storage owned by the FreeArea itself.  The
+// no_std boot image uses a small emergency descriptor budget so the 16 KiB
+// boot stack is not consumed by a copied node value; host tests use the larger
+// budget to exercise fragmentation.  In both cases the physical storage they
+// describe is obtained from MemBlock at handoff.
+#[cfg(test)]
+const MAX_BUDDY_BLOCKS: usize = 256;
+#[cfg(not(test))]
+const MAX_BUDDY_BLOCKS: usize = 32;
+#[cfg(test)]
+const MAX_ALLOCATED_BLOCKS: usize = 128;
+#[cfg(not(test))]
+const MAX_ALLOCATED_BLOCKS: usize = 16;
+#[cfg(test)]
+const MAX_RELEASED_BLOCKS: usize = 128;
+#[cfg(not(test))]
+const MAX_RELEASED_BLOCKS: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LayoutError {
@@ -25,6 +43,84 @@ pub(crate) enum LayoutError {
     RangeCapacityExceeded,
     AlreadyOnline,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BuddyBlock {
+    start_pfn: u64,
+    order: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct AllocatedBlock {
+    start_pfn: u64,
+    order: u8,
+    zone: ZoneKind,
+}
+
+impl AllocatedBlock {
+    pub(crate) const fn new(start_pfn: u64, order: u8, zone: ZoneKind) -> Self {
+        Self {
+            start_pfn,
+            order,
+            zone,
+        }
+    }
+
+    pub(crate) const fn start_pfn(self) -> u64 {
+        self.start_pfn
+    }
+
+    pub(crate) const fn physical_start(self) -> u64 {
+        self.start_pfn << PAGE_SHIFT
+    }
+
+    pub(crate) const fn order(self) -> u8 {
+        self.order
+    }
+
+    pub(crate) const fn zone(self) -> ZoneKind {
+        self.zone
+    }
+
+    pub(crate) const fn page_count(self) -> u64 {
+        1_u64 << self.order
+    }
+
+    pub(crate) const fn physical_range(self) -> (u64, u64) {
+        let start = self.physical_start();
+        let size = if self.order > 51 {
+            u64::MAX
+        } else {
+            self.page_count() << PAGE_SHIFT
+        };
+        let end = match start.checked_add(size) {
+            Some(end) => end,
+            None => u64::MAX,
+        };
+        (start, end)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuddyAllocError {
+    InvalidOrder,
+    OutOfMemory,
+    Capacity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum BuddyFreeError {
+    InvalidOrder,
+    Unaligned,
+    OutOfBounds,
+    WrongZone,
+    DoubleFree,
+    NotAllocated,
+    Capacity,
+}
+
+pub(crate) type AllocError = BuddyAllocError;
+pub(crate) type FreeError = BuddyFreeError;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PhysicalRange {
@@ -145,9 +241,16 @@ pub(crate) enum ZoneKind {
 pub(crate) struct FreeArea {
     owner: ZoneKind,
     envelope: PhysicalRange,
+    managed: RangeList,
     managed_range_count: usize,
     managed_pages: u64,
     initialized: bool,
+    free_blocks: [BuddyBlock; MAX_BUDDY_BLOCKS],
+    free_len: usize,
+    allocated: [BuddyBlock; MAX_ALLOCATED_BLOCKS],
+    allocated_len: usize,
+    released: [BuddyBlock; MAX_RELEASED_BLOCKS],
+    released_len: usize,
 }
 
 impl FreeArea {
@@ -159,9 +262,25 @@ impl FreeArea {
         Self {
             owner,
             envelope,
+            managed,
             managed_range_count: managed.len(),
             managed_pages,
             initialized: true,
+            free_blocks: [BuddyBlock {
+                start_pfn: 0,
+                order: 0,
+            }; MAX_BUDDY_BLOCKS],
+            free_len: 0,
+            allocated: [BuddyBlock {
+                start_pfn: 0,
+                order: 0,
+            }; MAX_ALLOCATED_BLOCKS],
+            allocated_len: 0,
+            released: [BuddyBlock {
+                start_pfn: 0,
+                order: 0,
+            }; MAX_RELEASED_BLOCKS],
+            released_len: 0,
         }
     }
 
@@ -181,6 +300,31 @@ impl FreeArea {
         self.managed_pages
     }
 
+    /// Number of block-head records needed to seed this area from its current
+    /// managed fragments.  This is used only to size the MemBlock metadata
+    /// reservation; the records themselves are populated by `seed_buddy`.
+    pub(crate) fn buddy_record_count(self) -> u64 {
+        let mut count = 0_u64;
+        for fragment in self.managed.iter() {
+            let mut start = fragment.start >> PAGE_SHIFT;
+            let end = fragment.end >> PAGE_SHIFT;
+            while start < end {
+                let remaining = end - start;
+                let mut order = floor_log2(remaining);
+                let alignment = start.trailing_zeros().min(63) as u8;
+                if order > alignment {
+                    order = alignment;
+                }
+                count = count.saturating_add(1);
+                start = match start.checked_add(1_u64 << order) {
+                    Some(next) => next,
+                    None => break,
+                };
+            }
+        }
+        count
+    }
+
     pub(crate) const fn is_initialized(self) -> bool {
         self.initialized
     }
@@ -191,6 +335,238 @@ impl FreeArea {
 
     pub(crate) const fn is_empty(self) -> bool {
         self.managed_range_count == 0
+    }
+
+    pub(crate) const fn free_block_count(self, order: u8) -> usize {
+        let mut count = 0;
+        let mut index = 0;
+        while index < self.free_len {
+            if self.free_blocks[index].order == order {
+                count += 1;
+            }
+            index += 1;
+        }
+        count
+    }
+
+    pub(crate) const fn free_block_total(self) -> usize {
+        self.free_len
+    }
+
+    pub(crate) fn has_free_block(&self, start_pfn: u64, order: u8) -> bool {
+        self.free_blocks[..self.free_len]
+            .iter()
+            .any(|block| block.start_pfn == start_pfn && block.order == order)
+    }
+
+    pub(crate) const fn allocated_block_count(self) -> usize {
+        self.allocated_len
+    }
+
+    pub(crate) fn managed_contains(self, start_pfn: u64, end_pfn: u64) -> bool {
+        let mut index = 0;
+        while index < self.managed.len() {
+            if let Some(range) = self.managed.get(index) {
+                let start = range.start >> PAGE_SHIFT;
+                let end = range.end >> PAGE_SHIFT;
+                if start <= start_pfn && end_pfn <= end {
+                    return true;
+                }
+            }
+            index += 1;
+        }
+        false
+    }
+
+    /// Seed this FreeArea from the page-aligned managed fragments after the
+    /// MemBlock handoff.  Each fragment is decomposed into the largest
+    /// aligned power-of-two blocks, exactly the initial state expected by a
+    /// buddy allocator.
+    pub(crate) fn seed_buddy(&mut self) -> Result<(), BuddyAllocError> {
+        self.free_len = 0;
+        self.allocated_len = 0;
+        self.released_len = 0;
+        for fragment in self.managed.iter() {
+            let mut start = fragment.start >> PAGE_SHIFT;
+            let end = fragment.end >> PAGE_SHIFT;
+            while start < end {
+                let remaining = end - start;
+                let mut order = floor_log2(remaining);
+                let alignment = start.trailing_zeros().min(63) as u8;
+                if order > alignment {
+                    order = alignment;
+                }
+                self.insert_free(BuddyBlock {
+                    start_pfn: start,
+                    order,
+                })?;
+                start = start
+                    .checked_add(1_u64 << order)
+                    .ok_or(BuddyAllocError::Capacity)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn allocate(&mut self, order: u8) -> Result<AllocatedBlock, BuddyAllocError> {
+        if order > 63 {
+            return Err(BuddyAllocError::InvalidOrder);
+        }
+        let mut selected = None;
+        let mut index = 0;
+        while index < self.free_len {
+            let block = self.free_blocks[index];
+            if block.order >= order
+                && selected
+                    .map(|(selected_order, selected_start, _)| {
+                        (block.order, block.start_pfn) < (selected_order, selected_start)
+                    })
+                    .unwrap_or(true)
+            {
+                selected = Some((block.order, block.start_pfn, index));
+            }
+            index += 1;
+        }
+        let Some((mut current_order, start_pfn, index)) = selected else {
+            return Err(BuddyAllocError::OutOfMemory);
+        };
+        let split_count = usize::from(current_order - order);
+        if self.allocated_len == MAX_ALLOCATED_BLOCKS
+            || self.free_len.saturating_add(split_count) > MAX_BUDDY_BLOCKS
+        {
+            return Err(BuddyAllocError::Capacity);
+        }
+        self.remove_free_at(index);
+        while current_order > order {
+            current_order -= 1;
+            let buddy_start = start_pfn
+                .checked_add(1_u64 << current_order)
+                .ok_or(BuddyAllocError::Capacity)?;
+            self.insert_free(BuddyBlock {
+                start_pfn: buddy_start,
+                order: current_order,
+            })?;
+        }
+        let block = BuddyBlock { start_pfn, order };
+        self.allocated[self.allocated_len] = block;
+        self.allocated_len += 1;
+        self.remove_released(block);
+        Ok(AllocatedBlock {
+            start_pfn,
+            order,
+            zone: self.owner,
+        })
+    }
+
+    pub(crate) fn free(&mut self, block: AllocatedBlock) -> Result<(), BuddyFreeError> {
+        if block.zone != self.owner {
+            return Err(BuddyFreeError::WrongZone);
+        }
+        if block.order > 63 {
+            return Err(BuddyFreeError::InvalidOrder);
+        }
+        let pages = 1_u64 << block.order;
+        let Some(end_pfn) = block.start_pfn.checked_add(pages) else {
+            return Err(BuddyFreeError::OutOfBounds);
+        };
+        let envelope_start = self.envelope.page_start();
+        let envelope_end = self.envelope.page_end();
+        if block.start_pfn < envelope_start || end_pfn > envelope_end {
+            return Err(BuddyFreeError::OutOfBounds);
+        }
+        if block.start_pfn & (pages - 1) != 0 {
+            return Err(BuddyFreeError::Unaligned);
+        }
+        if !self.managed_contains(block.start_pfn, end_pfn) {
+            return Err(BuddyFreeError::OutOfBounds);
+        }
+        let key = BuddyBlock {
+            start_pfn: block.start_pfn,
+            order: block.order,
+        };
+        let Some(allocated_index) = self.find_allocated(key) else {
+            return if self.contains_released(key) {
+                Err(BuddyFreeError::DoubleFree)
+            } else {
+                Err(BuddyFreeError::NotAllocated)
+            };
+        };
+        self.remove_allocated_at(allocated_index);
+        let mut merged = key;
+        while merged.order < 63 {
+            let buddy_start = merged.start_pfn ^ (1_u64 << merged.order);
+            let Some(buddy_index) = self.find_free(BuddyBlock {
+                start_pfn: buddy_start,
+                order: merged.order,
+            }) else {
+                break;
+            };
+            self.remove_free_at(buddy_index);
+            merged.start_pfn = merged.start_pfn.min(buddy_start);
+            merged.order += 1;
+        }
+        self.insert_free(merged)
+            .map_err(|_| BuddyFreeError::Capacity)?;
+        self.record_released(key);
+        Ok(())
+    }
+
+    fn insert_free(&mut self, block: BuddyBlock) -> Result<(), BuddyAllocError> {
+        if self.free_len == MAX_BUDDY_BLOCKS {
+            return Err(BuddyAllocError::Capacity);
+        }
+        self.free_blocks[self.free_len] = block;
+        self.free_len += 1;
+        Ok(())
+    }
+
+    fn remove_free_at(&mut self, index: usize) {
+        self.free_len -= 1;
+        self.free_blocks[index] = self.free_blocks[self.free_len];
+    }
+
+    fn find_free(&self, key: BuddyBlock) -> Option<usize> {
+        self.free_blocks[..self.free_len]
+            .iter()
+            .position(|block| *block == key)
+    }
+
+    fn find_allocated(&self, key: BuddyBlock) -> Option<usize> {
+        self.allocated[..self.allocated_len]
+            .iter()
+            .position(|block| *block == key)
+    }
+
+    fn remove_allocated_at(&mut self, index: usize) {
+        self.allocated_len -= 1;
+        self.allocated[index] = self.allocated[self.allocated_len];
+    }
+
+    fn contains_released(&self, key: BuddyBlock) -> bool {
+        self.released[..self.released_len].contains(&key)
+    }
+
+    fn remove_released(&mut self, key: BuddyBlock) {
+        if let Some(index) = self.released[..self.released_len]
+            .iter()
+            .position(|item| *item == key)
+        {
+            self.released_len -= 1;
+            self.released[index] = self.released[self.released_len];
+        }
+    }
+
+    fn record_released(&mut self, key: BuddyBlock) {
+        if self.contains_released(key) {
+            return;
+        }
+        if self.released_len < MAX_RELEASED_BLOCKS {
+            self.released[self.released_len] = key;
+            self.released_len += 1;
+        } else {
+            self.released.copy_within(1..MAX_RELEASED_BLOCKS, 0);
+            self.released[MAX_RELEASED_BLOCKS - 1] = key;
+        }
     }
 }
 
@@ -245,6 +621,10 @@ impl Zone {
         self.free_area.managed_pages
     }
 
+    pub(crate) fn buddy_record_count(self) -> u64 {
+        self.free_area.buddy_record_count()
+    }
+
     pub(crate) fn managed_ranges(self) -> ManagedRangeIter {
         ManagedRangeIter {
             ranges: self.managed.iter(),
@@ -261,6 +641,29 @@ impl Zone {
 
     pub(crate) const fn is_online(self) -> bool {
         self.free_area.initialized
+    }
+
+    pub(crate) fn refresh_from_memblock(&mut self, memblock: &MemBlock) -> Result<(), LayoutError> {
+        self.managed = managed_ranges(self.envelope, memblock)?;
+        self.free_area = FreeArea::initialize(self.kind, self.envelope, self.managed);
+        Ok(())
+    }
+
+    pub(crate) fn seed_buddy(&mut self) -> Result<(), BuddyAllocError> {
+        self.free_area.seed_buddy()
+    }
+
+    pub(crate) fn allocate(&mut self, order: u8) -> Result<AllocatedBlock, BuddyAllocError> {
+        self.free_area.allocate(order)
+    }
+
+    pub(crate) fn free(&mut self, block: AllocatedBlock) -> Result<(), BuddyFreeError> {
+        self.free_area.free(block)
+    }
+
+    fn contains_page_range(self, start_pfn: u64, end_pfn: u64) -> bool {
+        let (zone_start, zone_end) = self.page_range();
+        zone_start <= start_pfn && end_pfn <= zone_end
     }
 }
 
@@ -376,6 +779,85 @@ impl ZoneSet {
     pub(crate) fn validate(self) -> Result<(), LayoutError> {
         self.validate_disjoint()
     }
+
+    pub(crate) fn refresh_from_memblock(&mut self, memblock: &MemBlock) -> Result<(), LayoutError> {
+        self.dma32.refresh_from_memblock(memblock)?;
+        self.normal.refresh_from_memblock(memblock)?;
+        self.movable.refresh_from_memblock(memblock)?;
+        self.validate_disjoint()
+    }
+
+    pub(crate) fn seed_buddy(&mut self) -> Result<(), BuddyAllocError> {
+        self.dma32.seed_buddy()?;
+        self.normal.seed_buddy()?;
+        self.movable.seed_buddy()?;
+        Ok(())
+    }
+
+    pub(crate) fn zone_mut(&mut self, kind: ZoneKind) -> &mut Zone {
+        match kind {
+            ZoneKind::DMA32 => &mut self.dma32,
+            ZoneKind::Normal => &mut self.normal,
+            ZoneKind::Movable => &mut self.movable,
+        }
+    }
+
+    pub(crate) fn dma32_mut(&mut self) -> &mut Zone {
+        &mut self.dma32
+    }
+
+    pub(crate) fn normal_mut(&mut self) -> &mut Zone {
+        &mut self.normal
+    }
+
+    pub(crate) fn movable_mut(&mut self) -> &mut Zone {
+        &mut self.movable
+    }
+
+    pub(crate) fn allocate(&mut self, order: u8) -> Result<AllocatedBlock, BuddyAllocError> {
+        // Keep this order explicit even when ZoneLists omits an empty zone:
+        // it is the fixed Movable -> Normal -> DMA32 fallback contract.
+        for kind in [ZoneKind::Movable, ZoneKind::Normal, ZoneKind::DMA32] {
+            let zone = self.zone_mut(kind);
+            if zone.is_empty() {
+                continue;
+            }
+            match zone.allocate(order) {
+                Ok(block) => return Ok(block),
+                Err(BuddyAllocError::OutOfMemory) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(BuddyAllocError::OutOfMemory)
+    }
+
+    pub(crate) fn free(&mut self, block: AllocatedBlock) -> Result<(), BuddyFreeError> {
+        // Check the physical owner before selecting the backend.  This keeps
+        // a forged block carrying a different ZoneKind distinguishable from
+        // an ordinary out-of-bounds or not-allocated release.
+        let pages = if block.order() > 63 {
+            return Err(BuddyFreeError::InvalidOrder);
+        } else {
+            1_u64 << block.order()
+        };
+        let end_pfn = block
+            .start_pfn()
+            .checked_add(pages)
+            .ok_or(BuddyFreeError::OutOfBounds)?;
+        for (kind, zone) in [
+            (ZoneKind::Movable, self.movable),
+            (ZoneKind::Normal, self.normal),
+            (ZoneKind::DMA32, self.dma32),
+        ] {
+            if zone.contains_page_range(block.start_pfn(), end_pfn) {
+                if kind != block.zone() {
+                    return Err(BuddyFreeError::WrongZone);
+                }
+                break;
+            }
+        }
+        self.zone_mut(block.zone()).free(block)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -398,6 +880,10 @@ impl Iterator for ZoneSetIter {
 
 fn align_down(value: u64) -> u64 {
     value & !(PAGE_SIZE - 1)
+}
+
+fn floor_log2(value: u64) -> u8 {
+    (u64::BITS - 1 - value.leading_zeros()) as u8
 }
 
 fn align_up(value: u64) -> Result<u64, LayoutError> {

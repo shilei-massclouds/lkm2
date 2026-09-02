@@ -6,6 +6,7 @@ use crate::objects::dtb_blob::DtbBlob;
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
 use crate::objects::memblock::{MemBlock, MemBlockMemory, RangeCheckpointObservation};
 use crate::objects::memory_node::MemoryNode;
+use crate::objects::page_allocator::PageAllocator;
 use crate::objects::printk::EarlyPrintk;
 #[cfg(not(phase_test_memblock_basic))]
 use crate::objects::setup_vm_final;
@@ -96,11 +97,19 @@ pub(crate) extern "C" fn start_kernel() -> ! {
     if setup_vm_final(&mut memblock).is_err() {
         fail_stop();
     }
-    // The minimal post-paging memory backends mirror misc_mem_init()/
-    // mm_core_init(): zones and their FreeAreas, the node MemMap envelope,
-    // and the fixed fallback ZoneLists.  Page allocation remains a later
-    // milestone.
-    if MemoryNode::initialize(&memblock).is_err() {
+    // The post-paging memory backends mirror misc_mem_init()/mm_core_init():
+    // zones and their FreeAreas, the node MemMap envelope, and the fixed
+    // fallback ZoneLists.  PageAllocator then reserves its backing metadata
+    // and transfers the remaining MemBlock pages into those FreeAreas.
+    let mut memory_node = match MemoryNode::initialize(&memblock) {
+        Ok(node) => node,
+        Err(_) => fail_stop(),
+    };
+    let mut page_allocator = PageAllocator::new();
+    if page_allocator
+        .enable(&mut memory_node, &mut memblock)
+        .is_err()
+    {
         fail_stop();
     }
     park()

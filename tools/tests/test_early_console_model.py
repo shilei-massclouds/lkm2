@@ -528,6 +528,7 @@ class EarlyConsoleModelTests(unittest.TestCase):
                 "MemBlock",
                 "SwapperPageTable",
                 "MemoryNode",
+                "PageAllocator",
                 "Cpu0Scheduler",
                 "InterruptControl",
             ),

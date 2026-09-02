@@ -4,13 +4,16 @@
 //! captures the small amount of concrete state needed after `setup_vm_final`:
 //! the node's physical envelope, its three zone backends, the metadata
 //! envelope used by MemMap, and the fixed fallback projection used by
-//! ZoneLists.  It intentionally does not allocate per-page metadata or expose
-//! a page allocator.
+//! ZoneLists.  PageAllocator later reserves the MemMap/page-state and buddy
+//! backing ranges through MemBlock, then mutates these same backends in place.
 
 #![allow(dead_code)]
 
-use super::memblock::MemBlock;
-use super::zone::{LayoutError, PAGE_SHIFT, PhysicalRange, ZoneKind, ZoneSet};
+use super::memblock::{MemBlock, MemBlockError};
+use super::zone::{
+    AllocatedBlock, BuddyAllocError, BuddyFreeError, LayoutError, PAGE_SHIFT, PAGE_SIZE,
+    PhysicalRange, ZoneKind, ZoneSet,
+};
 
 pub(crate) type MemoryNodeError = LayoutError;
 
@@ -227,6 +230,8 @@ pub(crate) struct MemoryNode {
     zones: Option<ZoneSet>,
     mem_map: Option<MemMap>,
     zone_lists: Option<ZoneLists>,
+    metadata_reserved: bool,
+    buddy_online: bool,
 }
 
 impl MemoryNode {
@@ -239,6 +244,8 @@ impl MemoryNode {
             zones: None,
             mem_map: None,
             zone_lists: None,
+            metadata_reserved: false,
+            buddy_online: false,
         })
     }
 
@@ -260,6 +267,8 @@ impl MemoryNode {
         self.zones = Some(zones);
         self.mem_map = Some(mem_map);
         self.zone_lists = Some(zone_lists);
+        self.metadata_reserved = false;
+        self.buddy_online = false;
         self.state = Lifecycle::Online;
         Ok(())
     }
@@ -289,5 +298,150 @@ impl MemoryNode {
 
     pub(crate) const fn zone_lists(self) -> Option<ZoneLists> {
         self.zone_lists
+    }
+
+    pub(crate) fn zones_mut(&mut self) -> Option<&mut ZoneSet> {
+        self.zones.as_mut()
+    }
+
+    pub(crate) const fn metadata_reserved(self) -> bool {
+        self.metadata_reserved
+    }
+
+    pub(crate) const fn is_allocator_online(self) -> bool {
+        self.buddy_online
+    }
+
+    /// Reserve the page-level and Buddy backing storage through MemBlock.
+    /// The exact layout is an implementation detail; the important contract
+    /// is that both ranges are recorded as MemBlock reservations before any
+    /// managed page is handed to Buddy.
+    pub(crate) fn reserve_page_allocator_metadata(
+        &mut self,
+        memblock: &mut MemBlock,
+    ) -> Result<(), MemBlockError> {
+        if !self.is_online() {
+            return Err(MemBlockError::MissingMemory);
+        }
+        if self.metadata_reserved {
+            return Ok(());
+        }
+        let pages = self
+            .layout
+            .end_pfn
+            .checked_sub(self.layout.start_pfn)
+            .ok_or(MemBlockError::AddressOverflow)?;
+        // A compact early-boot page record.  The FreeArea block records are
+        // reserved separately so the two ownership classes remain visible in
+        // MemBlock observations.
+        let mem_map_bytes = pages
+            .checked_mul(64)
+            .and_then(|bytes| bytes.checked_add(PAGE_SIZE - 1))
+            .ok_or(MemBlockError::AddressOverflow)?;
+        let mem_map_bytes = (mem_map_bytes / PAGE_SIZE) * PAGE_SIZE;
+        let mem_map_bytes = mem_map_bytes.max(PAGE_SIZE);
+        let mem_map_base = memblock.reserve_mem_map_metadata(mem_map_bytes, PAGE_SIZE)?;
+
+        // A MemMap reservation can split a previously contiguous managed
+        // fragment.  Recompute the block-head count against that post-map
+        // view before sizing the second reservation, while retaining the
+        // original node state until both allocations succeed.
+        let Some(mut buddy_zones) = self.zones else {
+            let _ = memblock.rollback_metadata(mem_map_base, mem_map_bytes);
+            return Err(MemBlockError::MissingMemory);
+        };
+        if let Err(error) = buddy_zones.refresh_from_memblock(memblock) {
+            let _ = memblock.rollback_metadata(mem_map_base, mem_map_bytes);
+            return Err(match error {
+                LayoutError::MissingMemory => MemBlockError::MissingMemory,
+                LayoutError::InvalidRange | LayoutError::AlreadyOnline => {
+                    MemBlockError::InvalidReservation
+                }
+                LayoutError::AddressOverflow => MemBlockError::AddressOverflow,
+                LayoutError::RangeCapacityExceeded => MemBlockError::RegionCapacityExceeded,
+            });
+        }
+        let buddy_records = buddy_zones
+            .iter()
+            .map(|zone| zone.buddy_record_count())
+            .sum::<u64>()
+            .max(1);
+        let buddy_bytes = buddy_records
+            .checked_mul(32)
+            .and_then(|bytes| bytes.checked_add(PAGE_SIZE - 1))
+            .ok_or_else(|| {
+                let _ = memblock.rollback_metadata(mem_map_base, mem_map_bytes);
+                MemBlockError::AddressOverflow
+            })?;
+        let buddy_bytes = (buddy_bytes / PAGE_SIZE) * PAGE_SIZE;
+        let buddy_bytes = buddy_bytes.max(PAGE_SIZE);
+        if let Err(error) = memblock.reserve_buddy_metadata(buddy_bytes, PAGE_SIZE) {
+            // Do not leave a half-installed allocator reservation behind when
+            // the second metadata allocation cannot be satisfied.
+            let _ = memblock.rollback_metadata(mem_map_base, mem_map_bytes);
+            return Err(error);
+        }
+        self.zones = Some(buddy_zones);
+        self.metadata_reserved = true;
+        Ok(())
+    }
+
+    /// Recompute managed fragments after metadata reservations have been
+    /// added.  Zone and MemMap values remain owned by this node rather than
+    /// being discarded after construction.
+    pub(crate) fn refresh_after_memblock(
+        &mut self,
+        memblock: &MemBlock,
+    ) -> Result<(), LayoutError> {
+        if !self.is_online() {
+            return Err(LayoutError::MissingMemory);
+        }
+        let mut zones = self.zones.ok_or(LayoutError::MissingMemory)?;
+        zones.refresh_from_memblock(memblock)?;
+        let mem_map = MemMap::initialize(self.layout, memblock)?;
+        let zone_lists = ZoneLists::initialize(zones);
+        self.zones = Some(zones);
+        self.mem_map = Some(mem_map);
+        self.zone_lists = Some(zone_lists);
+        self.buddy_online = false;
+        Ok(())
+    }
+
+    pub(crate) fn seed_buddy(&mut self) -> Result<(), BuddyAllocError> {
+        let zones = self.zones.as_mut().ok_or(BuddyAllocError::OutOfMemory)?;
+        zones.seed_buddy()?;
+        self.buddy_online = true;
+        Ok(())
+    }
+
+    pub(crate) fn allocate_pages(&mut self, order: u8) -> Result<AllocatedBlock, BuddyAllocError> {
+        if !self.buddy_online {
+            return Err(BuddyAllocError::OutOfMemory);
+        }
+        self.zones
+            .as_mut()
+            .ok_or(BuddyAllocError::OutOfMemory)?
+            .allocate(order)
+    }
+
+    pub(crate) fn free_pages(
+        &mut self,
+        block: AllocatedBlock,
+        order: u8,
+    ) -> Result<(), BuddyFreeError> {
+        if !self.buddy_online {
+            return Err(BuddyFreeError::NotAllocated);
+        }
+        if block.order() != order {
+            return Err(BuddyFreeError::InvalidOrder);
+        }
+        self.zones
+            .as_mut()
+            .ok_or(BuddyFreeError::NotAllocated)?
+            .free(block)
+    }
+
+    pub(crate) fn free_block(&mut self, block: AllocatedBlock) -> Result<(), BuddyFreeError> {
+        self.free_pages(block, block.order())
     }
 }
