@@ -527,6 +527,7 @@ class EarlyConsoleModelTests(unittest.TestCase):
                 "MemBlockReserved",
                 "MemBlock",
                 "SwapperPageTable",
+                "MemoryNode",
                 "Cpu0Scheduler",
                 "InterruptControl",
             ),

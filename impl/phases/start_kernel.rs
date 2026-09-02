@@ -5,6 +5,7 @@ use core::arch::asm;
 use crate::objects::dtb_blob::DtbBlob;
 use crate::objects::early_console::{BootCommandLine, EarlyConsoleBackend, lookup_linked_backend};
 use crate::objects::memblock::{MemBlock, MemBlockMemory, RangeCheckpointObservation};
+use crate::objects::memory_node::MemoryNode;
 use crate::objects::printk::EarlyPrintk;
 #[cfg(not(phase_test_memblock_basic))]
 use crate::objects::setup_vm_final;
@@ -95,8 +96,13 @@ pub(crate) extern "C" fn start_kernel() -> ! {
     if setup_vm_final(&mut memblock).is_err() {
         fail_stop();
     }
-    // M1 deliberately stops here. Scheduler enable and interrupt unmask remain
-    // model-only EarlyBoot Enter drives for the next implementation milestone.
+    // The minimal post-paging memory backends mirror misc_mem_init()/
+    // mm_core_init(): zones and their FreeAreas, the node MemMap envelope,
+    // and the fixed fallback ZoneLists.  Page allocation remains a later
+    // milestone.
+    if MemoryNode::initialize(&memblock).is_err() {
+        fail_stop();
+    }
     park()
 }
 

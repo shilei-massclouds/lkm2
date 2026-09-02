@@ -136,6 +136,33 @@ OpenSBI -> Kernel: emits Transition::Enable
     EarlyBoot -> SwapperPageTable: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online
+    EarlyBoot -> MemoryNode: drives Transition::Enable
+      current state: State::Ready
+      MemoryNode -> DMA32Zone: drives Transition::Enable
+        current state: State::Ready
+        DMA32Zone -> DMA32Zone::FreeArea: drives Transition::Enable
+          current state: State::Ready
+          commit state: State::Online
+        commit state: State::Online
+      MemoryNode -> NormalZone: drives Transition::Enable
+        current state: State::Ready
+        NormalZone -> NormalZone::FreeArea: drives Transition::Enable
+          current state: State::Ready
+          commit state: State::Online
+        commit state: State::Online
+      MemoryNode -> MovableZone: drives Transition::Enable
+        current state: State::Ready
+        MovableZone -> MovableZone::FreeArea: drives Transition::Enable
+          current state: State::Ready
+          commit state: State::Online
+        commit state: State::Online
+      MemoryNode -> MemMap: drives Transition::Enable
+        current state: State::Ready
+        commit state: State::Online
+      MemoryNode -> ZoneLists: drives Transition::Enable
+        current state: State::Ready
+        commit state: State::Online
+      commit state: State::Online
     EarlyBoot -> Cpu0Scheduler: drives Transition::Enable
       current state: State::Ready
       commit state: State::Online

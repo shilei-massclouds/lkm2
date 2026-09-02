@@ -29,10 +29,11 @@ MODEL_SOURCES := $(shell find ../model -type f -name '*.spec')
 CHECKPOINT_HANDLER ?= empty
 PHASE_TEST ?=
 PHASE_TESTS := memblock-basic
-RUST_SOURCES := main.rs checkpoint/mod.rs checkpoint/handlers/mod.rs checkpoint/handlers/empty.rs checkpoint/handlers/debugcon.rs checkpoint/handlers/phase_test/mod.rs checkpoint/handlers/phase_test/memblock_basic.rs systems.rs systems/kernel.rs systems/kernel/config.rs systems/sbi.rs objects.rs objects/cpu.rs objects/dtb_blob.rs objects/early_console.rs objects/memblock.rs objects/printk.rs objects/ptrace.rs objects/task.rs objects/vm.rs phases.rs phases/arch_head.rs phases/asm_macros.rs phases/csr.rs phases/start_kernel.rs
+RUST_SOURCES := main.rs checkpoint/mod.rs checkpoint/handlers/mod.rs checkpoint/handlers/empty.rs checkpoint/handlers/debugcon.rs checkpoint/handlers/phase_test/mod.rs checkpoint/handlers/phase_test/memblock_basic.rs systems.rs systems/kernel.rs systems/kernel/config.rs systems/sbi.rs objects.rs objects/cpu.rs objects/dtb_blob.rs objects/early_console.rs objects/memblock.rs objects/memory_node.rs objects/printk.rs objects/ptrace.rs objects/task.rs objects/vm.rs objects/zone.rs phases.rs phases/arch_head.rs phases/asm_macros.rs phases/csr.rs phases/start_kernel.rs
 LINKER_SCRIPT := systems/kernel/linker.ld
 DTB_BLOB_TEST := $(BUILD_DIR)/dtb_blob_test
 MEMBLOCK_TEST := $(BUILD_DIR)/memblock_test
+MEMORY_NODE_TEST := $(BUILD_DIR)/memory_node_test
 EARLY_CONSOLE_TEST := $(BUILD_DIR)/early_console_test
 SBI_TEST := $(BUILD_DIR)/sbi_test
 PRINTK_TEST := $(BUILD_DIR)/printk_test
@@ -41,6 +42,9 @@ $(DTB_BLOB_TEST): objects/dtb_blob.rs | $(BUILD_STAMP)
 	$(RUSTC) --edition=2024 --test -o $@ $<
 
 $(MEMBLOCK_TEST): tests/memblock_host.rs objects/dtb_blob.rs objects/memblock.rs | $(BUILD_STAMP)
+	$(RUSTC) --edition=2024 --test -o $@ $<
+
+$(MEMORY_NODE_TEST): tests/memory_node_host.rs objects/dtb_blob.rs objects/memblock.rs objects/memory_node.rs objects/zone.rs | $(BUILD_STAMP)
 	$(RUSTC) --edition=2024 --test -o $@ $<
 
 $(EARLY_CONSOLE_TEST): objects/early_console.rs | $(BUILD_STAMP)

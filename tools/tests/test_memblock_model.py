@@ -197,6 +197,7 @@ class MemBlockModelTests(unittest.TestCase):
                 "MemBlockReserved",
                 "MemBlock",
                 "SwapperPageTable",
+                "MemoryNode",
                 "Cpu0Scheduler",
                 "InterruptControl",
             ),

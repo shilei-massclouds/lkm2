@@ -256,6 +256,7 @@ class BootSchedulerModelTests(unittest.TestCase):
                 (MEMBLOCK_RESERVED, ("Transition", "Enable")),
                 (MEMBLOCK, ("Transition", "Enable")),
                 (SWAPPER_PAGE_TABLE, ("Transition", "Enable")),
+                (("objects", "memory_node", "MemoryNode"), ("Transition", "Enable")),
                 (CPU0_SCHEDULER, ("Transition", "Enable")),
                 (
                     ("CurrentCPU", "InterruptControlRef"),
@@ -302,6 +303,7 @@ class BootSchedulerModelTests(unittest.TestCase):
                 "MemBlockReserved == State::Online",
                 "MemBlock == State::Online",
                 "SwapperPageTable == State::Online",
+                "MemoryNode == State::Online",
                 "Cpu0Scheduler == State::Online",
                 "early_console_bound_from_registry(EarlyConsole, SbiConsole)",
                 "printk_console_registered(Printk, EarlyConsole)",
@@ -322,6 +324,7 @@ class BootSchedulerModelTests(unittest.TestCase):
         self.assertEqual(
             tuple(unit.event.signal for unit in early_boot.drives),
             (
+                ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),

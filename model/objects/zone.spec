@@ -139,6 +139,10 @@ type DMA32ZoneType: Zone {
                     );
                 }
 
+                drives {
+                    self::FreeArea.Transition::Enable;
+                }
+
                 establishes {
                     zone_bound_to_unique_memory_node(self, parent);
                     dma32_zone_bounded_by_32bit_dma_limit(
@@ -180,6 +184,10 @@ type NormalZoneType: Zone {
                         parent::DMA32Zone,
                         parent,
                     );
+                }
+
+                drives {
+                    self::FreeArea.Transition::Enable;
                 }
 
                 establishes {
@@ -243,6 +251,10 @@ type MovableZoneType: Zone {
                         parent::DMA32Zone,
                         parent,
                     );
+                }
+
+                drives {
+                    self::FreeArea.Transition::Enable;
                 }
 
                 establishes {

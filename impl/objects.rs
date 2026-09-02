@@ -2,10 +2,12 @@ pub(crate) mod cpu;
 pub(crate) mod dtb_blob;
 pub(crate) mod early_console;
 pub(crate) mod memblock;
+pub(crate) mod memory_node;
 pub(crate) mod printk;
 mod ptrace;
 mod task;
 mod vm;
+pub(crate) mod zone;
 
 pub(crate) use ptrace::PT_SIZE_ON_STACK;
 pub(crate) use task::BOOT_TASK;

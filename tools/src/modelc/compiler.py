@@ -273,6 +273,17 @@ def _signal(
         }
         and operations[:-2] == ["member"]
     )
+    # ``self::Child`` denotes a nested object relative to the containing
+    # owner.  Keep that owner symbolic while lowering a type body; expansion
+    # substitutes the concrete object path before Model IR validation.  The
+    # runtime flow selectors use ``self.Child`` (member access) and therefore
+    # remain handled by the branches below.
+    owner_relative_nested = (
+        len(raw_target) >= 2
+        and raw_target[0] == "self"
+        and bool(operations[:-2])
+        and all(operation == "path" for operation in operations[:-2])
+    )
     if len(raw_target) == 1 and raw_target[0] == "parent" and not operations[:-2]:
         # Keep a type-level parent selector symbolic until object expansion
         # binds the template to its concrete containing object.
@@ -289,6 +300,8 @@ def _signal(
             raw_target[1],
             (ModelExpression("identifier", "self"),),
         )
+    elif owner_relative_nested:
+        target = _object_expression(raw_target)
     elif (
         raw_target == ("CurrentTaskRef", "UserAppRuntimeRef")
         and operations[:-2] == ["member"]
@@ -1195,6 +1208,51 @@ def _substitute_parent(value: object, parent: ModelExpression) -> object:
     return value
 
 
+def _substitute_owner_relative_self(value: object, owner: ModelExpression) -> object:
+    """Bind ``self::Nested`` selectors to an expanded object owner.
+
+    ``self`` in ordinary member selectors (for example
+    ``self.ResumeTargetRef``) is a runtime selector and must remain symbolic.
+    Nested-object selectors are represented by path expressions, so replacing
+    only an identifier which is the root of a path preserves those runtime
+    forms while making every nested drive an absolute object path.
+    """
+
+    if isinstance(value, ModelExpression):
+        if value.kind == "path":
+            root = value
+            while root.kind == "path":
+                root = root.children[0]
+            if root.kind == "identifier" and root.value == "self":
+                return replace(
+                    value,
+                    children=tuple(
+                        owner if child is root else _substitute_owner_relative_self(child, owner)
+                        for child in value.children
+                    ),
+                )
+        return replace(
+            value,
+            children=tuple(
+                _substitute_owner_relative_self(child, owner)
+                for child in value.children
+            ),
+        )
+    if isinstance(value, tuple):
+        return tuple(_substitute_owner_relative_self(item, owner) for item in value)
+    if is_dataclass(value):
+        return replace(
+            value,
+            **{
+                field.name: _substitute_owner_relative_self(
+                    getattr(value, field.name), owner
+                )
+                for field in dataclass_fields(value)
+            },
+        )
+    return value
+
+
 def _expand_inheritance(
     lowered: tuple[ModelModule, ...],
     modules: tuple[LoadedModule, ...],
@@ -1534,6 +1592,9 @@ def _expand_inheritance(
         if initial_state is None and states:
             initial_state = ("State", "Base")
         continuation = False if base is None else base.continuation
+        states = _substitute_owner_relative_self(
+            states, _object_expression(object_name)
+        )
         states = _rebind_states(states, object_name)
         fields = _merge_fields(inherited_fields, raw.attrs)
         declared_abstract_actions = {

@@ -4,7 +4,7 @@
 include build.mak
 include qemu.mak
 
-.PHONY: all build checkpoints phase-test checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-patch-swapper-content checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-dtb-blob test-memblock test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints test-phase-test fmt clippy run clean help FORCE
+.PHONY: all build checkpoints phase-test checkpoint-sibling-patch checkpoint-sibling-patch-swapper checkpoint-sibling-patch-memblock checkpoint-sibling-patch-swapper-content checkpoint-sibling-apply difftest checkpoint-diff-sv57 test test-dtb-blob test-memblock test-memory-node test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints test-phase-test fmt clippy run clean help FORCE
 
 all: build
 
@@ -48,7 +48,7 @@ difftest:
 
 checkpoint-diff-sv57: difftest
 
-test: build fmt clippy test-dtb-blob test-memblock test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints test-phase-test
+test: build fmt clippy test-dtb-blob test-memblock test-memory-node test-early-console test-sbi test-printk test-smoke test-empty-elision test-checkpoints test-phase-test
 
 phase-test:
 	@set -e; for test in $(if $(strip $(PHASE_TEST)),$(PHASE_TEST),$(PHASE_TESTS)); do \
@@ -64,6 +64,9 @@ test-dtb-blob: $(DTB_BLOB_TEST)
 
 test-memblock: $(MEMBLOCK_TEST)
 	$(MEMBLOCK_TEST)
+
+test-memory-node: $(MEMORY_NODE_TEST)
+	$(MEMORY_NODE_TEST)
 
 test-early-console: $(EARLY_CONSOLE_TEST)
 	$(EARLY_CONSOLE_TEST)
@@ -147,6 +150,7 @@ help:
 	@echo "  test   Build and run formatting and Clippy checks"
 	@echo "  test-dtb-blob Run host-side DTB mapping and FDT parser unit tests"
 	@echo "  test-memblock Run host-side MemBlock memory and reservation tests"
+	@echo "  test-memory-node Run host-side MemoryNode/Zone layout tests"
 	@echo "  test-early-console Run host-side boot command line and registry unit tests"
 	@echo "  test-sbi Run host-side SBI capability and DBCN unit tests"
 	@echo "  test-printk Run host-side early Printk buffer and replay unit tests"

@@ -53,6 +53,14 @@ object MemoryNode: MemoryNodeType {
                     MemBlock.state == State::Online;
                 }
 
+                drives {
+                    self::DMA32Zone.Transition::Enable;
+                    self::NormalZone.Transition::Enable;
+                    self::MovableZone.Transition::Enable;
+                    self::MemMap.Transition::Enable;
+                    self::ZoneLists.Transition::Enable;
+                }
+
                 establishes {
                     memory_node_covers_memblock_memory(
                         self,

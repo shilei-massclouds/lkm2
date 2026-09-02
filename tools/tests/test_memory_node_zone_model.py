@@ -761,7 +761,9 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
             (REPOSITORY / "tools/tests/test_buddy_system_model.py").exists()
         )
 
-    def test_early_boot_order_and_checkpoint_mappings_remain_unchanged(self) -> None:
+    def test_early_boot_drives_only_memory_node_and_preserves_checkpoint_mappings(
+        self,
+    ) -> None:
         early_boot_module = self.modules[("phases", "start_kernel", "early_boot")]
         early_boot = early_boot_module.objects[0]
         enter = next(
@@ -782,6 +784,7 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
                 "MemBlockReserved",
                 "MemBlock",
                 "SwapperPageTable",
+                "MemoryNode",
                 "Cpu0Scheduler",
                 "InterruptControlRef",
             ),
@@ -789,8 +792,31 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
         early_boot_source = (
             REPOSITORY / "model/phases/start_kernel/early_boot.spec"
         ).read_text(encoding="utf-8")
-        for name in ("MemoryNode", "DMA32Zone", "NormalZone", "MovableZone"):
+        for name in (
+            "DMA32Zone",
+            "NormalZone",
+            "MovableZone",
+            "FreeArea",
+            "MemMap",
+            "ZoneLists",
+        ):
             self.assertNotIn(name, early_boot_source)
+
+        memory_node = self.objects["MemoryNode"]
+        memory_node_drives = _block(_enable(memory_node), "drives").signals
+        self.assertEqual(
+            tuple(_target_name(signal.target)[-1] for signal in memory_node_drives),
+            ("DMA32Zone", "NormalZone", "MovableZone", "MemMap", "ZoneLists"),
+        )
+        for zone_name in ("DMA32Zone", "NormalZone", "MovableZone"):
+            with self.subTest(zone=zone_name):
+                zone_drives = _block(
+                    _enable(self.objects[zone_name]), "drives"
+                ).signals
+                self.assertEqual(
+                    tuple(_target_name(signal.target)[-1] for signal in zone_drives),
+                    ("FreeArea",),
+                )
 
         counts = []
         for filename in (

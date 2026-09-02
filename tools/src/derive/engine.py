@@ -804,7 +804,16 @@ class _Execution:
         self.user_runtime_signal_cursors: dict[tuple[str, ...], int] = {}
         self.event_flows: list[DerivationEventFlow] = []
         self.states = _states(model)
+        # Candidate states of owners whose nested drives are currently being
+        # evaluated.  Like pending_facts, these are scoped to the child call
+        # and are discarded when the owner transaction fails.
+        self.pending_states: dict[tuple[str, ...], tuple[str, ...] | None] = {}
         self.facts: set[DerivationFact] = set()
+        # Predicate facts established by an active owner are visible to its
+        # nested drives while the owner's transaction is in flight.  They are
+        # never committed here; the owning frame still publishes them only
+        # after all drives/ensures/invariants succeed.
+        self.pending_facts: set[DerivationFact] = set()
         self.tuples: set[DerivationTuple] = set()
         self.context.tuples = self.tuples
         self.context.query_tuples = self.tuples
@@ -1690,6 +1699,37 @@ class _Execution:
             self.failure = failure
         return failure
 
+    def _pending_handler_facts(
+        self,
+        expressions: tuple[ModelExpression, ...],
+        module: tuple[str, ...],
+        source: tuple[str, ...],
+        bindings: dict[str, DerivationTerm | ModelExpression],
+        values: dict[tuple[tuple[str, ...], str], tuple[str, ...]],
+    ) -> set[DerivationFact]:
+        """Normalize positive predicate establishes for nested-drive visibility.
+
+        The ordinary handler path performs the authoritative normalization
+        after drives.  This helper is deliberately best-effort: unsupported
+        expressions are left for that authoritative path to diagnose, while
+        simple predicates (the owner/child memory-layout contracts in
+        particular) become visible to the child transaction.
+        """
+
+        pending: set[DerivationFact] = set()
+        for expression in expressions:
+            if self.context.relation_call(expression, module) is not None:
+                continue
+            try:
+                pending.add(
+                    self.context.normalize_fact(
+                        expression, module, source, bindings, values
+                    )
+                )
+            except _UnsupportedExpression:
+                continue
+        return pending
+
     @staticmethod
     def _resolution_failure_code(feature: str) -> str:
         if feature.startswith("CurrentTaskRef"):
@@ -2308,8 +2348,8 @@ class _Execution:
                             passed = self.context.evaluate(
                                 expression,
                                 module,
-                                self.states,
-                                self.facts,
+                                self.states | self.pending_states,
+                                self.facts | self.pending_facts,
                                 model_object.name,
                                 frame.bindings,
                                 self.values,
@@ -2411,6 +2451,20 @@ class _Execution:
                 frame.entered = True
 
             controls = self._control_items(handler)
+            pending_values = dict(self.values)
+            pending_values.update(frame.staged_values or {})
+            pending_facts = self._pending_handler_facts(
+                tuple(
+                    expression
+                    for block in handler.blocks
+                    if block.kind == "establishes"
+                    for expression in block.expressions
+                ),
+                module,
+                model_object.name,
+                frame.bindings,
+                pending_values,
+            )
             if frame.control_index < len(controls):
                 control = controls[frame.control_index]
                 frame.control_index += 1
@@ -2478,7 +2532,15 @@ class _Execution:
                         return
                     continue
 
-                frame.drives.append(self.run_unit(child_event, "drive", child_path))
+                previous_pending = self.pending_facts
+                self.pending_facts = previous_pending | pending_facts
+                try:
+                    completed_drive = self.run_unit(
+                        child_event, "drive", child_path
+                    )
+                finally:
+                    self.pending_facts = previous_pending
+                frame.drives.append(completed_drive)
                 if self.failure is not None:
                     self._abort_frame(runtime, "stopped", None)
                     return
@@ -2542,8 +2604,8 @@ class _Execution:
                     passed = self.context.evaluate(
                         expression,
                         module,
-                        self.states,
-                        self.facts,
+                        self.states | self.pending_states,
+                        self.facts | self.pending_facts,
                         model_object.name,
                         frame.bindings,
                         candidate_values,
@@ -2612,7 +2674,7 @@ class _Execution:
                 )
                 staged_facts.add(fact)
 
-            candidate_facts = self.facts | staged_facts
+            candidate_facts = self.facts | self.pending_facts | staged_facts
             invariant_expressions = tuple(
                 expression for block in state.invariants for expression in block
             )
@@ -2628,7 +2690,7 @@ class _Execution:
                     passed = self.context.evaluate(
                         expression,
                         module,
-                        self.states,
+                        self.states | self.pending_states,
                         candidate_facts,
                         model_object.name,
                         frame.bindings,
@@ -3430,8 +3492,8 @@ class _Execution:
                     passed = self.context.evaluate(
                         expression,
                         module,
-                        self.states,
-                        self.facts,
+                        self.states | self.pending_states,
+                        self.facts | self.pending_facts,
                         model_object.name,
                         bindings,
                         self.values,
@@ -3538,6 +3600,16 @@ class _Execution:
                 )
             )
 
+        pending_values = dict(self.values)
+        pending_values.update(staged_value_updates)
+        pending_facts = self._pending_handler_facts(
+            expressions["establishes"],
+            module,
+            model_object.name,
+            bindings,
+            pending_values,
+        )
+
         controls: list[
             ModelSignal | ModelHandlerBlock | DerivationDirective
         ] = []
@@ -3621,14 +3693,23 @@ class _Execution:
                     deferred_bindings = self._bind_handler(
                         child_event, child_handler
                     )
-            drives.append(
-                self.run_unit(
+            previous_pending = self.pending_facts
+            previous_states = self.pending_states
+            self.pending_facts = previous_pending | pending_facts
+            self.pending_states = dict(previous_states)
+            if candidate_state is not None:
+                self.pending_states[event.target] = candidate_state
+            try:
+                completed_drive = self.run_unit(
                     child_event,
                     "drive",
                     f"{path}.drives[{drive_index}]",
                     defer_resumes=defer_child_resumes,
                 )
-            )
+            finally:
+                self.pending_facts = previous_pending
+                self.pending_states = previous_states
+            drives.append(completed_drive)
             if defer_child_resumes:
                 deferred_resume_units.append(
                     (drive_index, deferred_signals, deferred_bindings)
@@ -3657,6 +3738,7 @@ class _Execution:
                 )
 
         candidate_states = dict(self.states)
+        candidate_states.update(self.pending_states)
         if candidate_state is not None:
             candidate_states[event.target] = candidate_state
         candidate_values = dict(self.values)
@@ -3707,7 +3789,7 @@ class _Execution:
                     expression,
                     module,
                     candidate_states,
-                    self.facts,
+                    self.facts | self.pending_facts,
                     model_object.name,
                     bindings,
                     candidate_values,
@@ -3761,7 +3843,7 @@ class _Execution:
             )
             staged_facts.add(fact)
 
-        candidate_facts = self.facts | staged_facts
+        candidate_facts = self.facts | self.pending_facts | staged_facts
         checked_state_name = (
             self.states[event.target]
             if candidate_state is None
