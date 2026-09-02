@@ -51,3 +51,12 @@ MemMap/page-state backing 与 Buddy block-record backing。两类区间均继续
 handoff 事实；MemBlock 保持 Online，但 handoff 后 `allocate_phys`/`free_phys` 拒绝改变其
 Reserved 集合。未保留且落在 node/zone envelope 内的完整页由 PageAllocator 依据最大对齐块
 种入 FreeArea，metadata、洞和 envelope 外地址不会被释放。
+
+## `memblock_dump_all` 观测
+
+Linux sibling 在 `misc_mem_init()` 的 `zone_sizes_init()` 之后调用 `memblock_dump_all()`。本实现
+用 model 的 `MemBlock.Action::DumpAll` 只冻结这个调用顺序；model 不描述日志消息、格式或输出
+通道。coding/impl 必须在 MemoryNode 后、PageAllocator handoff 前执行该边界，并沿用 sibling 的
+`memblock=debug` 条件：输出 Memory/Reserved 的总字节数、范围数量及每个规范化半开区间；输出
+失败必须沿早期启动的 fail-stop 规则处理。内部区间仍是半开区间，日志末端按 sibling 的
+`base + size - 1` 形式展示。该诊断不改变 MemBlock 状态、Reserved 集合或任何 checkpoint ABI。

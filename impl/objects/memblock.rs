@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+use core::fmt::{self, Write};
+
 use super::dtb_blob::DtbBlob;
 
 const FDT_BEGIN_NODE: u32 = 1;
@@ -103,6 +105,13 @@ impl<const CAPACITY: usize> RegionSet<CAPACITY> {
         self.len
     }
 
+    fn total_size(&self) -> u64 {
+        self.regions[..self.len]
+            .iter()
+            .map(|range| range.end - range.base)
+            .fold(0_u64, u64::saturating_add)
+    }
+
     fn get(&self, index: usize) -> Option<PhysRange> {
         self.regions
             .get(index)
@@ -170,6 +179,56 @@ impl<const CAPACITY: usize> RegionSet<CAPACITY> {
 pub(crate) struct RangeCheckpointObservation {
     count: u64,
     digest: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemBlockDumpError<E> {
+    Sink(E),
+    LineTooLong,
+}
+
+struct DumpLine {
+    bytes: [u8; 192],
+    len: usize,
+}
+
+impl DumpLine {
+    const fn new() -> Self {
+        Self {
+            bytes: [0; 192],
+            len: 0,
+        }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl Write for DumpLine {
+    fn write_str(&mut self, value: &str) -> fmt::Result {
+        let end = self
+            .len
+            .checked_add(value.len())
+            .filter(|end| *end <= self.bytes.len())
+            .ok_or(fmt::Error)?;
+        self.bytes[self.len..end].copy_from_slice(value.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+
+fn emit_dump_line<F, E>(
+    sink: &mut F,
+    arguments: fmt::Arguments<'_>,
+) -> Result<(), MemBlockDumpError<E>>
+where
+    F: FnMut(&[u8]) -> Result<(), E>,
+{
+    let mut line = DumpLine::new();
+    line.write_fmt(arguments)
+        .map_err(|_| MemBlockDumpError::LineTooLong)?;
+    sink(line.as_bytes()).map_err(MemBlockDumpError::Sink)
 }
 
 impl RangeCheckpointObservation {
@@ -477,6 +536,76 @@ impl MemBlock {
             memory: self.memory.checkpoint_observation(),
             reserved: observe_ranges(self.checkpoint_reserved_ranges()),
         }
+    }
+
+    /// Emit the diagnostic equivalent of Linux's `memblock_dump_all()`.
+    ///
+    /// The caller supplies the output sink so this object remains independent
+    /// of the concrete Printk/Console transport.  `enabled` mirrors Linux's
+    /// `memblock_debug` early parameter: the call boundary is fixed even when
+    /// the diagnostic is disabled, but no bytes are emitted in that case.
+    pub(crate) fn dump_all<F, E>(
+        &self,
+        enabled: bool,
+        mut sink: F,
+    ) -> Result<(), MemBlockDumpError<E>>
+    where
+        F: FnMut(&[u8]) -> Result<(), E>,
+    {
+        if !enabled {
+            return Ok(());
+        }
+
+        emit_dump_line(&mut sink, format_args!("MEMBLOCK configuration:\n"))?;
+        emit_dump_line(
+            &mut sink,
+            format_args!(
+                " memory size = 0x{:x} reserved size = 0x{:x}\n",
+                self.memory.regions.total_size(),
+                self.reserved.regions.total_size(),
+            ),
+        )?;
+        emit_dump_line(
+            &mut sink,
+            format_args!(" memory.cnt  = 0x{:x}\n", self.memory.region_count()),
+        )?;
+        for (index, range) in self.memory.regions.regions[..self.memory.regions.len]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            emit_dump_line(
+                &mut sink,
+                format_args!(
+                    " memory[{}]  [0x{:x}-0x{:x}], 0x{:x} bytes\n",
+                    index,
+                    range.base,
+                    range.end.saturating_sub(1),
+                    range.end - range.base,
+                ),
+            )?;
+        }
+        emit_dump_line(
+            &mut sink,
+            format_args!(" reserved.cnt = 0x{:x}\n", self.reserved.region_count()),
+        )?;
+        for (index, range) in self.reserved.regions.regions[..self.reserved.regions.len]
+            .iter()
+            .copied()
+            .enumerate()
+        {
+            emit_dump_line(
+                &mut sink,
+                format_args!(
+                    " reserved[{}] [0x{:x}-0x{:x}], 0x{:x} bytes\n",
+                    index,
+                    range.base,
+                    range.end.saturating_sub(1),
+                    range.end - range.base,
+                ),
+            )?;
+        }
+        Ok(())
     }
 
     /// Allocate a physically contiguous range from the highest suitable
@@ -1268,6 +1397,38 @@ mod tests {
         );
         assert_eq!(observation.count(), 1);
         assert_eq!(observation.digest(), 0x8820_31b9_60ff_82fb);
+    }
+
+    #[test]
+    fn dump_all_is_debug_gated_and_contains_normalized_ranges() {
+        let bytes = make_fdt(true, false);
+        let dtb = DtbBlob::from_bytes(&bytes).unwrap();
+        let memory = MemBlockMemory::derive_from_dtb(&dtb).unwrap();
+        let memblock =
+            MemBlock::setup_bootmem(memory, &dtb, 0x8040_0000, (0x8010_0000, 0x1000)).unwrap();
+        let mut disabled = Vec::new();
+        memblock
+            .dump_all(false, |line| {
+                disabled.extend_from_slice(line);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        assert!(disabled.is_empty());
+
+        let mut output = Vec::new();
+        memblock
+            .dump_all(true, |line| {
+                output.extend_from_slice(line);
+                Ok::<(), ()>(())
+            })
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.starts_with("MEMBLOCK configuration:\n"));
+        assert!(output.contains(" memory size = 0x8000000"));
+        assert!(output.contains(" memory.cnt  = 0x1"));
+        assert!(output.contains(" memory[0]  [0x80000000-0x87ffffff], 0x8000000 bytes"));
+        assert!(output.contains(" reserved.cnt = 0x4"));
+        assert!(output.contains(" reserved[0] [0x80100000-0x80100fff], 0x1000 bytes"));
     }
 
     #[test]

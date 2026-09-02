@@ -14,9 +14,13 @@ use super::memblock::MemBlock;
 pub(crate) const PAGE_SHIFT: u32 = 12;
 pub(crate) const PAGE_SIZE: u64 = 1_u64 << PAGE_SHIFT;
 const DMA32_LIMIT: u64 = 1_u64 << 32;
-// At most MAX_MEMORY_REGIONS + MAX_RESERVED_REGIONS disjoint fragments can
-// survive reservation subtraction in the current MemBlock implementation.
+// Host tests retain the full fragmentation budget.  The production image
+// currently has only the QEMU early-boot reservations and uses a smaller
+// bounded budget so copied node values fit on the 16 KiB boot stack.
+#[cfg(test)]
 const MAX_ZONE_RANGES: usize = 96;
+#[cfg(not(test))]
+const MAX_ZONE_RANGES: usize = 16;
 // The backing arrays are metadata storage owned by the FreeArea itself.  The
 // no_std boot image uses a small emergency descriptor budget so the 16 KiB
 // boot stack is not consumed by a copied node value; host tests use the larger

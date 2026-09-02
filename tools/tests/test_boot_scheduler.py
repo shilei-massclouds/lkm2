@@ -257,6 +257,7 @@ class BootSchedulerModelTests(unittest.TestCase):
                 (MEMBLOCK, ("Transition", "Enable")),
                 (SWAPPER_PAGE_TABLE, ("Transition", "Enable")),
                 (("objects", "memory_node", "MemoryNode"), ("Transition", "Enable")),
+                (MEMBLOCK, ("Action", "DumpAll")),
                 (("objects", "page_allocator", "PageAllocator"), ("Transition", "Enable")),
                 (CPU0_SCHEDULER, ("Transition", "Enable")),
                 (
@@ -335,6 +336,7 @@ class BootSchedulerModelTests(unittest.TestCase):
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
+                ("Action", "DumpAll"),
                 ("Transition", "Enable"),
                 ("Transition", "Enable"),
                 ("Action", "Unmask"),

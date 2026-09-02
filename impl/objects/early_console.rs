@@ -62,6 +62,12 @@ impl BootCommandLine {
         unsafe { core::str::from_utf8_unchecked(&self.bytes[..self.len]) }
     }
 
+    pub(crate) fn has_token(&self, token: &str) -> bool {
+        self.as_str()
+            .split_ascii_whitespace()
+            .any(|candidate| candidate == token)
+    }
+
     fn earlycon_name(&self) -> Result<&str, BootCommandLineError> {
         self.as_str()
             .split_ascii_whitespace()
@@ -195,6 +201,16 @@ mod tests {
     fn parses_valid_bootargs_and_other_arguments() {
         let command_line = parse_bootargs(b"root=/dev/vda earlycon=sbi quiet\0").unwrap();
         assert_eq!(command_line.as_str(), "root=/dev/vda earlycon=sbi quiet");
+        assert!(command_line.has_token("earlycon=sbi"));
+        assert!(!command_line.has_token("memblock=debug"));
+    }
+
+    #[test]
+    fn recognizes_memblock_debug_as_an_exact_token() {
+        let command_line = parse_bootargs(b"earlycon=sbi memblock=debug quiet\0").unwrap();
+        assert!(command_line.has_token("memblock=debug"));
+        assert!(!command_line.has_token("xmemblock=debug"));
+        assert!(!command_line.has_token("memblock=debugger"));
     }
 
     #[test]

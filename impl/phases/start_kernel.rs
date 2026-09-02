@@ -41,6 +41,7 @@ pub(crate) extern "C" fn start_kernel() -> ! {
         Ok(command_line) => command_line,
         Err(_) => fail_stop(),
     };
+    let memblock_debug = command_line.has_token("memblock=debug");
     configure_page_table_diagnostics(command_line.as_str());
     let memory = match MemBlockMemory::derive_from_dtb(&dtb_blob) {
         Ok(memory) => memory,
@@ -105,6 +106,12 @@ pub(crate) extern "C" fn start_kernel() -> ! {
         Ok(node) => node,
         Err(_) => fail_stop(),
     };
+    if memblock
+        .dump_all(memblock_debug, |line| printk.record(line))
+        .is_err()
+    {
+        fail_stop();
+    }
     let mut page_allocator = PageAllocator::new();
     if page_allocator
         .enable(&mut memory_node, &mut memblock)

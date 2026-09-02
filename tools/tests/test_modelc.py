@@ -1127,7 +1127,7 @@ object Probe: T {}
             ("depends_on", "drives", "ensures", "establishes"),
         )
         drives = next(block for block in enter.blocks if block.kind == "drives")
-        self.assertEqual(len(drives.signals), 12)
+        self.assertEqual(len(drives.signals), 13)
         self.assertFalse(
             any(
                 item.name[-1] == "EarlyBootType"

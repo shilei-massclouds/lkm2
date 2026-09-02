@@ -199,6 +199,7 @@ class MemBlockModelTests(unittest.TestCase):
                 "MemBlock",
                 "SwapperPageTable",
                 "MemoryNode",
+                "MemBlock",
                 "PageAllocator",
                 "Cpu0Scheduler",
                 "InterruptControl",

@@ -390,7 +390,15 @@ class PageAllocatorModelTests(unittest.TestCase):
             for index, signal in enumerate(drives.signals)
             if _target_name(signal.target)[-1] == "MemoryNode"
         )
-        self.assertEqual(allocator_index, memory_node_index + 1)
+        self.assertEqual(allocator_index, memory_node_index + 2)
+        self.assertEqual(
+            _target_name(drives.signals[memory_node_index + 1].target)[-1],
+            "MemBlock",
+        )
+        self.assertEqual(
+            drives.signals[memory_node_index + 1].signal,
+            ("Action", "DumpAll"),
+        )
 
     def test_default_derivation_enables_allocator_after_handoff(self) -> None:
         with (REPOSITORY / "tools/signals/parked.signals").open(

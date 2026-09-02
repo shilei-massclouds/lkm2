@@ -33,6 +33,8 @@ type MemBlockType {
 
     state State::Online {
         actions {
+            /* Observation only; the implementation emits the diagnostic. */
+            on Action::DumpAll;
             on Action::FreeAll;
         }
     }
@@ -87,6 +89,12 @@ object MemBlock: MemBlockType {
         }
 
         actions {
+            /* Observation only; the implementation emits the diagnostic. */
+            override on Action::DumpAll {
+                depends_on {
+                    MemBlock.state == State::Online;
+                }
+            }
             override on Action::FreeAll {
                 establishes {
                     memblock_free_all_completed();

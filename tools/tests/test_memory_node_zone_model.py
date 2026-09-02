@@ -785,6 +785,7 @@ class MemoryNodeZoneModelTests(unittest.TestCase):
                 "MemBlock",
                 "SwapperPageTable",
                 "MemoryNode",
+                "MemBlock",
                 "PageAllocator",
                 "Cpu0Scheduler",
                 "InterruptControlRef",

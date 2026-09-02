@@ -50,6 +50,7 @@ object EarlyBoot: PhaseType {
                     MemBlock.Transition::Enable;
                     SwapperPageTable.Transition::Enable;
                     MemoryNode.Transition::Enable;
+                    MemBlock.Action::DumpAll;
                     PageAllocator.Transition::Enable;
                     Cpu0Scheduler.Transition::Enable;
                     CurrentCPU.InterruptControlRef.Action::Unmask;

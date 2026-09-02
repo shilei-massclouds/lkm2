@@ -13,12 +13,18 @@ EarlyBoot 只有一个 `Enter` 动作，固定按以下顺序展开：
 5. 通过链接期 `EarlyConTable` 查询 backend，启用并注册 SbiConsole，回放 banner；
 6. 提交 `MemBlockReserved` 与 `MemBlock` Online；
 7. 建立并切换 `SwapperPageTable`；
-8. 在 MemoryNode 后启用 PageAllocator，完成 MemBlock 到 Buddy 的 handoff；
-9. 启用 CPU0 Scheduler；
-10. 执行当前 CPU 的 local IRQ Unmask，并建立 EarlyBoot 交接事实。
+8. 在 MemoryNode 后调用 `MemBlock::dump_all` 对应的实现观测动作；
+9. 再启用 PageAllocator，完成 MemBlock 到 Buddy 的 handoff；
+10. 启用 CPU0 Scheduler；
+11. 执行当前 CPU 的 local IRQ Unmask，并建立 EarlyBoot 交接事实。
 
 Memory 必须在 SBI probe 前成功。任何一步失败都保持中断屏蔽并 fail-stop，
 已经完成的前序值不回滚。
+
+`MemBlock.Action::DumpAll` 是 model 中唯一用于约束该调用位置的无状态观测动作：它固定发生在
+`MemoryNode.Enable` 完成后、`PageAllocator.Enable` 开始前，不推进任何 MemBlock 状态，也不生成
+canonical checkpoint。实现层的 `MemBlock::dump_all` 只在 bootargs 含有 `memblock=debug` 时向已注册
+的 Printk/Console 输出；未启用该选项时仍执行同一调用边界但不产生字节。
 
 当前 Rust 只实现 DBCN，不实现模型保留的 SBI v0.1 fallback。BootCommandLine 固定最多 4096
 字节，要求 NUL 结尾、无内嵌 NUL、UTF-8，并且恰好包含一个独立 `earlycon=sbi` token。backend
